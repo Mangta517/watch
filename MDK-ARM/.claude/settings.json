@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -o -E \"\\(my_i2c|my_i2c \\\\.h|common[\\\\\\\\\\\\\\\\/][^\\\\\"<]*\\)\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\MDK-ARM\"/*.uvprojx)",
+      "Bash(powershell -Command \"Get-ChildItem -Path 'C:\\\\','D:\\\\' -Filter 'UV4.exe' -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 3 -ExpandProperty FullName\")",
+      "PowerShell(Start-Process -FilePath \"D:\\\\32 51\\\\51\\\\UV4\\\\UV4.exe\" -ArgumentList '-b','\"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\MDK-ARM\\\\f411ceu6.uvprojx\"','-j0','-o','\"build_check.log\"' -Wait)",
+      "Read(//d/32 51/flight/flight_hal/MDK-ARM/interface/**)",
+      "Read(//d/32 51/flight/flight_hal/MDK-ARM/**)",
+      "Read(//d/3251/flight/flight_hal/MDK-ARM/interface/**)",
+      "Bash(grep -rn \"Gyro_struct\\\\|Accel_struct\" \"D:\\\\3251\\\\flight\\\\flight_hal\\\\MDK-ARM\" --include=*.h -l 2>/dev/null; echo ===IOC; grep -i \"PB12\\\\|EXTI\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\f411ceu6.ioc\" | head; echo ===IT_C; grep -n \"EXTI\\\\|IRQHandler\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\Core\\\\Src\\\\stm32f4xx_it.c\" | head -20; echo ===RTOS; grep -rn \"osKernelStart\\\\|vTaskStartScheduler\\\\|osThreadNew\\\\|xTaskCreate\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\Core\\\\Src\\\\main.c\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\application\" 2>/dev/null | head)",
+      "Bash(grep -n \"MPU6050_INT\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\Core\\\\Inc\\\\main.h\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\Core\\\\Src\\\\gpio.c\"; echo ===; sed -n '/MPU6050_INT_Pin/,+7p' \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\Core\\\\Src\\\\gpio.c\"; echo ===GROUP; grep -B2 -A6 \"mpu6050\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\MDK-ARM\\\\f411ceu6.uvprojx\" | head -30; echo ===MAIN; grep -n \"USER CODE 2\\\\|MX_\\\\|App_\" \"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\Core\\\\Src\\\\main.c\" | head -20)",
+      "Bash(grep -B3 -A8 \"Gyro_struct\\\\|Accel_struct\\\\|Accel_Gyro\" \"D:\\\\3251\\\\flight\\\\flight_hal\\\\MDK-ARM\\\\common\\\\common_config.h\" | head -40)",
+      "Read(//d/32 51/flight/flight_hal/MDK-ARM/common/**)",
+      "PowerShell(Start-Process -FilePath \"D:\\\\32 51\\\\51\\\\UV4\\\\UV4.exe\" -ArgumentList '-r','\"D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\MDK-ARM\\\\f411ceu6.uvprojx\"','-j0','-o','\"build_check.log\"' -Wait)",
+      "Bash(powershell -Command \"Get-Item interface\\\\mpu6050.c, application\\\\app_ui.c, common\\\\my_i2c.c, Core\\\\Src\\\\gpio.c, MDK-ARM\\\\f411ceu6\\\\f411ceu6.hex -ErrorAction SilentlyContinue | Select-Object Name,LastWriteTime | Format-Table -AutoSize\")",
+      "Bash(powershell -Command \"Get-Item 'D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\application\\\\app_task.c','D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\interface\\\\mpu6050.h','D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\interface\\\\touch.c','D:\\\\32 51\\\\f411ceu6\\\\f411ceu6\\\\f411ceu6.ioc' | Select-Object Name,LastWriteTime\")"
+    ],
+    "additionalDirectories": [
+      "D:\\32 51\\f411ceu6\\f411ceu6\\common",
+      "D:\\32 51\\f411ceu6\\f411ceu6\\Core\\Src",
+      "D:\\32 51\\f411ceu6\\f411ceu6\\interface"
+    ]
+  }
+}

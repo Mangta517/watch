@@ -1,0 +1,38 @@
+# ---- Keil MDK 构建产物 ----
+MDK-ARM/f411ceu6/
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+MDK-ARM/_f411ceu6/
+
+# 编译/汇编输出扩展名 (双保险, 防止产物散落在工程目录)
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.bin
+*.map
+*.lnp
+*.htm
+*.dep
+*.lst
+
+# ---- Keil 用户/调试个性化配置 (每人不同, 不入库) ----
+*.uvguix.*
+MDK-ARM/DebugConfig/
+!MDK-ARM/**/DebugConfig/*.dbgdt
+
+# ---- 构建日志 ----
+*.log
+*.log.lock
+build_check.log
+build_log.txt
+
+# ---- 编辑器/工具本地缓存 ----
+MDK-ARM/.vscode/
+.vscode/
+*.u2t
+*.u2t.bak
+
+# 保留项目级 Claude 配置 (团队共享规则)
+!MDK-ARM/.claude/settings.json
