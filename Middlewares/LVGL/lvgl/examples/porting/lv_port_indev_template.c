@@ -33,6 +33,10 @@ void lv_port_indev_init(void)
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = touchpad_read;
+    /* Accumulate displacement even when CST816 repeats a coordinate between
+     * scans. Otherwise LVGL's velocity gate drops slow horizontal swipes. */
+    indev_drv.gesture_min_velocity = 0;
+    indev_drv.gesture_limit = 40;
     indev_touchpad = lv_indev_drv_register(&indev_drv);
 }
 

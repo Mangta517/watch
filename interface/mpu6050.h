@@ -7,14 +7,15 @@
  *
  * 中断说明：数据就绪中断已使能 —— 器件 INT_PIN_CFG(0x37)=0x20
  *          (高有效/推挽/锁存, 读 0x3A 清除), INT_ENABLE(0x38)=0x01(DATA_RDY)；
- *          INT 接 PB12, CubeMX 已配 EXTI 上升沿, ISR 中读 0x3A 释放锁存。
+ *          INT 接 PB12, ISR 只记事件，sensor 任务读 0x3A 释放锁存。
  ******************************************************************************
  */
 #ifndef __MPU6050_H
 #define __MPU6050_H
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 #include "main.h"
@@ -80,6 +81,14 @@ extern "C" {
 #define MPU6050_ACCEL_RANGE_8G     0x10
 #define MPU6050_ACCEL_RANGE_16G    0x18
 
+/* 手表运动档：寄存器配置与解算/校准共同引用，改量程时须同步灵敏度。 */
+#define MPU6050_GYRO_RANGE         MPU6050_GYRO_RANGE_1000DPS
+#define MPU6050_ACCEL_RANGE        MPU6050_ACCEL_RANGE_4G
+#define MPU6050_GYRO_LSB_PER_DPS   32.8f
+#define MPU6050_ACCEL_LSB_PER_G    8192
+#define MPU6050_SAMPLE_PERIOD_MS   10U  /* DLPF启用时1kHz/(9+1)=100Hz */
+#define MPU6050_DLPF_CFG           0x03 /* 陀螺仪42Hz、加速度44Hz */
+
 /* ------------------------------------------------------------ 数据结构 */
 typedef struct
 {
@@ -107,7 +116,7 @@ typedef struct
 /* 初始化 MPU6050 (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR)) */
 uint8_t my_mpu6050_init(void);
 
-/* 零偏校准：要求静止时调用(阻塞约0.6~3s，内部 vTaskDelay，须在任务上下文)。
+/* 零偏校准：要求静止水平，正常约2s；等待稳定最多3s，内部vTaskDelay。
  * 不在上电初始化时自动执行；返回 0=校准完成, 1=超时放弃(保留原偏移)       */
 uint8_t my_mpu6050_zero_offset(void);
 
@@ -123,20 +132,20 @@ uint8_t my_mpu6050_read_reg(uint8_t reg, uint8_t *data);
 uint8_t my_mpu6050_get_gyro(Gyro_struct *gyro);
 /* 读取三轴加速度(已减零偏，抖动较大，必要时上层再滤波) */
 uint8_t my_mpu6050_get_accel(Accel_struct *accel);
-/* 一次突发读取加速度+温度+陀螺仪共 14 字节 */
+/* 一次突发读取 INT_STATUS+加速度+温度+陀螺仪共 15 字节；仅 sensor 任务调用 */
 uint8_t my_mpu6050_get_data(Accel_Gyro_struct *accel_gyro);
 /* 读片内温度传感器, 输出 0.01℃ 定点 (T = raw/340 + 36.53) */
 uint8_t my_mpu6050_get_temp(int16_t *temp_01c);
 
 /* ---------------------------------------- 数据就绪中断 (PB12 EXTI 上升沿) */
-/* ISR: 读器件 INT_STATUS(0x3A) 释放锁存 + 置标志；HAL 内部已清 EXTI PR。   */
+/* ISR 只置标志/计边沿；器件锁存在 get_data 的任务事务中释放。 */
 
 /* 任务上下文查询并清除"数据就绪"标志: 1=发生过(已清), 0=无。
  * 注意: 标志只有 1 位, 同一时刻窗口内多个中断会合并成一个, 不能用来计频! */
 uint8_t my_mpu6050_int_check_clear(void);
-/* ISR 边沿计数快照 (计频用: (now-last) 的无符号差分, 不受合并影响) */
+/* ISR 边沿计数快照；INT 锁存期间 DATA_RDY 合并，不能代表器件采样率 */
 uint16_t my_mpu6050_int_count(void);
-/* 取 ISR 读回的 INT_STATUS 快照 (bit0=DATA_RDY) */
+/* 取 sensor 任务读回的 INT_STATUS 快照 (bit0=DATA_RDY) */
 uint8_t my_mpu6050_get_int_status(void);
 
 #ifdef __cplusplus

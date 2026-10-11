@@ -27,6 +27,7 @@ MDK-ARM/DebugConfig/
 *.log.lock
 build_check.log
 build_log.txt
+tests/ui/output/
 
 # ---- 编辑器/工具本地缓存 ----
 MDK-ARM/.vscode/

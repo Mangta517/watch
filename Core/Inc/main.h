@@ -68,6 +68,10 @@ void Error_Handler(void);
 #define SENSOR_SDA_GPIO_Port GPIOB
 #define SENSOR_SCL_Pin GPIO_PIN_14
 #define SENSOR_SCL_GPIO_Port GPIOB
+#define EEPROM_SDA_Pin GPIO_PIN_11
+#define EEPROM_SDA_GPIO_Port GPIOA
+#define EEPROM_SCL_Pin GPIO_PIN_12
+#define EEPROM_SCL_GPIO_Port GPIOA
 #define TP_RST_Pin GPIO_PIN_15
 #define TP_RST_GPIO_Port GPIOA
 #define LCD_CLK_Pin GPIO_PIN_3

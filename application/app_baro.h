@@ -34,7 +34,7 @@ void App_Baro_Init(void);
 
 /**
  * @brief 周期服务一轮: 读压力/温度原始值并补偿, 更新快照, 维护在线状态
- *        仅由 sensor 任务体经分频调用 (30ms), 其他上下文勿调
+ *        仅由sensor任务体经分频调用(250ms)，其他上下文勿调
  */
 void App_Baro_Service(void);
 

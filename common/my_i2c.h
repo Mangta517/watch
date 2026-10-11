@@ -1,19 +1,22 @@
 /**
  ******************************************************************************
  * @file    my_i2c.h
- * @brief   软件 I2C（GPIO 模拟）驱动 —— STM32F411CEU6，双总线
+ * @brief   软件 I2C（GPIO 模拟）驱动 —— STM32F411CEU6，三条独立总线
  *
  * 总线分配（引脚定义见 Core/Inc/main.h）：
  *   MY_I2C_BUS_SENSOR : SCL = PB14 (SENSOR_SCL)  SDA = PB13 (SENSOR_SDA)  → MPU6050 等传感器
  *   MY_I2C_BUS_TP     : SCL = PB6  (TP_SCL)      SDA = PB4  (TP_SDA)      → 触摸屏
+ *   MY_I2C_BUS_EEPROM : SCL = PA12 (EEPROM_SCL) SDA = PA11 (EEPROM_SDA) → BL24C02F
  * 模式：SCL 推挽输出；SDA 推挽输出(发送相) / 输入+上拉(读 ACK/数据相) 逐相切换
  *       —— 与 touch.c 实测可用方案一致。开漏+内部上拉的上升沿太缓, 已弃用。
+ *       EEPROM沿用板卡开漏配置，SCL/SDA需外部上拉到3.3V；其他总线保持原实现。
  * 速率：约 100~150 kHz（由 MY_I2C_DELAY_LOOPS 决定）
  * 并发：SDA 方向切换走 GPIOB 非原子 RMW, 已在内部用 PRIMASK 临界区保护,
- *       与 touch.c 及 EXTI ISR 互斥（touch.c 的方向切换同样加了保护）。
+ *       与 touch.c 的方向切换互斥；EXTI ISR 不操作 I2C。
  *
- * 注意：位操作时序要求总线在单次传输期间不被其他任务打断。
- *       与 FreeRTOS/LVGL 多任务共存时，跨任务共用同一总线需自行加互斥保护。
+ * SENSOR 总线在调度器启动后仅由 sensor 任务串行访问；UI 只读快照。
+ * 高优先级触摸任务使用独立 TP 总线，可暂停 SENSOR 时钟但不能访问其引脚。
+ * 若新增同总线使用者，须先改所有调用方的任务级互斥约定，禁止 ISR 直接访问。
  ******************************************************************************
  */
 #ifndef __MY_I2C_H
@@ -26,11 +29,12 @@ extern "C" {
 #include "main.h"
 #include <stdint.h>
 
-/* 可选的两条软件 I2C 总线 */
+/* EEPROM与传感器在调度器启动后均由sensor任务独占；UI只读快照。 */
 typedef enum
 {
     MY_I2C_BUS_SENSOR = 0,   /* PB14=SCL, PB13=SDA, MPU6050 */
     MY_I2C_BUS_TP     = 1,   /* PB6 =SCL, PB4 =SDA, 触摸屏   */
+    MY_I2C_BUS_EEPROM = 2,   /* PA12=SCL, PA11=SDA, EEPROM */
     MY_I2C_BUS_COUNT
 } my_i2c_bus_t;
 
@@ -50,6 +54,9 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
                            const uint8_t *dat, uint16_t len);
 uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
                           uint8_t *dat, uint16_t len);
+
+/* 只发送器件写地址并检查ACK，不写寄存器；用于EEPROM内部写周期轮询。 */
+uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev_addr);
 
 #ifdef __cplusplus
 }

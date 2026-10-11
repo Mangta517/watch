@@ -1,11 +1,12 @@
 /**
  ******************************************************************************
  * @file    my_i2c.c
- * @brief   软件 I2C（GPIO 模拟）驱动 —— STM32F411CEU6，双总线
+ * @brief   软件 I2C（GPIO 模拟）驱动 —— STM32F411CEU6，三条独立总线
  *
  * 总线分配：
  *   MY_I2C_BUS_SENSOR : SCL = PB14 (SENSOR_SCL)  SDA = PB13 (SENSOR_SDA)
  *   MY_I2C_BUS_TP     : SCL = PB6  (TP_SCL)      SDA = PB4  (TP_SDA)
+ *   MY_I2C_BUS_EEPROM : SCL = PA12 (EEPROM_SCL) SDA = PA11 (EEPROM_SDA)，开漏+外部上拉
  *
  * 驱动方式 (与 interface/touch.c 实测可用的 51 风格一致, 取代最初"开漏+内部
  * 上拉"方案 —— 内部上拉 ~40k 的上升沿 RC 在 200kHz 节拍下不满足建立时间,
@@ -36,6 +37,7 @@ static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] =
     { SENSOR_SCL_GPIO_Port, SENSOR_SCL_Pin, SENSOR_SDA_GPIO_Port, SENSOR_SDA_Pin },
     /* TP 总线: 触摸屏 (touch.c 用自己的位翻实现, 本表项为其保留) */
     { TP_SCL_GPIO_Port,     TP_SCL_Pin,     TP_SDA_GPIO_Port,     TP_SDA_Pin     },
+    { EEPROM_SCL_GPIO_Port, EEPROM_SCL_Pin, EEPROM_SDA_GPIO_Port, EEPROM_SDA_Pin },
 };
 
 /* ================================================================ 私有工具 */
@@ -78,9 +80,9 @@ static inline uint8_t sda_read(my_i2c_bus_t bus)
 }
 
 /**
- * @brief 切换 SDA 方向: 0=推挽输出(主机发送), 1=输入+上拉(读 ACK/数据)
+ * @brief 切换SDA方向：0=输出(EEPROM开漏，其余推挽)，1=输入+上拉(读ACK/数据)
  * @note  HAL_GPIO_Init 对 GPIOB 的 MODER/PUPDR 是非原子读-改-写; 本工程的
- *        touch.c 每个字节也在这里切 PB4 方向, EXTI ISR 也会切 PB13 方向 ——
+ *        touch.c 每个字节也会切 PB4 方向, sensor 任务会切 PB13 方向 ——
  *        两边互相可能把对方刚写入的位用旧快照覆盖。故整个切换用 PRIMASK
  *        临界区包住 (保存-恢复式, 任务/ISR 上下文均安全)。
  */
@@ -91,6 +93,10 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
 
     gpio.Pin   = my_i2c_pin[bus].sda_pin;
     gpio.Mode  = as_input ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT_PP;
+    if (!as_input && bus == MY_I2C_BUS_EEPROM)
+    {
+        gpio.Mode = GPIO_MODE_OUTPUT_OD;
+    }
     gpio.Pull  = GPIO_PULLUP;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
 
@@ -101,7 +107,7 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
 
 /* ================================================================ 时序原语 */
 /**
- * @brief 初始化一条软件 I2C 总线: SCL/SDA 推挽输出、空闲释放为高
+ * @brief 初始化软件I2C：EEPROM开漏，其余总线推挽，空闲释放为高
  * @param bus 要初始化的总线
  * @note  需在 HAL_Init()/时钟配置完成后调用; 会覆盖 MX_GPIO_Init 中对应引脚
  *        的推挽初始配置。重复调用无害(幂等)。
@@ -116,12 +122,23 @@ void my_i2c_init(my_i2c_bus_t bus)
         return;
     }
 
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+    if (bus == MY_I2C_BUS_EEPROM)
+    {
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+    }
+    else
+    {
+        __HAL_RCC_GPIOB_CLK_ENABLE();
+    }
 
     /* SCL: 推挽输出, 初始高 (SDA 方向随后由 sda_dir 逐相切换) */
     __disable_irq();
     gpio.Pin   = my_i2c_pin[bus].scl_pin;
     gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    if (bus == MY_I2C_BUS_EEPROM)
+    {
+        gpio.Mode = GPIO_MODE_OUTPUT_OD;
+    }
     gpio.Pull  = GPIO_PULLUP;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(my_i2c_pin[bus].scl_port, &gpio);
@@ -263,6 +280,20 @@ void my_i2c_send_ack(my_i2c_bus_t bus, uint8_t ack)
 }
 
 /* ============================================================ 成块读写封装 */
+uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev_addr)
+{
+    uint8_t result;
+    if (bus >= MY_I2C_BUS_COUNT || dev_addr > 0x7F)
+    {
+        return 1;
+    }
+    my_i2c_start(bus);
+    my_i2c_write_byte(bus, (uint8_t)(dev_addr << 1));
+    result = my_i2c_wait_ack(bus);
+    my_i2c_stop(bus);
+    return result;
+}
+
 /**
  * @brief 连续写多字节：START -> 器件地址(W) -> 寄存器地址 -> 数据... -> STOP
  * @param dev_addr 7 位器件地址（如 MPU6050 为 0x68）

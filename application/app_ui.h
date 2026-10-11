@@ -1,12 +1,7 @@
 /**
-  ******************************************************************************
-  * @file    app_ui.h
-  * @brief   应用层-界面: lv_tabview 主页 (Message/Schedule/Meeting/Clock/IMU)
-  *          IMU 页显示 MPU6050 加速度/角速度/温度与数据就绪中断速率。
-  *          Clock 页演示"时间跳动": lv_label(数字秒跳) + lv_arc(秒环) + lv_timer。
-  *          移植自 D:/3251/f411RET6/Watch 工程 application/app_ui.h。
-  ******************************************************************************
-***/
+ * @file app_ui.h
+ * @brief Dark watch UI: watch, sensors, settings and live sensor detail pages.
+ */
 #ifndef __APP_UI_H
 #define __APP_UI_H
 
@@ -16,8 +11,13 @@ extern "C" {
 
 #include "lvgl.h"
 
-/* 在 lv_port_disp/indev 初始化完成后调用; 内部只建对象不起任务 */
+/* Call once in the display task after display and touch initialization. */
 void App_UI_Create(void);
+
+/* Queue a return to the previous page, preserving its vertical scroll position.
+ * Call in the display task or under App_Display_Lock(); never from an ISR.
+ * KEY_1/PA5 is debounced and connected to this action by the UI timer. */
+void App_UI_Back(void);
 
 #ifdef __cplusplus
 }

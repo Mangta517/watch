@@ -62,9 +62,9 @@ static void tp_delay(void)
 
 /* SDA 方向切换: 输出(主机发送) / 输入+上拉(读 ACK 与数据)
  * 加 PRIMASK 临界区的原因: HAL_GPIO_Init 对 GPIOB 的 MODER/PUPDR 是读-改-写,
- * 而 MPU6050 的 EXTI ISR (common/my_i2c.c 同为推挽+方向切换方案) 会在事务中
- * 切换同端口 PB13 的 MODER/PUPDR 位。若本函数被该 ISR 打断, 回写旧快照会把
- * ISR 刚切好的 PB13 方向覆盖回去 → 两条总线一起出错。临界区让两边互斥。 */
+ * sensor任务也通过common/my_i2c.c切换同端口PB13的方向。高优先级触摸任务
+ * 若打断sensor的读改写，sensor恢复后可能用旧快照覆盖PB4方向。
+ * 两边的短临界区让GPIO寄存器更新互斥；MPU EXTI只置标志，不操作总线。 */
 static void tp_sda_out(void)
 {
     GPIO_InitTypeDef g = {0};
@@ -271,7 +271,7 @@ uint8_t Touch_Init(void)
  * 做一次 "复位+重新探测地址+重关休眠" 自愈; 没有永久放弃的死角 ——
  * 触摸后来才接好/换料也能自动恢复。
  *****************************************************************************/
-#define TP_FAIL_STREAK_RECOVER  200    /* 5ms/次 约 1s */
+#define TP_FAIL_STREAK_RECOVER  200    /* 5ms/次 约1s，与LVGL输入周期一致 */
 static uint32_t s_tp_fail_streak = 0;
 
 uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)

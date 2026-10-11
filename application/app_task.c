@@ -20,18 +20,19 @@
 #include "my_i2c.h"
 #include "mpu6050.h"
 #include "spl006.h"
+#include "lsm303dlhc.h"
 
 /*********************
  *  任务配置
  *********************/
 #define APP_LVGL_TASK_PRIO    3               /* configMAX_PRIORITIES=5 */
 #define APP_LVGL_TASK_STK     1024            /* 字 = 4KB (Watch 工程实测足够跑 UI+刷新) */
-#define APP_LVGL_TASK_PERIOD  5               /* LVGL 心跳周期(ms) */
+#define APP_LVGL_TASK_PERIOD  5               /* 保留原LVGL服务周期(ms) */
 
 #define APP_SENSOR_TASK_PRIO     2            /* 低于 lvgl: UI 响应优先, 采样是后台生产 */
 #define APP_SENSOR_TASK_STK      512          /* 字 = 2KB (IMU 读 + 零偏校准 + 气压读路径) */
-#define APP_SENSOR_TASK_PERIOD   10           /* 采样周期(ms): 软件 I2C 一轮读 ~2ms, 占空 ~20% */
-#define APP_SENSOR_BARO_DIV      10           /* 气压分频: 每 10 拍(100ms)轮询一次, SPL006 已降为 1Hz 背景模式 */
+#define APP_SENSOR_TASK_PERIOD   MPU6050_SAMPLE_PERIOD_MS /* 与MPU100Hz输出一致 */
+#define APP_SENSOR_BARO_DIV      25           /* 气压250ms轮询，器件1Hz */
 
 /**********************
  *  STATIC PROTOTYPES
@@ -51,6 +52,7 @@ void App_Task_Create(void)
     (void)my_mpu6050_init();
     (void)spl006_init();     /* 与 MPU6050 共用 SENSOR 总线, 同样调度器前一次性初始化;
                               * 内含 HAL_Delay(20/50) 复位等待, 失败不阻塞开机 */
+    (void)lsm303dlhc_mag_init(); /* 仅磁力计；后续服务读失败时禁用磁参考 */
     /* 零偏校准 my_mpu6050_zero_offset() 内含 vTaskDelay, 不放这里,
      * 已移到 sensor 任务体首跑时执行 (上电默认静置台架)。 */
 
@@ -67,7 +69,9 @@ void App_Task_Create(void)
 void App_Task_Start(void)
 {
     vTaskStartScheduler();      /* 正常永不返回 */
-    for (;;) { }                /* 调度器异常返回时死守 */
+    for (;;)
+    {
+    }                /* 调度器异常返回时死守 */
 }
 
 /**********************
@@ -81,16 +85,17 @@ static void app_lvgl_task(void *pvParameters)
     /* 硬件拉起 + LVGL 注册 + 建测试界面, 在本任务上下文一次性完成 */
     App_Display_Init();
 
-    for (;;) {
+    for (;;)
+    {
         App_Display_Service();                  /* 锁 → lv_timer_handler → 解锁 */
         vTaskDelay(pdMS_TO_TICKS(APP_LVGL_TASK_PERIOD));
     }
 }
 
-/* 传感器采样任务: SENSOR 总线 (PB13/PB14) 任务级唯一 owner, MPU6050+SPL006
+/* 传感器采样任务: SENSOR 总线 (PB13/PB14) 唯一 owner, MPU6050+SPL006+LSM303DLHC
  * 都只在本任务读写 —— 与 flight 端 flight_task 独占 I2C1 的约定同构。
- * 低频器件不新建任务, 用 static 计数器在本任务内分频 (气压 100ms)。
- * 总线互斥不靠关中断土办法 (驱动内 PRIMASK 临界区只挡 EXTI ISR 抢同一次突发读)。 */
+ * 低频器件不新建任务, 用static计数器在本任务内分频 (气压250ms)。
+ * EXTI 只记标志；GPIOB 的方向寄存器 RMW 保留短 PRIMASK 临界区。 */
 static void app_sensor_task(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -101,20 +106,27 @@ static void app_sensor_task(void *pvParameters)
     App_IMU_Init();
     App_Baro_Init();
 
-    /* 上电零偏校准(第一级): 阻塞约 0.6~3s, 期间内部 vTaskDelay 让出 CPU,
+    /* 上电零偏校准(第一级): 正常约2s，等待稳定最多3s；内部vTaskDelay让出CPU，
      * 只推迟首帧快照, 不影响 lvgl 任务。返回 1=超时放弃(校准时被搬动),
      * 保留原零点继续采样。第二级温漂抑制(静止微调)在 App_IMU_Service 内,
      * 策略同 flight 端 gyro_trim: 检测到静止才逐轮吃掉残余零偏。 */
     (void)my_mpu6050_zero_offset();
+    xLastWakeTime = xTaskGetTickCount(); /* 校准耗时不形成 vTaskDelayUntil 补跑 */
 
-    for (;;) {
+    for (;;)
+    {
         static uint8_t baro_cnt = 0;
 
         App_IMU_Service();
-        if (++baro_cnt >= APP_SENSOR_BARO_DIV)   /* 每 10 拍轮询一次气压 */
+        if (++baro_cnt >= APP_SENSOR_BARO_DIV)   /* 每25拍轮询一次气压 */
         {
             App_Baro_Service();
             baro_cnt = 0;
+        }
+        /* 校准保存会等待EEPROM写周期；错过周期后重新计时，避免连续补跑旧帧。 */
+        if ((TickType_t)(xTaskGetTickCount() - xLastWakeTime) > pdMS_TO_TICKS(APP_SENSOR_TASK_PERIOD))
+        {
+            xLastWakeTime = xTaskGetTickCount();
         }
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(APP_SENSOR_TASK_PERIOD));
     }
@@ -129,5 +141,7 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
     (void)xTask;
     (void)pcTaskName;
     __disable_irq();
-    for (;;) { }
+    for (;;)
+    {
+    }
 }

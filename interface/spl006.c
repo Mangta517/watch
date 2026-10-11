@@ -23,29 +23,16 @@ static int16_t spl006_c30;
 static uint8_t spl006_coef_ready;   /* 1=init 已成功读入系数, process 才可用 */
 
 /* ---------------------------------------------------------- 总线独占保护 */
-/* 与 mpu6050.c 同理: MPU6050 的 PB12 EXTI ISR 会在同一组 SCL/SDA 上读 0x3A,
- * 若中断恰好落在本驱动一次突发读写的中间, 两边时序都会被打断。
- * 因此所有器件事务用 PRIMASK 临界区包住 (保存-恢复式, 任务/ISR 均可安全调用)。 */
+/* 与 MPU6050/LSM303DLHC 同属 sensor 任务串行访问；ISR 不操作 I2C。
+ * GPIO 方向切换仍由 my_i2c 内的短临界区保护，无需整次事务关中断。 */
 static uint8_t spl006_bus_write(uint8_t reg, const uint8_t *dat, uint16_t len)
 {
-    uint32_t primask = __get_PRIMASK();
-    uint8_t  ret;
-
-    __disable_irq();
-    ret = my_i2c_write_bytes(SPL006_I2C_BUS, SPL006_ADDR, reg, dat, len);
-    __set_PRIMASK(primask);
-    return ret;
+    return my_i2c_write_bytes(SPL006_I2C_BUS, SPL006_ADDR, reg, dat, len);
 }
 
 static uint8_t spl006_bus_read(uint8_t reg, uint8_t *dat, uint16_t len)
 {
-    uint32_t primask = __get_PRIMASK();
-    uint8_t  ret;
-
-    __disable_irq();
-    ret = my_i2c_read_bytes(SPL006_I2C_BUS, SPL006_ADDR, reg, dat, len);
-    __set_PRIMASK(primask);
-    return ret;
+    return my_i2c_read_bytes(SPL006_I2C_BUS, SPL006_ADDR, reg, dat, len);
 }
 
 static uint8_t spl006_write_reg(uint8_t reg, uint8_t data)

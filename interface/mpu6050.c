@@ -3,9 +3,9 @@
  * @file    mpu6050.c
  * @brief   MPU6050 驱动实现 —— 软件 I2C (common/my_i2c.c, SENSOR 总线)
  *          移植自旧工程 flight_hal/interface/my_mpu6050.c：
- *          寄存器配置与校准逻辑保持一致；HAL 硬件 I2C 调用替换为 my_i2c 封装。
+ *          手表运动档：±1000°/s、±4g、100Hz，配置/灵敏度集中在头文件。
  *          数据就绪中断: 器件 INT_PIN_CFG=0x20 (高有效/推挽/锁存, 读 0x3A 清除),
- *          INT_ENABLE=0x01 (DATA_RDY)；PB12 EXTI 上升沿，ISR 读 0x3A 释放锁存。
+ *          INT_ENABLE=0x01 (DATA_RDY)；PB12 EXTI 只记事件，任务突发读释放锁存。
  ******************************************************************************
  */
 #include "mpu6050.h"
@@ -17,6 +17,10 @@
 
 /* MPU6050 挂在软件 I2C 的传感器总线上 */
 #define MPU6050_I2C_BUS   MY_I2C_BUS_SENSOR
+
+static volatile uint8_t  mpu6050_int_flag;
+static volatile uint8_t  mpu6050_int_status; /* sensor 任务读回的状态 */
+static volatile uint16_t mpu6050_int_edges;
 
 Gyro_struct  gyro_data  = {0};
 Accel_struct accel_data = {0};
@@ -30,30 +34,16 @@ int16_t offset_gyro_y;
 int16_t offset_gyro_z;
 
 /* ---------------------------------------------------------- 总线独占保护 */
-/* EXTI ISR (HAL_GPIO_EXTI_Callback) 也会走 SENSOR 总线读 0x3A。若中断恰好
- * 落在任务层一次突发读写的中间, 两边时序都会被打断。因此器件的所有总线
- * 事务用 PRIMASK 临界区包住 (保存-恢复式, 任务/ISR 上下文均可安全调用):
- * 单次事务软件 I2C @~200kHz 最长约 2ms, 仅推迟同优先级以下的中断响应。 */
+/* 运行时仅 sensor 任务访问 SENSOR 总线；EXTI 不做 I2C。
+ * 无需整次事务关中断，GPIO 方向切换的短临界区仍在 my_i2c 内。 */
 static uint8_t mpu6050_bus_write(uint8_t reg, const uint8_t *dat, uint16_t len)
 {
-    uint32_t primask = __get_PRIMASK();
-    uint8_t  ret;
-
-    __disable_irq();
-    ret = my_i2c_write_bytes(MPU6050_I2C_BUS, MPU6050_ADDR, reg, dat, len);
-    __set_PRIMASK(primask);
-    return ret;
+    return my_i2c_write_bytes(MPU6050_I2C_BUS, MPU6050_ADDR, reg, dat, len);
 }
 
 static uint8_t mpu6050_bus_read(uint8_t reg, uint8_t *dat, uint16_t len)
 {
-    uint32_t primask = __get_PRIMASK();
-    uint8_t  ret;
-
-    __disable_irq();
-    ret = my_i2c_read_bytes(MPU6050_I2C_BUS, MPU6050_ADDR, reg, dat, len);
-    __set_PRIMASK(primask);
-    return ret;
+    return my_i2c_read_bytes(MPU6050_I2C_BUS, MPU6050_ADDR, reg, dat, len);
 }
 
 /* -------------------------------------------------------------- 单寄存器访问 */
@@ -133,10 +123,9 @@ uint8_t my_mpu6050_init(void)
 
     /* 唤醒 MPU6050 */
     my_mpu6050_write_reg(MPU6050_REG_PWR_MGMT_1, 0x00);
-    /* 配置陀螺仪角速度量程 ±2000°/s */
-    my_mpu6050_write_reg(MPU6050_GYRO_CONFIG, MPU6050_GYRO_RANGE_2000DPS);
-    /* 配置加速度计量程 ±2g */
-    my_mpu6050_write_reg(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE_2G);
+    /* 量程同时供公共层换算、1g判断和零偏校准引用。 */
+    my_mpu6050_write_reg(MPU6050_GYRO_CONFIG, MPU6050_GYRO_RANGE);
+    my_mpu6050_write_reg(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE);
     /* 中断引脚配置 (0x37) = 0x20: INT 高有效、推挽输出、中断锁存,
      * 仅读 INT_STATUS(0x3A) 后清除锁存释放 INT —— 配合 PB12 上升沿 EXTI */
     my_mpu6050_write_reg(MPU6050_INT_PIN_CFG, 0x20);
@@ -144,10 +133,9 @@ uint8_t my_mpu6050_init(void)
     my_mpu6050_write_reg(MPU6050_INT_ENABLE, 0x01);
     /* 用户控制寄存器：不用 FIFO 和外设 I2C 主机 */
     my_mpu6050_write_reg(MPU6050_USER_CTRL, 0x00);
-    /* 采样率 = 1kHz / (1 + 1) = 500Hz */
-    my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, 0x01);
-    /* DLPF 低通滤波：陀螺仪 184Hz / 加速度计 188Hz */
-    my_mpu6050_write_reg(MPU6050_CONFIG, 0x01);
+    /* 100Hz输出与sensor任务同步；42/44Hz低通保留转腕响应并抑制高频噪声。 */
+    my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, MPU6050_SAMPLE_PERIOD_MS - 1U);
+    my_mpu6050_write_reg(MPU6050_CONFIG, MPU6050_DLPF_CFG);
     /* 时钟源选内部 X 轴陀螺仪 */
     my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x01);
     /* 使能加速度计和陀螺仪 (PWR_MGMT_2 全部轴不关断) */
@@ -166,10 +154,9 @@ uint8_t my_mpu6050_init(void)
 /**
  * @brief 静止水平状态下的零偏校准 (阻塞，须在任务上下文调用)
  *
- * 静止判定: 两次加速度值相减小于 300，连续 100 次
- * 水平判定: |Accel_x|<200 且 |Accel_y|<200 且 |Accel_z-16384|<200 (约±0.7°)
- *           (原阈值 800≈±2.8° 太宽，1~2° 微坡会被当水平基准，导致起飞后倾斜前漂)
- * 超时保护: 约 3s 仍未达标则放弃本次校准，保留原偏移量，避免任务被永久阻塞
+ * 静止判定: 相邻帧加速度变化小于0.0183g，连续100帧；水平容差约±0.7°。
+ * 门限按当前1g的LSB计算，量程变化不改变物理容差。
+ * 等待稳定最多3s，之后按100Hz采集100帧平均约1s；失败保留原偏移。
  *
  * @return 0=校准完成, 1=超时放弃
  */
@@ -179,19 +166,25 @@ uint8_t my_mpu6050_zero_offset(void)
     Accel_struct last_accel = {0};
     uint8_t  count = 0;
     uint32_t attempts = 0;
-    const uint32_t CALIB_TIMEOUT = 500;   /* 500 次 × ~6ms ≈ 3s */
+    const uint32_t CALIB_TIMEOUT = 3000U / MPU6050_SAMPLE_PERIOD_MS;
+    const int32_t still_lsb = (int32_t)(0.0183f * MPU6050_ACCEL_LSB_PER_G);
+    const int32_t level_lsb = (int32_t)(0.0122f * MPU6050_ACCEL_LSB_PER_G);
 
-    my_mpu6050_get_accel(&last_accel);
+    if (my_mpu6050_get_accel(&last_accel) != 0)
+    {
+        return 1;
+    }
     while (count < 100)
     {
-        my_mpu6050_get_accel(&current_accel);
+        vTaskDelay(pdMS_TO_TICKS(MPU6050_SAMPLE_PERIOD_MS));
+        if (my_mpu6050_get_accel(&current_accel) != 0)
+        {
+            return 1;
+        }
         /* 如果误差判断的值过小，则无法进行零偏校准 */
-        if (abs(current_accel.Accel_x - last_accel.Accel_x) < 300 &&
-            abs(current_accel.Accel_y - last_accel.Accel_y) < 300 &&
-            abs(current_accel.Accel_z - last_accel.Accel_z) < 300 &&
-            abs(current_accel.Accel_x) < 200 &&
-            abs(current_accel.Accel_y) < 200 &&
-            abs(current_accel.Accel_z - 16384) < 200)
+        if (abs(current_accel.Accel_x - last_accel.Accel_x) < still_lsb && abs(current_accel.Accel_y - last_accel.Accel_y) < still_lsb &&
+            abs(current_accel.Accel_z - last_accel.Accel_z) < still_lsb && abs(current_accel.Accel_x) < level_lsb &&
+            abs(current_accel.Accel_y) < level_lsb && abs(current_accel.Accel_z - MPU6050_ACCEL_LSB_PER_G) < level_lsb)
         {
             count++;
         }
@@ -200,7 +193,6 @@ uint8_t my_mpu6050_zero_offset(void)
             count = 0;
         }
         last_accel = current_accel;
-        vTaskDelay(6);
         if (++attempts >= CALIB_TIMEOUT)
         {
             /* TODO: 旧工程此处 debug_printf("MPU6050校准失败: 请将设备放平保持静止...")，
@@ -220,26 +212,40 @@ uint8_t my_mpu6050_zero_offset(void)
 
         for (uint8_t i = 0; i < 100; i++)
         {
-            /* 重新读取加速度 */
-            my_mpu6050_get_accel(&accel_gyro_data.Accel);
+            vTaskDelay(pdMS_TO_TICKS(MPU6050_SAMPLE_PERIOD_MS));
+            /* 一帧同时取加速度和陀螺仪，避免100Hz输出下反复平均同一帧。 */
+            if (my_mpu6050_get_data(&accel_gyro_data) != 0)
+            {
+                return 1;
+            }
+            /* 平均阶段也保持静止水平；运动时放弃，不能把动作写成零偏。 */
+            current_accel = accel_gyro_data.Accel;
+            if (abs(current_accel.Accel_x - last_accel.Accel_x) >= still_lsb ||
+                abs(current_accel.Accel_y - last_accel.Accel_y) >= still_lsb ||
+                abs(current_accel.Accel_z - last_accel.Accel_z) >= still_lsb ||
+                abs(current_accel.Accel_x) >= level_lsb || abs(current_accel.Accel_y) >= level_lsb ||
+                abs(current_accel.Accel_z - MPU6050_ACCEL_LSB_PER_G) >= level_lsb)
+            {
+                return 1;
+            }
+            last_accel = current_accel;
             offset_sum_x += accel_gyro_data.Accel.Accel_x;
             offset_sum_y += accel_gyro_data.Accel.Accel_y;
-            /* Z 轴原本有 1G 重力，减去 16384 即为重力分量 */
-            offset_sum_z += (accel_gyro_data.Accel.Accel_z - 16384);
-
-            my_mpu6050_get_gyro(&accel_gyro_data.Gyro);
+            /* Z轴保留1g，只有其残差计入零偏。 */
+            offset_sum_z += (accel_gyro_data.Accel.Accel_z - MPU6050_ACCEL_LSB_PER_G);
             offset_sum_x_g += accel_gyro_data.Gyro.Gyro_x;
             offset_sum_y_g += accel_gyro_data.Gyro.Gyro_y;
             offset_sum_z_g += accel_gyro_data.Gyro.Gyro_z;
         }
 
-        offset_accel_x = (int16_t)(offset_sum_x / 100);
-        offset_accel_y = (int16_t)(offset_sum_y / 100);
-        offset_accel_z = (int16_t)(offset_sum_z / 100);
+        /* get_data已减去旧零偏；平均值是残差，重校准时应累加而非覆盖。 */
+        offset_accel_x += (int16_t)(offset_sum_x / 100);
+        offset_accel_y += (int16_t)(offset_sum_y / 100);
+        offset_accel_z += (int16_t)(offset_sum_z / 100);
 
-        offset_gyro_x  = (int16_t)(offset_sum_x_g / 100);
-        offset_gyro_y  = (int16_t)(offset_sum_y_g / 100);
-        offset_gyro_z  = (int16_t)(offset_sum_z_g / 100);
+        offset_gyro_x  += (int16_t)(offset_sum_x_g / 100);
+        offset_gyro_y  += (int16_t)(offset_sum_y_g / 100);
+        offset_gyro_z  += (int16_t)(offset_sum_z_g / 100);
     }
 
     return 0;
@@ -307,23 +313,26 @@ uint8_t my_mpu6050_get_accel(Accel_struct *accel)
 }
 
 /**
- * @brief 一次突发读取 14 字节: 加速度 6 + 温度 2 + 陀螺仪 6 (0x3B~0x48)
+ * @brief 一次突发读取15字节：INT_STATUS + 加速度6 + 温度2 + 陀螺仪6 (0x3A~0x48)
  * @return 0=成功, 1=总线失败(数据未更新)
  */
 uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
 {
-    uint8_t buf[14];
+    uint8_t packet[15];
+    const uint8_t *buf = packet + 1;
 
     if (data == NULL)
     {
         return 1;
     }
 
-    if (mpu6050_bus_read(MPU6050_ACCEL_XOUT_H, buf, 14) != 0)
+    /* 0x3A..0x48 同一次事务：先读状态释放 INT 锁存，再取完整六轴帧。 */
+    if (mpu6050_bus_read(MPU6050_INT_STATUS, packet, 15) != 0)
     {
         return 1;
     }
 
+    mpu6050_int_status = packet[0];
     data->Accel.Accel_x = (int16_t)(((buf[0] << 8) | buf[1]) - offset_accel_x);
     data->Accel.Accel_y = (int16_t)(((buf[2] << 8) | buf[3]) - offset_accel_y);
     data->Accel.Accel_z = (int16_t)(((buf[4] << 8) | buf[5]) - offset_accel_z);
@@ -334,22 +343,9 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
 }
 
 /* ------------------------------------------------------------ 数据就绪中断 */
-/* PB12 (MPU6050_INT) EXTI 上升沿 -> HAL_GPIO_EXTI_IRQHandler -> 本回调。
- * 两级标志都要清:
- *   1) STM32 侧 EXTI PR: HAL_GPIO_EXTI_IRQHandler 内部已写 PR 清除;
- *   2) 器件侧锁存: 读 INT_STATUS(0x3A) 释放 latch, INT 回到低电平,
- *      下一次 DATA_RDY 才能再次产生上升沿。
- * 约束: EXTI15_10 抢占优先级 0, 高于 FreeRTOS configMAX_SYSCALL(11),
- *       回调内只允许位翻 I2C + 置标志, 禁止调用任何 FromISR API;
- *       若将来要用信号量同步任务, 需在 CubeMX 把 EXTI 优先级降到 >=11。
- * 总线约束: ISR 与任务层的器件事务由 mpu6050_bus_read/write 的 PRIMASK
- *       临界区互斥, 不会互相打断 (SENSOR 总线上的第三方器件若共用,
- *       其 my_i2c 直调不受此保护, 目前该总线仅 MPU6050 使用)。 */
-static volatile uint8_t  mpu6050_int_flag = 0;     /* 1=有新的数据就绪中断 */
-static volatile uint8_t  mpu6050_int_status = 0;   /* ISR 读回的 0x3A 快照  */
-static volatile uint16_t mpu6050_int_count = 0;    /* 边沿计数器: 标志只有 1 位,
-                                                     * 高频中断会被合并, 精确计频
-                                                     * 必须用计数差分 (见 UI 页) */
+/* HAL 已清 STM32 EXTI PR；这里只记事件，绝不抢 SENSOR 总线。
+ * 器件 INT 锁存在 sensor 任务 my_mpu6050_get_data() 里释放。
+ * 锁存期间多次 DATA_RDY 会合并，边沿计数不是器件采样率。 */
 
 /**
  * @brief HAL GPIO EXTI 回调 (强符号覆盖 hal_gpio.c 中的 __weak 版本)
@@ -358,15 +354,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if (GPIO_Pin == MPU6050_INT_Pin)
     {
-        uint8_t status = 0;
-
-        /* 读 0x3A: 获取中断源并释放器件锁存 (INT 回低, 允许下次上升沿)。
-         * mpu6050_bus_read 是 PRIMASK 保存-恢复式, ISR 内调用只是空操作级别。 */
-        if (mpu6050_bus_read(MPU6050_INT_STATUS, &status, 1) == 0)
-        {
-            mpu6050_int_status = status;
-        }
-        mpu6050_int_count++;     /* 每个真实边沿都计, 16bit 回绕由差分法天然吸收 */
+        mpu6050_int_edges++;
         mpu6050_int_flag = 1;
     }
 }
@@ -380,7 +368,7 @@ uint16_t my_mpu6050_int_count(void)
     uint16_t cnt;
 
     __disable_irq();
-    cnt = mpu6050_int_count;
+    cnt = mpu6050_int_edges;
     __set_PRIMASK(primask);
     return cnt;
 }
@@ -403,8 +391,7 @@ uint8_t my_mpu6050_int_check_clear(void)
 }
 
 /**
- * @brief 取 ISR 读回的 INT_STATUS(0x3A) 快照 (bit0=DATA_RDY, bit1=FIFO_OFLOW,
- *        bit2=I2C_MST_INT, bit7=DMP_INT)
+ * @brief 取 sensor 任务读回的 INT_STATUS(0x3A) 快照 (bit0=DATA_RDY, bit1=FIFO_OFLOW, *        bit2=I2C_MST_INT, bit7=DMP_INT)
  */
 uint8_t my_mpu6050_get_int_status(void)
 {

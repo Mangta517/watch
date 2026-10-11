@@ -99,7 +99,7 @@ void App_Baro_Service(void)
     }
     else if ((pr == 2) || (tr == 2))
     {
-        /* 仅总线失败计入离线; 返回 1=数据未就绪 —— 1Hz 背景模式对 100ms 轮询
+        /* 仅总线失败计入离线; 返回1=数据未就绪 —— 1Hz背景模式对250ms轮询
          * 十拍里九拍都是这个值, 属正常, 快照与在线状态保持不变 */
         if (++s_err_streak >= APP_BARO_OFFLINE_STREAK)
         {

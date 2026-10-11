@@ -7,9 +7,10 @@
   *
   *          当前任务清单:
   *            lvgl     prio 3, 4KB 栈 — 驱动 LVGL 心跳, 承载屏幕/触摸测试 UI
-  *            sensor   prio 2, 2KB 栈 — SENSOR 总线 (MPU6050+SPL006) 任务级 owner:
-  *                       IMU 10ms、气压 100ms 轮询 (器件 1Hz); 数据经
+  *            sensor   prio 2, 2KB 栈 — SENSOR 总线 (MPU6050+SPL006+LSM303DLHC) owner:
+  *                       IMU10ms、磁力计10ms轮询(器件75Hz)、气压250ms(器件1Hz); 数据经
   *                       App_IMU_GetSnapshot() / App_Baro_GetSnapshot() 供 UI 消费
+  *                       EEPROM(PA11/PA12)同由sensor任务读写，只在开机恢复/校准成功时访问
   ******************************************************************************
 ***/
 #ifndef __APP_TASK_H
