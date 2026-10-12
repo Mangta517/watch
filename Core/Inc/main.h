@@ -68,6 +68,14 @@ void Error_Handler(void);
 #define SENSOR_SDA_GPIO_Port GPIOB
 #define SENSOR_SCL_Pin GPIO_PIN_14
 #define SENSOR_SCL_GPIO_Port GPIOB
+#define BLE_LED_Pin GPIO_PIN_15
+#define BLE_LED_GPIO_Port GPIOB
+#define BLE_EN_Pin GPIO_PIN_8
+#define BLE_EN_GPIO_Port GPIOA
+#define BLE_TX_Pin GPIO_PIN_9
+#define BLE_TX_GPIO_Port GPIOA
+#define BLE_RX_Pin GPIO_PIN_10
+#define BLE_RX_GPIO_Port GPIOA
 #define EEPROM_SDA_Pin GPIO_PIN_11
 #define EEPROM_SDA_GPIO_Port GPIOA
 #define EEPROM_SCL_Pin GPIO_PIN_12

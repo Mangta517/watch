@@ -17,18 +17,19 @@
 #define __APP_TASK_H
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-/**
+    /**
  * @brief 创建全部应用任务 (在启动调度器前、调度器未运行时调用一次)
  */
-void App_Task_Create(void);
+    void App_Task_Create(void);
 
-/**
+    /**
  * @brief 启动 FreeRTOS 调度器 (正常情况永不返回)
  */
-void App_Task_Start(void);
+    void App_Task_Start(void);
 
 #ifdef __cplusplus
 }

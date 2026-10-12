@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define MAG_STORE_MAGIC       0x3147414DU /* 小端字符MAG1 */
+#define MAG_STORE_MAGIC        0x3147414DU /* 小端字符MAG1 */
 #define MAG_STORE_RECORD_BYTES 36U
 #define MAG_STORE_CRC_OFFSET   32U
 #define MAG_STORE_SLOT_BYTES   48U

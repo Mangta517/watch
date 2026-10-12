@@ -14,12 +14,12 @@
 
 #include "FreeRTOS.h"
 #include "semphr.h"
-#include "task.h"         /* xTaskGetTickCount / configTICK_RATE_HZ: dt 实测 */
+#include "task.h" /* xTaskGetTickCount / configTICK_RATE_HZ: dt 实测 */
 
-#include "common_imu.h"   /* Common_IMU_GetEulerAngle 四元数姿态融合 */
+#include "common_imu.h" /* Common_IMU_GetEulerAngle 四元数姿态融合 */
 #include "app_mag_store.h"
 #include "bl24c02.h"
-#include <stdlib.h>       /* abs: 静止判定三轴比较 */
+#include <stdlib.h> /* abs: 静止判定三轴比较 */
 #include <math.h>
 #include <string.h>
 
@@ -28,13 +28,13 @@
  *********************/
 /* 连续 N 次读失败才判离线: 单次 NACK 可能只是总线瞬态,
  * 不宜立即翻 OFFLINE (设备端表现为数据闪断一下又恢复, 易误判为 bug) */
-#define APP_IMU_OFFLINE_STREAK  3
+#define APP_IMU_OFFLINE_STREAK 3
 
 /* dt 实测限幅 (秒): 解算积分步长宁可用错值的邻域也不要跳变,
  * 下限挡两拍合并 (tick 同值), 上限挡任务被长时间抢占后的积分暴走 */
 #define APP_IMU_DT_MIN_S  0.002f
 #define APP_IMU_DT_MAX_S  0.050f
-#define APP_IMU_DT_INIT_S 0.010f    /* 首拍兜底值 = 任务标称周期 */
+#define APP_IMU_DT_INIT_S 0.010f /* 首拍兜底值 = 任务标称周期 */
 
 /* ---- 陀螺仪残余零漂抑制 ----
  * 上电 zero_offset 只吃掉初始零偏；温漂仍可能引起姿态误差，
@@ -44,16 +44,16 @@
  *   累积 APP_IMU_TRIM_WINDOW 拍取平均 (抵消白噪声), 一次性喂 gyro_trim
  *   检测到任何转动立即复位全部计数 —— 宁可漏校不误校 */
 #define APP_IMU_STILL_GYRO_LSB ((int16_t)(0.18f * MPU6050_GYRO_LSB_PER_DPS + 0.5f))
-#define APP_IMU_STILL_SETTLE      100    /* 10ms×100 = 1s */
-#define APP_IMU_TRIM_WINDOW       100    /* 10ms×100 = 1s 一轮平均 */
+#define APP_IMU_STILL_SETTLE   100 /* 10ms×100 = 1s */
+#define APP_IMU_TRIM_WINDOW    100 /* 10ms×100 = 1s 一轮平均 */
 
-#define APP_MAG_POLL_MS           10
-#define APP_MAG_MAX_AGE_MS        50
-#define APP_MAG_CAL_SAMPLES      100
-#define APP_MAG_CAL_MIN_SPAN_UT   20.0f
+#define APP_MAG_POLL_MS         10
+#define APP_MAG_MAX_AGE_MS      50
+#define APP_MAG_CAL_SAMPLES     100
+#define APP_MAG_CAL_MIN_SPAN_UT 20.0f
 
-#define APP_MAG_CMD_START         1  /* 开始旋转采集 */
-#define APP_MAG_CMD_FINISH        2  /* 检查覆盖范围并应用校准 */
+#define APP_MAG_CMD_START  1 /* 开始旋转采集 */
+#define APP_MAG_CMD_FINISH 2 /* 检查覆盖范围并应用校准 */
 
 /* 用户确认两颗器件同轴同向：校准后将磁场映射到 MPU6050 X/Y/Z。 */
 static const uint8_t s_mag_axis[3] = {0, 1, 2};
@@ -62,14 +62,14 @@ static const float s_mag_sign[3] = {1.0f, 1.0f, 1.0f};
 /**********************
  *  STATIC VARIABLES
  **********************/
-static SemaphoreHandle_t s_imu_mux;    /* 保护完整快照与校准命令，不包住I2C事务 */
-static app_imu_struct    s_imu_data;    /* 最新快照 (锁内赋值) */
-static uint8_t           s_online;      /* 1=快照有效 */
-static uint8_t           s_err_streak;  /* 连续读失败计数 (仅 Service 读写, 不跨任务) */
+static SemaphoreHandle_t s_imu_mux; /* 保护完整快照与校准命令，不包住I2C事务 */
+static app_imu_struct s_imu_data;   /* 最新快照 (锁内赋值) */
+static uint8_t s_online;            /* 1=快照有效 */
+static uint8_t s_err_streak;        /* 连续读失败计数 (仅 Service 读写, 不跨任务) */
 
 /* 姿态解算递推状态: 四元数在 common_imu 内部 static;
  * 只允许 sensor 任务触碰 (单生产者), 进快照前无并发问题 */
-static Euler_struct      s_euler = {0};
+static Euler_struct s_euler = {0};
 
 static lsm303dlhc_mag_struct s_mag;
 static TickType_t s_mag_poll_tick, s_mag_sample_tick;
@@ -114,8 +114,8 @@ static void imu_unlock(void)
 /* 静止检测 + 陀螺仪零点微调: 仅 sensor 任务上下文调用 (单生产者, 无共享状态竞争) */
 static void imu_still_gyro_trim(const Accel_Gyro_struct *raw)
 {
-    static uint8_t  still_cnt = 0;
-    static int32_t  trim_sum_x = 0, trim_sum_y = 0, trim_sum_z = 0;
+    static uint8_t still_cnt = 0;
+    static int32_t trim_sum_x = 0, trim_sum_y = 0, trim_sum_z = 0;
     static uint16_t trim_cnt = 0;
 
     if (s_mag_cal_state != APP_MAG_CAL_RUNNING && abs(raw->Gyro.Gyro_x) < APP_IMU_STILL_GYRO_LSB &&
@@ -125,13 +125,13 @@ static void imu_still_gyro_trim(const Accel_Gyro_struct *raw)
         {
             still_cnt++;
         }
-        if (still_cnt >= APP_IMU_STILL_SETTLE)    /* 静止稳定 ~1s 后才开始累积 */
+        if (still_cnt >= APP_IMU_STILL_SETTLE) /* 静止稳定 ~1s 后才开始累积 */
         {
             trim_sum_x += raw->Gyro.Gyro_x;
             trim_sum_y += raw->Gyro.Gyro_y;
             trim_sum_z += raw->Gyro.Gyro_z;
             trim_cnt++;
-            if (trim_cnt >= APP_IMU_TRIM_WINDOW)  /* 攒满一轮取平均, 抵消静止白噪声 */
+            if (trim_cnt >= APP_IMU_TRIM_WINDOW) /* 攒满一轮取平均, 抵消静止白噪声 */
             {
                 my_mpu6050_gyro_trim((int16_t)(trim_sum_x / APP_IMU_TRIM_WINDOW), (int16_t)(trim_sum_y / APP_IMU_TRIM_WINDOW),
                                      (int16_t)(trim_sum_z / APP_IMU_TRIM_WINDOW));
@@ -155,7 +155,7 @@ static void mag_cal_command(uint8_t command)
     uint8_t i;
     float radius[3], average;
 
-    if (command == APP_MAG_CMD_START)  /* 保留上次已生效的校准系数 */
+    if (command == APP_MAG_CMD_START) /* 保留上次已生效的校准系数 */
     {
         s_mag_cal_samples = 0;
         s_mag_cal_state = APP_MAG_CAL_RUNNING;
@@ -361,10 +361,10 @@ void App_IMU_Service(void)
     imu_lock();
     if (s_err_streak == 0)
     {
-        s_imu_data.raw       = raw;
+        s_imu_data.raw = raw;
         s_imu_data.pitch_deg = s_euler.pitch;
-        s_imu_data.roll_deg  = s_euler.roll;
-        s_imu_data.yaw_deg   = s_euler.yaw;
+        s_imu_data.roll_deg = s_euler.roll;
+        s_imu_data.yaw_deg = s_euler.yaw;
         s_online = 1;
     }
     else if (s_err_streak >= APP_IMU_OFFLINE_STREAK)
@@ -420,7 +420,7 @@ uint8_t App_IMU_GetSnapshot(app_imu_struct *imu)
         return 0;
     }
     imu_lock();
-    *imu   = s_imu_data;
+    *imu = s_imu_data;
     online = s_online;
     imu_unlock();
 

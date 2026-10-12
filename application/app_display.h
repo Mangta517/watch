@@ -13,26 +13,27 @@
 #define __APP_DISPLAY_H
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 #include "app_ui.h"
 
-/**
+    /**
  * @brief 显示服务初始化 —— 必须在 FreeRTOS 任务上下文里调用一次:
  *        创建 LVGL 互斥锁 → lv_init → 显示/触摸移植层初始化(拉起 LCD 与 CST816)
  *        → 构建屏幕/触摸测试 UI。完成后返回。
  */
-void App_Display_Init(void);
+    void App_Display_Init(void);
 
-/**
+    /**
  * @brief 显示服务心跳 —— 任务循环里周期调用: 加锁 → lv_timer_handler → 解锁
  */
-void App_Display_Service(void);
+    void App_Display_Service(void);
 
-/* LVGL 非线程安全: 其他 FreeRTOS 任务调用任何 lv_* API 前必须包锁 */
-void App_Display_Lock(void);
-void App_Display_Unlock(void);
+    /* LVGL 非线程安全: 其他 FreeRTOS 任务调用任何 lv_* API 前必须包锁 */
+    void App_Display_Lock(void);
+    void App_Display_Unlock(void);
 
 #ifdef __cplusplus
 }

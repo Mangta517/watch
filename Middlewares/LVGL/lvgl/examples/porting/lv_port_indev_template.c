@@ -45,7 +45,7 @@ void lv_port_indev_init(void)
  **********************/
 static void touchpad_init(void)
 {
-    (void)Touch_Init();     /* 返回 ChipID (CST816S≈0xB5); 0 表示总线未见器件 */
+    (void)Touch_Init(); /* 返回 ChipID (CST816S≈0xB5); 0 表示总线未见器件 */
 }
 
 static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
@@ -55,12 +55,15 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
     uint16_t tx = 0, ty = 0;
 
     (void)indev_drv;
-    if (Touch_GetPoint(&tx, &ty)) {               /* 一次调用即判压+取坐标 */
+    if (Touch_GetPoint(&tx, &ty))
+    { /* 一次调用即判压+取坐标 */
         last_x = (lv_coord_t)tx;
         last_y = (lv_coord_t)ty;
         data->state = LV_INDEV_STATE_PRESSED;
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;    /* 坐标保持 last_x/y 不变 */
+    }
+    else
+    {
+        data->state = LV_INDEV_STATE_RELEASED; /* 坐标保持 last_x/y 不变 */
     }
     data->point.x = last_x;
     data->point.y = last_y;

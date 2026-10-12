@@ -4,7 +4,18 @@
 #include <stdint.h>
 #define __MAIN_H
 #define KEY_1_GPIO_Port ((void *)0)
-#define KEY_1_Pin 32U
-typedef enum { GPIO_PIN_RESET = 0, GPIO_PIN_SET = 1 } GPIO_PinState;
+#define KEY_1_Pin       32U
+typedef enum
+{
+    GPIO_PIN_RESET = 0,
+    GPIO_PIN_SET = 1
+} GPIO_PinState;
+typedef enum
+{
+    HAL_OK,
+    HAL_ERROR,
+    HAL_BUSY,
+    HAL_TIMEOUT
+} HAL_StatusTypeDef;
 GPIO_PinState HAL_GPIO_ReadPin(void *port, uint16_t pin);
 #endif

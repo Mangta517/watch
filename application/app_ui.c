@@ -1,12 +1,15 @@
 /**
  * @file app_ui.c
  * @brief 240x280 dark watch UI. All LVGL calls run in the display task.
- *        Horizontal gestures navigate; vertical drags scroll the page body.
+ *        表盘不滚动；设置、姿态和环境共用一个纵向滚动页面。
  *        KEY_1 (PA5, active low) goes back through page/scroll history.
  */
 #include "app_ui.h"
 #include "app_imu.h"
 #include "app_baro.h"
+#include "kt6368a.h"
+#include "watch_rtc.h"
+#include "app_clock.h"
 #include "lcd.h"
 #include "main.h"
 #include "FreeRTOS.h"
@@ -14,24 +17,31 @@
 #include <math.h>
 #include <string.h>
 
-#define UI_BG         0x080C12
-#define UI_CARD       0x121B28
-#define UI_BORDER     0x253348
-#define UI_TEXT       0xC5CFDD
-#define UI_MUTED      0x7B8BA2
-#define UI_BLUE       0x386AC2
-#define UI_ORANGE     0xCE7438
-#define UI_GREEN      0x398B70
-#define UI_RED        0xBA5057
-#define UI_POLL_MS    10
-#define UI_REFRESH_MS 100
-#define UI_ANIM_MS    160
-#define UI_KEY_MS     30
-#define UI_HISTORY    16
+#define UI_BG               0x080C12
+#define UI_CARD             0x121B28
+#define UI_BORDER           0x253348
+#define UI_TEXT             0xC5CFDD
+#define UI_MUTED            0x7B8BA2
+#define UI_BLUE             0x386AC2
+#define UI_ORANGE           0xCE7438
+#define UI_GREEN            0x398B70
+#define UI_RED              0xBA5057
+#define UI_POLL_MS          10
+#define UI_REFRESH_MS       100
+#define UI_ANIM_MS          160
+#define UI_KEY_MS           30
+#define UI_HISTORY          16
+#define UI_BT_LOG_SIZE      512
+#define UI_BT_READ_SIZE     64
+#define UI_BT_RX_BUDGET     256
+#define UI_BT_TX_TIMEOUT_MS 20U
 
 typedef enum
 {
-    PAGE_WATCH, PAGE_SENSORS, PAGE_SETTINGS, PAGE_IMU, PAGE_BARO, PAGE_COUNT
+    PAGE_WATCH,
+    PAGE_SETTINGS,
+    PAGE_BLUETOOTH,
+    PAGE_COUNT
 } ui_page_t;
 
 typedef struct
@@ -43,8 +53,13 @@ typedef struct
 static lv_obj_t *s_screen;
 static lv_obj_t *s_body;
 static lv_obj_t *s_time;
-static lv_obj_t *s_seconds;
-static lv_obj_t *s_ring;
+static lv_obj_t *s_hour_hand;
+static lv_obj_t *s_minute_hand;
+static lv_obj_t *s_second_hand;
+static lv_obj_t *s_clock_hint;
+static lv_point_t s_hour_points[2];
+static lv_point_t s_minute_points[2];
+static lv_point_t s_second_points[2];
 static lv_obj_t *s_imu_status;
 static lv_obj_t *s_baro_status;
 static lv_obj_t *s_angles[3];
@@ -56,6 +71,20 @@ static lv_obj_t *s_mag_cal_status;
 static lv_obj_t *s_pressure;
 static lv_obj_t *s_altitude;
 static lv_obj_t *s_brightness_label;
+static lv_obj_t *s_bt_status;
+static lv_obj_t *s_bt_count;
+static lv_obj_t *s_bt_tx_status;
+static lv_obj_t *s_bt_clock_status;
+static lv_obj_t *s_bt_log;
+static lv_obj_t *s_bt_log_box;
+/* 接收历史由LVGL任务独占，切页只删除控件，不清除RAM中的内容。 */
+static char s_bt_text[UI_BT_LOG_SIZE];
+static uint16_t s_bt_text_length;
+static uint32_t s_bt_rx_bytes;
+static uint8_t s_bt_last_cr;
+static uint8_t s_bt_dirty;
+static const char *s_bt_tx_text = "TX READY";
+static uint32_t s_bt_tx_color = UI_MUTED;
 static ui_page_t s_page;
 static ui_history_t s_history[UI_HISTORY];
 static uint8_t s_history_count;
@@ -74,6 +103,7 @@ static uint32_t s_key_tick;
 static void ui_timer_cb(lv_timer_t *timer);
 static void refresh_data(void);
 static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back);
+static void refresh_bluetooth(void);
 
 /* Explicit styles keep the built-in light theme out of the entire UI. */
 static lv_obj_t *panel(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
@@ -166,55 +196,126 @@ static lv_obj_t *card(const char *icon, const char *title, const char *subtitle,
     return obj;
 }
 
-static void watch_page(void)
+static void clock_dial_draw_cb(lv_event_t *event)
 {
-    static const ui_page_t sensors = PAGE_SENSORS;
-    static const ui_page_t settings = PAGE_SETTINGS;
-    lv_obj_t *caption;
-    s_ring = lv_arc_create(s_body);
-    lv_obj_remove_style_all(s_ring);
-    lv_obj_set_size(s_ring, 180, 180);
-    lv_obj_set_pos(s_ring, 16, 2);
-    lv_arc_set_bg_angles(s_ring, 0, 360);
-    lv_arc_set_rotation(s_ring, 270);
-    lv_arc_set_range(s_ring, 0, 60);
-    lv_obj_set_style_arc_color(s_ring, lv_color_hex(UI_BORDER), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_ring, 5, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(s_ring, lv_color_hex(UI_BLUE), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_width(s_ring, 5, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(s_ring, true, LV_PART_INDICATOR);
-    lv_obj_clear_flag(s_ring, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    caption = label(s_body, "RUN TIME", 0, 43, &lv_font_montserrat_10, UI_MUTED);
-    lv_obj_set_width(caption, 212);
-    lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
-    s_time = label(s_body, "00:00", 0, 65, &lv_font_montserrat_30, UI_TEXT);
-    lv_obj_set_width(s_time, 212);
-    lv_obj_set_style_text_align(s_time, LV_TEXT_ALIGN_CENTER, 0);
-    s_seconds = label(s_body, "00 SEC", 0, 107, &lv_font_montserrat_14, UI_ORANGE);
-    lv_obj_set_width(s_seconds, 212);
-    lv_obj_set_style_text_align(s_seconds, LV_TEXT_ALIGN_CENTER, 0);
-    caption = label(s_body, "SYSTEM ACTIVE", 0, 135, &lv_font_montserrat_10, UI_GREEN);
-    lv_obj_set_width(caption, 212);
-    lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
-    card(LV_SYMBOL_CHARGE, "Sensors", "Motion / pressure", 194, UI_BLUE, &sensors);
-    card(LV_SYMBOL_SETTINGS, "Settings", "Display / brightness", 282, UI_ORANGE, &settings);
-    note(s_body, "Time elapsed since power-on.", 371);
+    lv_obj_t *dial = lv_event_get_target(event);
+    lv_draw_ctx_t *context = lv_event_get_draw_ctx(event);
+    lv_area_t area;
+    lv_draw_line_dsc_t style;
+    lv_point_t inner, outer;
+    int16_t angle, radius, sine, cosine;
+    uint8_t i;
+    lv_obj_get_coords(dial, &area);
+    lv_draw_line_dsc_init(&style);
+    for (i = 0; i < 60; ++i)
+    {
+        angle = i * 6;
+        radius = i % 5 == 0 ? 82 : 88;
+        sine = lv_trigo_sin(angle);
+        cosine = lv_trigo_cos(angle);
+        inner.x = area.x1 + 100 + (int32_t)sine * radius / LV_TRIGO_SIN_MAX;
+        inner.y = area.y1 + 100 - (int32_t)cosine * radius / LV_TRIGO_SIN_MAX;
+        outer.x = area.x1 + 100 + (int32_t)sine * 92 / LV_TRIGO_SIN_MAX;
+        outer.y = area.y1 + 100 - (int32_t)cosine * 92 / LV_TRIGO_SIN_MAX;
+        style.color = lv_color_hex(i % 5 == 0 ? UI_TEXT : UI_MUTED);
+        style.width = i % 5 == 0 ? 3 : 1;
+        lv_draw_line(context, &style, &inner, &outer);
+    }
 }
 
-static void sensors_page(void)
+static lv_obj_t *clock_hand(lv_obj_t *dial, lv_point_t *points, uint8_t width, uint32_t color)
 {
-    static const ui_page_t imu = PAGE_IMU;
-    static const ui_page_t baro = PAGE_BARO;
-    lv_obj_t *obj;
-    label(s_body, "Know your surroundings", 0, 4, &lv_font_montserrat_10, UI_MUTED);
-    obj = card(LV_SYMBOL_REFRESH, "Motion", "IMU + MAG / 9 AXES", 26, UI_BLUE, &imu);
-    s_imu_status = label(obj, "WAITING", 64, 55, &lv_font_montserrat_10, UI_MUTED);
-    obj = card(LV_SYMBOL_UP, "Environment", "SPL006 / BAROMETER", 114, UI_ORANGE, &baro);
-    s_baro_status = label(obj, "WAITING", 64, 55, &lv_font_montserrat_10, UI_MUTED);
-    obj = panel(s_body, 0, 202, 212, 104, UI_CARD);
-    label(obj, "LIVE DATA", 14, 13, &lv_font_montserrat_10, UI_BLUE);
-    label(obj, "Open a card to view\nangles, pressure and\nestimated altitude.", 14, 34, &lv_font_montserrat_14, UI_TEXT);
-    note(s_body, "Swipe sideways to switch pages.", 322);
+    lv_obj_t *hand = lv_line_create(dial);
+    lv_obj_remove_style_all(hand);
+    lv_obj_set_style_line_color(hand, lv_color_hex(color), 0);
+    lv_obj_set_style_line_width(hand, width, 0);
+    lv_obj_set_style_line_rounded(hand, true, 0);
+    lv_obj_clear_flag(hand, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    points[0].x = points[1].x = 100;
+    points[0].y = 100;
+    points[1].y = 40;
+    lv_line_set_points(hand, points, 2);
+    return hand;
+}
+
+static void set_clock_hand(lv_obj_t *hand, lv_point_t *points, float degrees, uint8_t radius)
+{
+    float angle = degrees * 3.14159265f / 180.0f;
+    points[1].x = (lv_coord_t)(100.0f + sinf(angle) * radius + 0.5f);
+    points[1].y = (lv_coord_t)(100.0f - cosf(angle) * radius + 0.5f);
+    lv_line_set_points(hand, points, 2);
+}
+
+static void watch_page(void)
+{
+    lv_obj_t *dial = panel(s_body, 6, 0, 200, 200, UI_CARD);
+    lv_obj_t *number, *hub;
+    char text[3];
+    uint8_t hour;
+    lv_obj_set_style_radius(dial, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(dial, lv_color_hex(UI_BORDER), 0);
+    lv_obj_set_style_border_width(dial, 1, 0);
+    lv_obj_add_event_cb(dial, clock_dial_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+    for (hour = 1; hour <= 12; ++hour)
+    {
+        if (hour >= 10)
+        {
+            text[0] = '1';
+            text[1] = '0' + hour - 10;
+            text[2] = '\0';
+        }
+        else
+        {
+            text[0] = '0' + hour;
+            text[1] = '\0';
+        }
+        number = label(dial, text, 90 + (int32_t)lv_trigo_sin(hour * 30) * 75 / LV_TRIGO_SIN_MAX,
+                       92 - (int32_t)lv_trigo_cos(hour * 30) * 75 / LV_TRIGO_SIN_MAX, &lv_font_montserrat_14, UI_TEXT);
+        lv_obj_set_width(number, 20);
+        lv_obj_set_style_text_align(number, LV_TEXT_ALIGN_CENTER, 0);
+    }
+    s_clock_hint = label(dial, "SET VIA BLE", 20, 126, &lv_font_montserrat_10, UI_MUTED);
+    lv_obj_set_width(s_clock_hint, 160);
+    lv_obj_set_style_text_align(s_clock_hint, LV_TEXT_ALIGN_CENTER, 0);
+    s_hour_hand = clock_hand(dial, s_hour_points, 6, UI_TEXT);
+    s_minute_hand = clock_hand(dial, s_minute_points, 4, UI_ORANGE);
+    s_second_hand = clock_hand(dial, s_second_points, 2, UI_RED);
+    hub = panel(dial, 95, 95, 10, 10, UI_BLUE);
+    lv_obj_set_style_radius(hub, LV_RADIUS_CIRCLE, 0);
+    lv_obj_clear_flag(hub, LV_OBJ_FLAG_CLICKABLE);
+    s_time = label(s_body, "--:--", 0, 202, &lv_font_montserrat_14, UI_TEXT);
+    lv_obj_set_width(s_time, 212);
+    lv_obj_set_style_text_align(s_time, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+static void refresh_clock(void)
+{
+    watch_time_struct time;
+    HAL_StatusTypeDef status = watch_rtc_get_time(&time);
+    uint32_t seconds;
+    if (status != HAL_OK || !watch_rtc_is_synced())
+    {
+        lv_label_set_text(s_time, "--:--");
+        lv_label_set_text(s_clock_hint, status == HAL_OK ? "SET VIA BLE" : "RTC ERROR");
+        lv_obj_add_flag(s_hour_hand, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_minute_hand, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_second_hand, LV_OBJ_FLAG_HIDDEN);
+        s_last_second = UINT32_MAX;
+        return;
+    }
+    lv_obj_clear_flag(s_hour_hand, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_minute_hand, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_second_hand, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(s_clock_hint, "RTC / LSE");
+    seconds = (uint32_t)time.hours * 3600U + (uint32_t)time.minutes * 60U + time.seconds;
+    if (seconds != s_last_second)
+    {
+        s_last_second = seconds;
+        lv_label_set_text_fmt(s_time, "%02u:%02u", (unsigned)time.hours, (unsigned)time.minutes);
+        set_clock_hand(s_hour_hand, s_hour_points, (time.hours % 12) * 30.0f + time.minutes * 0.5f + time.seconds / 120.0f, 44);
+        set_clock_hand(s_minute_hand, s_minute_points, time.minutes * 6.0f + time.seconds * 0.1f, 64);
+        set_clock_hand(s_second_hand, s_second_points, time.seconds * 6.0f, 82);
+    }
 }
 
 static lv_obj_t *metric(const char *title, const char *unit, int y, uint32_t color)
@@ -240,34 +341,47 @@ static void mag_calibrate_cb(lv_event_t *event)
     App_IMU_MagCalibrate(imu.mag_cal_state != APP_MAG_CAL_RUNNING);
 }
 
-static void imu_page(void)
+/* 同单位三轴共用一张卡片，减少合并页面同时驻留的控件。 */
+static void motion_metrics(const char *const titles[3], const char *unit, int y, lv_obj_t *values[3])
 {
+    static const uint32_t colors[3] = {UI_BLUE, UI_ORANGE, UI_GREEN};
+    lv_obj_t *obj = panel(s_body, 0, y, 212, 288, UI_CARD);
+    uint8_t i;
+    label(obj, unit, 173, 12, &lv_font_montserrat_10, UI_MUTED);
+    for (i = 0; i < 3; ++i)
+    {
+        label(obj, titles[i], 14, 12 + i * 100, &lv_font_montserrat_10, UI_MUTED);
+        values[i] = label(obj, "--", 14, 35 + i * 100, &lv_font_montserrat_30, colors[i]);
+        lv_obj_set_width(values[i], 184);
+    }
+}
+
+static void imu_page(int y)
+{
+    static const char *const angles[3] = {"PITCH", "ROLL", "YAW"};
+    static const char *const magnetic[3] = {"MAG X", "MAG Y", "MAG Z"};
     lv_obj_t *obj;
-    s_imu_status = label(s_body, "WAITING", 2, 4, &lv_font_montserrat_10, UI_MUTED);
-    s_angles[0] = metric("PITCH", "DEG", 26, UI_BLUE);
-    s_angles[1] = metric("ROLL", "DEG", 126, UI_ORANGE);
-    s_angles[2] = metric("YAW", "DEG", 226, UI_GREEN);
-    s_yaw_source = note(s_body, "GYRO ONLY / heading may drift", 326);
-    s_mag_status = label(s_body, "MAG WAITING", 2, 360, &lv_font_montserrat_10, UI_MUTED);
-    s_mag_values[0] = metric("MAG X", "uT", 384, UI_BLUE);
-    s_mag_values[1] = metric("MAG Y", "uT", 484, UI_ORANGE);
-    s_mag_values[2] = metric("MAG Z", "uT", 584, UI_GREEN);
-    obj = panel(s_body, 0, 684, 212, 48, UI_BORDER);
+    s_imu_status = label(s_body, "WAITING", 2, y + 4, &lv_font_montserrat_10, UI_MUTED);
+    motion_metrics(angles, "DEG", y + 26, s_angles);
+    s_yaw_source = note(s_body, "GYRO ONLY / heading may drift", y + 326);
+    s_mag_status = label(s_body, "MAG WAITING", 2, y + 360, &lv_font_montserrat_10, UI_MUTED);
+    motion_metrics(magnetic, "uT", y + 384, s_mag_values);
+    obj = panel(s_body, 0, y + 684, 212, 48, UI_BORDER);
     s_mag_cal_label = label(obj, "CALIBRATE MAG", 14, 16, &lv_font_montserrat_14, UI_TEXT);
     lv_obj_clear_flag(s_mag_cal_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(obj, mag_calibrate_cb, LV_EVENT_CLICKED, NULL);
-    s_mag_cal_status = note(s_body, "CAL NOT RUN", 744);
-    note(s_body, "Rotate every axis for 30-60s, then tap FINISH. EEPROM keeps successful calibration.", 790);
+    s_mag_cal_status = note(s_body, "CAL NOT RUN", y + 744);
+    note(s_body, "Rotate every axis for 30-60s, then tap FINISH. EEPROM keeps successful calibration.", y + 790);
 }
 
-static void baro_page(void)
+static void baro_page(int y)
 {
-    s_baro_status = label(s_body, "WAITING", 2, 4, &lv_font_montserrat_10, UI_MUTED);
-    s_pressure = metric("PRESSURE", "hPa", 26, UI_ORANGE);
-    s_altitude = metric("ALTITUDE", "m", 126, UI_BLUE);
-    note(s_body, "Altitude uses standard sea-level pressure. Weather can change this estimate.", 232);
-    note(s_body, "SPL006 / live sensor snapshot", 286);
+    s_baro_status = label(s_body, "WAITING", 2, y + 4, &lv_font_montserrat_10, UI_MUTED);
+    s_pressure = metric("PRESSURE", "hPa", y + 26, UI_ORANGE);
+    s_altitude = metric("ALTITUDE", "m", y + 126, UI_BLUE);
+    note(s_body, "Altitude uses standard sea-level pressure. Weather can change this estimate.", y + 232);
+    note(s_body, "SPL006 / live sensor snapshot", y + 286);
 }
 
 static void brightness_cb(lv_event_t *event)
@@ -277,8 +391,219 @@ static void brightness_cb(lv_event_t *event)
     lv_label_set_text_fmt(s_brightness_label, "%d%%", (int)s_brightness);
 }
 
+/* 按字节接收，不要求发送端的一条信息在一次UART接收中完成。
+ * 保留最近511个显示字符；非ASCII/非打印字节显示为\xHH，避免NUL截断文本。 */
+static void bluetooth_receive(void)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    uint8_t data[UI_BT_READ_SIZE];
+    char text[UI_BT_READ_SIZE * 4];
+    uint16_t received, length, remove, i, budget = UI_BT_RX_BUDGET;
+
+    while (budget != 0)
+    {
+        received = kt6368a_read(data, budget < sizeof(data) ? budget : sizeof(data));
+        if (received == 0)
+        {
+            break;
+        }
+        budget -= received;
+        app_clock_receive(data, received, lv_tick_get());
+        s_bt_rx_bytes += received;
+        length = 0;
+        for (i = 0; i < received; ++i)
+        {
+            if (data[i] == '\r')
+            {
+                text[length++] = '\n';
+                s_bt_last_cr = 1;
+            }
+            else if (data[i] == '\n')
+            {
+                if (!s_bt_last_cr)
+                {
+                    text[length++] = '\n';
+                }
+                s_bt_last_cr = 0;
+            }
+            else
+            {
+                s_bt_last_cr = 0;
+                if (data[i] == '\t')
+                {
+                    text[length++] = ' ';
+                }
+                else if (data[i] >= 32 && data[i] <= 126)
+                {
+                    text[length++] = (char)data[i];
+                }
+                else
+                {
+                    text[length++] = '\\';
+                    text[length++] = 'x';
+                    text[length++] = hex[data[i] >> 4];
+                    text[length++] = hex[data[i] & 0x0F];
+                }
+            }
+        }
+        if (s_bt_text_length + length >= sizeof(s_bt_text))
+        {
+            remove = s_bt_text_length + length - (sizeof(s_bt_text) - 1);
+            memmove(s_bt_text, s_bt_text + remove, s_bt_text_length - remove);
+            s_bt_text_length -= remove;
+        }
+        memcpy(s_bt_text + s_bt_text_length, text, length);
+        s_bt_text_length += length;
+        s_bt_text[s_bt_text_length] = '\0';
+        s_bt_dirty = 1;
+    }
+    app_clock_service(lv_tick_get());
+}
+
+static void bluetooth_clear_cb(lv_event_t *event)
+{
+    (void)event;
+    if (s_transition)
+    {
+        return;
+    }
+    kt6368a_flush_rx();
+    s_bt_text[0] = '\0';
+    s_bt_text_length = 0;
+    s_bt_rx_bytes = 0;
+    s_bt_last_cr = 0;
+    s_bt_dirty = 1;
+    refresh_bluetooth();
+}
+
+static void bluetooth_send_test_cb(lv_event_t *event)
+{
+    static const uint8_t message[] = "hello from watch\r\n";
+    HAL_StatusTypeDef status;
+    (void)event;
+    if (s_transition)
+    {
+        return;
+    }
+    if (!kt6368a_is_connected())
+    {
+        s_bt_tx_text = "TX NO LINK";
+        s_bt_tx_color = UI_RED;
+    }
+    else
+    {
+        /* 与接收同在LVGL任务，短文本仅占少量串口时间；HAL_OK不代表手机已收到。 */
+        status = kt6368a_write(message, sizeof(message) - 1, UI_BT_TX_TIMEOUT_MS);
+        s_bt_tx_color = status == HAL_OK ? UI_GREEN : UI_ORANGE;
+        switch (status)
+        {
+        case HAL_OK:
+            s_bt_tx_text = "TX UART OK";
+            break;
+        case HAL_BUSY:
+            s_bt_tx_text = "TX BUSY";
+            break;
+        case HAL_TIMEOUT:
+            s_bt_tx_text = "TX TIMEOUT";
+            break;
+        default:
+            s_bt_tx_text = "TX ERROR";
+            s_bt_tx_color = UI_RED;
+            break;
+        }
+    }
+    refresh_bluetooth();
+}
+
+static void bluetooth_page(void)
+{
+    lv_obj_t *button, *caption;
+    s_bt_status = label(s_body, "DISCONNECTED", 4, 4, &lv_font_montserrat_10, UI_MUTED);
+    note(s_body, KT6368A_BLE_NAME, 22);
+    s_bt_count = label(s_body, "RX 0 B", 4, 44, &lv_font_montserrat_10, UI_BLUE);
+    s_bt_tx_status = label(s_body, s_bt_tx_text, 84, 44, &lv_font_montserrat_10, s_bt_tx_color);
+    button = panel(s_body, 0, 62, 124, 28, UI_BLUE);
+    caption = label(button, "SEND TEST", 0, 0, &lv_font_montserrat_10, UI_TEXT);
+    lv_obj_center(caption);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(button, bluetooth_send_test_cb, LV_EVENT_CLICKED, NULL);
+    button = panel(s_body, 136, 62, 76, 28, UI_BORDER);
+    caption = label(button, "CLEAR", 0, 0, &lv_font_montserrat_10, UI_TEXT);
+    lv_obj_center(caption);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(button, bluetooth_clear_cb, LV_EVENT_CLICKED, NULL);
+    s_bt_log_box = panel(s_body, 0, 98, 212, 94, UI_CARD);
+    lv_obj_add_flag(s_bt_log_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_bt_log_box, LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_CHAIN);
+    lv_obj_set_scroll_dir(s_bt_log_box, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_bt_log_box, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_bottom(s_bt_log_box, 10, 0);
+    lv_obj_set_style_bg_color(s_bt_log_box, lv_color_hex(UI_BLUE), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_bt_log_box, LV_OPA_60, LV_PART_SCROLLBAR);
+    lv_obj_set_style_width(s_bt_log_box, 2, LV_PART_SCROLLBAR);
+    s_bt_log = label(s_bt_log_box, "Waiting for data...", 10, 10, &lv_font_montserrat_14, UI_TEXT);
+    lv_obj_set_width(s_bt_log, 188);
+    lv_label_set_long_mode(s_bt_log, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_line_space(s_bt_log, 3, 0);
+    s_bt_clock_status = label(s_body, "Send HH:MM to set time", 4, 200, &lv_font_montserrat_10, UI_MUTED);
+    s_bt_dirty = 1;
+}
+
+static void refresh_bluetooth(void)
+{
+    HAL_StatusTypeDef status;
+    const char *text = "DISCONNECTED";
+    uint32_t color = UI_MUTED;
+    if (s_bt_status == NULL)
+    {
+        return;
+    }
+    status = kt6368a_get_init_status();
+    if (kt6368a_is_connected())
+    {
+        text = "CONNECTED / BLE";
+        color = UI_GREEN;
+    }
+    else if (status != HAL_OK)
+    {
+        text = status == HAL_TIMEOUT ? "INIT TIMEOUT" : (status == HAL_BUSY ? "INIT BUSY" : "INIT ERROR");
+        color = UI_ORANGE;
+    }
+    lv_label_set_text(s_bt_status, text);
+    lv_obj_set_style_text_color(s_bt_status, lv_color_hex(color), 0);
+    lv_label_set_text_fmt(s_bt_count, "RX %lu B", (unsigned long)s_bt_rx_bytes);
+    lv_label_set_text(s_bt_tx_status, s_bt_tx_text);
+    lv_obj_set_style_text_color(s_bt_tx_status, lv_color_hex(s_bt_tx_color), 0);
+    switch (app_clock_get_result())
+    {
+    case APP_CLOCK_SYNCED:
+        lv_label_set_text(s_bt_clock_status, "TIME SYNCED");
+        lv_obj_set_style_text_color(s_bt_clock_status, lv_color_hex(UI_GREEN), 0);
+        break;
+    case APP_CLOCK_INVALID:
+        lv_label_set_text(s_bt_clock_status, "TIME INVALID");
+        lv_obj_set_style_text_color(s_bt_clock_status, lv_color_hex(UI_RED), 0);
+        break;
+    case APP_CLOCK_RTC_ERROR:
+        lv_label_set_text(s_bt_clock_status, "RTC ERROR");
+        lv_obj_set_style_text_color(s_bt_clock_status, lv_color_hex(UI_RED), 0);
+        break;
+    default:
+        lv_label_set_text(s_bt_clock_status, "Send HH:MM to set time");
+        break;
+    }
+    if (s_bt_dirty)
+    {
+        lv_label_set_text(s_bt_log, s_bt_text_length ? s_bt_text : "Waiting for data...");
+        lv_obj_update_layout(s_bt_log_box);
+        lv_obj_scroll_to_y(s_bt_log_box, lv_obj_get_scroll_y(s_bt_log_box) + lv_obj_get_scroll_bottom(s_bt_log_box), LV_ANIM_OFF);
+        s_bt_dirty = 0;
+    }
+}
+
 static void settings_page(void)
 {
+    static const ui_page_t bluetooth = PAGE_BLUETOOTH;
     lv_obj_t *obj = panel(s_body, 0, 4, 212, 128, UI_CARD);
     lv_obj_t *slider;
     label(obj, "DISPLAY", 14, 14, &lv_font_montserrat_10, UI_BLUE);
@@ -305,37 +630,35 @@ static void settings_page(void)
     /* A brightness adjustment must not navigate to another page. */
     lv_obj_clear_flag(slider, LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(slider, brightness_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    obj = panel(s_body, 0, 144, 212, 136, UI_CARD);
-    label(obj, "CONTROLS", 14, 14, &lv_font_montserrat_10, UI_ORANGE);
-    label(obj, "Left / right", 14, 38, &lv_font_montserrat_14, UI_TEXT);
-    label(obj, "Switch screens", 14, 59, &lv_font_montserrat_10, UI_MUTED);
-    label(obj, "Up / down", 14, 81, &lv_font_montserrat_14, UI_TEXT);
-    label(obj, "Scroll content", 14, 102, &lv_font_montserrat_10, UI_MUTED);
-    obj = panel(s_body, 0, 292, 212, 84, UI_CARD);
-    label(obj, LV_SYMBOL_LEFT "  SIDE BUTTON", 14, 16, &lv_font_montserrat_14, UI_TEXT);
-    label(obj, "Return to the previous page", 14, 44, &lv_font_montserrat_10, UI_MUTED);
-    note(s_body, "Brightness resets after restart.", 392);
+    card(LV_SYMBOL_BLUETOOTH, "Bluetooth", "BLE / received data", 140, UI_BLUE, &bluetooth);
+    note(s_body, "Brightness resets after restart.", 226);
+    label(s_body, "MOTION", 2, 260, &lv_font_montserrat_14, UI_BLUE);
+    imu_page(284);
+    label(s_body, "ENVIRONMENT", 2, 1140, &lv_font_montserrat_14, UI_ORANGE);
+    baro_page(1164);
 }
 
 static void clear_page_refs(void)
 {
-    s_time = s_seconds = s_ring = NULL;
+    s_time = s_hour_hand = s_minute_hand = s_second_hand = s_clock_hint = NULL;
     s_imu_status = s_baro_status = NULL;
     s_pressure = s_altitude = s_brightness_label = NULL;
     memset(s_angles, 0, sizeof(s_angles));
     memset(s_mag_values, 0, sizeof(s_mag_values));
     s_mag_status = s_yaw_source = s_mag_cal_label = NULL;
     s_mag_cal_status = NULL;
+    s_bt_status = s_bt_count = s_bt_tx_status = s_bt_log = s_bt_log_box = NULL;
+    s_bt_clock_status = NULL;
     s_last_second = UINT32_MAX;
 }
 
 static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
 {
-    static const char *titles[] = { "WATCH", "SENSORS", "SETTINGS", "MOTION", "ENVIRONMENT" };
+    static const char *titles[] = {"WATCH", "SETTINGS", "BLUETOOTH"};
     lv_obj_t *dot;
     lv_obj_t *old_screen = s_screen;
     uint8_t i;
-    uint8_t tab = (page <= PAGE_SETTINGS) ? (uint8_t)page : PAGE_SENSORS;
+    uint8_t tab = page == PAGE_WATCH ? PAGE_WATCH : PAGE_SETTINGS;
     int width = lv_disp_get_hor_res(NULL);
     int height = lv_disp_get_ver_res(NULL);
     clear_page_refs();
@@ -347,30 +670,38 @@ static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
     lv_obj_clear_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(s_screen, gesture_cb, LV_EVENT_GESTURE, NULL);
     label(s_screen, titles[page], 14, 13, &lv_font_montserrat_14, UI_TEXT);
-    label(s_screen, page == PAGE_WATCH ? "RUN" : (page == PAGE_SETTINGS ? "LCD" : "LIVE"), width - 43, 15,
-          &lv_font_montserrat_10, UI_MUTED);
+    label(s_screen, page == PAGE_WATCH ? "RTC" : (page == PAGE_SETTINGS ? "LIVE" : "BLE"), width - 43, 15, &lv_font_montserrat_10,
+          UI_MUTED);
     s_body = panel(s_screen, (width - 212) / 2, 38, 212, height - 62, UI_BG);
     lv_obj_set_style_radius(s_body, 0, 0);
-    lv_obj_add_flag(s_body, LV_OBJ_FLAG_SCROLLABLE);
+    if (page != PAGE_WATCH)
+    {
+        lv_obj_add_flag(s_body, LV_OBJ_FLAG_SCROLLABLE);
+    }
     lv_obj_clear_flag(s_body, LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_CHAIN);
-    lv_obj_set_scroll_dir(s_body, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(s_body, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scroll_dir(s_body, page == PAGE_WATCH ? LV_DIR_NONE : LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_body, page == PAGE_WATCH ? LV_SCROLLBAR_MODE_OFF : LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(s_body, lv_color_hex(UI_BLUE), LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_opa(s_body, LV_OPA_60, LV_PART_SCROLLBAR);
     lv_obj_set_style_width(s_body, 2, LV_PART_SCROLLBAR);
     lv_obj_set_style_pad_right(s_body, 0, LV_PART_SCROLLBAR);
     switch (page)
     {
-        case PAGE_WATCH:    watch_page(); break;
-        case PAGE_SENSORS:  sensors_page(); break;
-        case PAGE_SETTINGS: settings_page(); break;
-        case PAGE_IMU:      imu_page(); break;
-        case PAGE_BARO:     baro_page(); break;
-        default: break;
+    case PAGE_WATCH:
+        watch_page();
+        break;
+    case PAGE_SETTINGS:
+        settings_page();
+        break;
+    case PAGE_BLUETOOTH:
+        bluetooth_page();
+        break;
+    default:
+        break;
     }
-    for (i = 0; i < 3; ++i)
+    for (i = 0; i < 2; ++i)
     {
-        dot = panel(s_screen, width / 2 - 20 + i * 16, height - 14, i == tab ? 12 : 5, 5, i == tab ? UI_BLUE : UI_BORDER);
+        dot = panel(s_screen, width / 2 - 12 + i * 16, height - 14, i == tab ? 12 : 5, 5, i == tab ? UI_BLUE : UI_BORDER);
         lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
         lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -432,18 +763,18 @@ static const char *mag_yaw_status(const app_imu_struct *imu)
 {
     switch (imu->mag_fusion_state)
     {
-        case APP_MAG_FUSION_ACTIVE:
-            return imu->mag_calibrated ? "MAG NORTH / fused yaw" : "MAG UNCAL / calibrate first";
-        case APP_MAG_FUSION_CALIBRATING:
-            return "GYRO ONLY / CALIBRATING";
-        case APP_MAG_FUSION_FIELD_RANGE:
-            return "GYRO ONLY / FIELD RANGE";
-        case APP_MAG_FUSION_HORIZONTAL_WEAK:
-            return "GYRO ONLY / HORIZ <5uT";
-        case APP_MAG_FUSION_IMU_NO_DATA:
-            return "GYRO ONLY / NO IMU FRAME";
-        default:
-            return "GYRO ONLY / MAG NO DATA";
+    case APP_MAG_FUSION_ACTIVE:
+        return imu->mag_calibrated ? "MAG NORTH / fused yaw" : "MAG UNCAL / calibrate first";
+    case APP_MAG_FUSION_CALIBRATING:
+        return "GYRO ONLY / CALIBRATING";
+    case APP_MAG_FUSION_FIELD_RANGE:
+        return "GYRO ONLY / FIELD RANGE";
+    case APP_MAG_FUSION_HORIZONTAL_WEAK:
+        return "GYRO ONLY / HORIZ <5uT";
+    case APP_MAG_FUSION_IMU_NO_DATA:
+        return "GYRO ONLY / NO IMU FRAME";
+    default:
+        return "GYRO ONLY / MAG NO DATA";
     }
 }
 
@@ -452,8 +783,9 @@ static void mag_calibration_status(const app_imu_struct *imu)
     const char *result;
     if (imu->mag_cal_state == APP_MAG_CAL_NONE)
     {
-        lv_label_set_text(s_mag_cal_status, imu->mag_persist_state == APP_MAG_PERSIST_LOAD_FAILED ?
-            "EEPROM READ FAILED\nCalibration required" : "CAL NOT RUN");
+        lv_label_set_text(s_mag_cal_status, imu->mag_persist_state == APP_MAG_PERSIST_LOAD_FAILED
+                                                ? "EEPROM READ FAILED\nCalibration required"
+                                                : "CAL NOT RUN");
         return;
     }
     if (imu->mag_cal_state == APP_MAG_CAL_RUNNING)
@@ -464,21 +796,21 @@ static void mag_calibration_status(const app_imu_struct *imu)
     {
         switch (imu->mag_persist_state)
         {
-            case APP_MAG_PERSIST_RESTORED:
-                lv_label_set_text(s_mag_cal_status, "CAL RESTORED / EEPROM\nReady for magnetic fusion");
-                return;
-            case APP_MAG_PERSIST_SAVING:
-                lv_label_set_text(s_mag_cal_status, "CAL OK / SAVING EEPROM");
-                return;
-            case APP_MAG_PERSIST_SAVE_FAILED:
-                lv_label_set_text(s_mag_cal_status, "CAL OK / SAVE FAILED\nRAM only: check EEPROM/WP");
-                return;
-            case APP_MAG_PERSIST_SAVED:
-                result = "CAL SAVED";
-                break;
-            default:
-                result = "CAL OK";
-                break;
+        case APP_MAG_PERSIST_RESTORED:
+            lv_label_set_text(s_mag_cal_status, "CAL RESTORED / EEPROM\nReady for magnetic fusion");
+            return;
+        case APP_MAG_PERSIST_SAVING:
+            lv_label_set_text(s_mag_cal_status, "CAL OK / SAVING EEPROM");
+            return;
+        case APP_MAG_PERSIST_SAVE_FAILED:
+            lv_label_set_text(s_mag_cal_status, "CAL OK / SAVE FAILED\nRAM only: check EEPROM/WP");
+            return;
+        case APP_MAG_PERSIST_SAVED:
+            result = "CAL SAVED";
+            break;
+        default:
+            result = "CAL OK";
+            break;
         }
     }
     else
@@ -486,9 +818,8 @@ static void mag_calibration_status(const app_imu_struct *imu)
         result = "CAL FAILED";
     }
     /* 显示帧数与三轴覆盖幅度，保留失败证据，方便再次旋转校准。 */
-    lv_label_set_text_fmt(s_mag_cal_status, "%s: %u samples\nX/Y/Z span: %ld/%ld/%ld uT", result,
-        (unsigned)imu->mag_cal_samples, (long)imu->mag_cal_span_uT[0],
-        (long)imu->mag_cal_span_uT[1], (long)imu->mag_cal_span_uT[2]);
+    lv_label_set_text_fmt(s_mag_cal_status, "%s: %u samples\nX/Y/Z span: %ld/%ld/%ld uT", result, (unsigned)imu->mag_cal_samples,
+                          (long)imu->mag_cal_span_uT[0], (long)imu->mag_cal_span_uT[1], (long)imu->mag_cal_span_uT[2]);
 }
 
 static void refresh_data(void)
@@ -496,17 +827,9 @@ static void refresh_data(void)
     app_imu_struct imu;
     app_baro_struct baro;
     uint8_t online;
-    uint32_t seconds;
     if (s_time != NULL)
     {
-        seconds = (uint32_t)(xTaskGetTickCount() / configTICK_RATE_HZ);
-        if (seconds != s_last_second)
-        {
-            s_last_second = seconds;
-            lv_label_set_text_fmt(s_time, "%02lu:%02lu", (unsigned long)(seconds / 3600), (unsigned long)((seconds / 60) % 60));
-            lv_label_set_text_fmt(s_seconds, "%02lu SEC", (unsigned long)(seconds % 60));
-            lv_arc_set_value(s_ring, (int16_t)(seconds % 60));
-        }
+        refresh_clock();
     }
     if (s_imu_status != NULL)
     {
@@ -554,8 +877,8 @@ static void refresh_data(void)
             {
                 lv_label_set_text(s_mag_status, imu.mag_online ? "LSM303DLHC / ONLINE" : "LSM303DLHC / NO DATA");
             }
-            lv_obj_set_style_text_color(s_mag_status,
-                lv_color_hex(imu.mag_online && imu.mag_persist_state != APP_MAG_PERSIST_SAVE_FAILED ? UI_GREEN : UI_RED), 0);
+            lv_obj_set_style_text_color(
+                s_mag_status, lv_color_hex(imu.mag_online && imu.mag_persist_state != APP_MAG_PERSIST_SAVE_FAILED ? UI_GREEN : UI_RED), 0);
             lv_label_set_text(s_mag_cal_label, imu.mag_cal_state == APP_MAG_CAL_RUNNING ? "FINISH CALIBRATION" : "CALIBRATE MAG");
             mag_calibration_status(&imu);
             {
@@ -592,6 +915,7 @@ static void refresh_data(void)
             }
         }
     }
+    refresh_bluetooth();
 }
 
 void App_UI_Back(void)
@@ -642,6 +966,7 @@ static void ui_timer_cb(lv_timer_t *timer)
     ui_history_t previous;
     ui_page_t next;
     (void)timer;
+    bluetooth_receive(); /* 唯一接收消费者；切到其他页面时也继续保存数据。 */
     poll_key();
     if (s_transition && lv_tick_elaps(s_transition_tick) >= UI_ANIM_MS + UI_POLL_MS)
     {

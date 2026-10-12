@@ -12,17 +12,17 @@
 #include "my_i2c.h"
 
 #include "FreeRTOS.h"
-#include "task.h"       /* vTaskDelay: 校准循环中的任务级延时 */
-#include <stdlib.h>    /* abs */
+#include "task.h"   /* vTaskDelay: 校准循环中的任务级延时 */
+#include <stdlib.h> /* abs */
 
 /* MPU6050 挂在软件 I2C 的传感器总线上 */
-#define MPU6050_I2C_BUS   MY_I2C_BUS_SENSOR
+#define MPU6050_I2C_BUS MY_I2C_BUS_SENSOR
 
-static volatile uint8_t  mpu6050_int_flag;
-static volatile uint8_t  mpu6050_int_status; /* sensor 任务读回的状态 */
+static volatile uint8_t mpu6050_int_flag;
+static volatile uint8_t mpu6050_int_status; /* sensor 任务读回的状态 */
 static volatile uint16_t mpu6050_int_edges;
 
-Gyro_struct  gyro_data  = {0};
+Gyro_struct gyro_data = {0};
 Accel_struct accel_data = {0};
 
 int16_t offset_accel_x;
@@ -73,9 +73,9 @@ uint8_t my_mpu6050_read_reg(uint8_t reg, uint8_t *data)
  */
 uint8_t my_mpu6050_init(void)
 {
-    uint8_t  data = 0;
-    uint8_t  id   = 0;
-    uint8_t  retry;
+    uint8_t data = 0;
+    uint8_t id = 0;
+    uint8_t retry;
     uint16_t guard;
 
     /* 上电就绪门: MPU6050 POR 后 I2C 接口需要 ~100ms 才能应答。
@@ -89,11 +89,11 @@ uint8_t my_mpu6050_init(void)
     {
         if (my_mpu6050_read_reg(MPU6050_WHO_AM_I, &id) == 0)
         {
-            break;                       /* 器件已在总线上应答 */
+            break; /* 器件已在总线上应答 */
         }
         if (++retry >= 20)
         {
-            return 1;                   /* 1s 无应答: 未接/供电异常 */
+            return 1; /* 1s 无应答: 未接/供电异常 */
         }
         HAL_Delay(50);
     }
@@ -118,7 +118,7 @@ uint8_t my_mpu6050_init(void)
     }
     if (guard >= 1000)
     {
-        return 1;   /* 等待复位完成超时 */
+        return 1; /* 等待复位完成超时 */
     }
 
     /* 唤醒 MPU6050 */
@@ -164,7 +164,7 @@ uint8_t my_mpu6050_zero_offset(void)
 {
     Accel_struct current_accel = {0};
     Accel_struct last_accel = {0};
-    uint8_t  count = 0;
+    uint8_t count = 0;
     uint32_t attempts = 0;
     const uint32_t CALIB_TIMEOUT = 3000U / MPU6050_SAMPLE_PERIOD_MS;
     const int32_t still_lsb = (int32_t)(0.0183f * MPU6050_ACCEL_LSB_PER_G);
@@ -197,18 +197,18 @@ uint8_t my_mpu6050_zero_offset(void)
         {
             /* TODO: 旧工程此处 debug_printf("MPU6050校准失败: 请将设备放平保持静止...")，
              *       当前工程串口调试模块未移植，失败状态由返回值携带 */
-            return 1;   /* 放弃本次校准，偏移量保持原值 */
+            return 1; /* 放弃本次校准，偏移量保持原值 */
         }
     }
 
     {
         Accel_Gyro_struct accel_gyro_data = {0};
-        int32_t offset_sum_x     = 0;
-        int32_t offset_sum_y     = 0;
-        int32_t offset_sum_z     = 0;
-        int32_t offset_sum_x_g   = 0;
-        int32_t offset_sum_y_g   = 0;
-        int32_t offset_sum_z_g   = 0;
+        int32_t offset_sum_x = 0;
+        int32_t offset_sum_y = 0;
+        int32_t offset_sum_z = 0;
+        int32_t offset_sum_x_g = 0;
+        int32_t offset_sum_y_g = 0;
+        int32_t offset_sum_z_g = 0;
 
         for (uint8_t i = 0; i < 100; i++)
         {
@@ -222,9 +222,8 @@ uint8_t my_mpu6050_zero_offset(void)
             current_accel = accel_gyro_data.Accel;
             if (abs(current_accel.Accel_x - last_accel.Accel_x) >= still_lsb ||
                 abs(current_accel.Accel_y - last_accel.Accel_y) >= still_lsb ||
-                abs(current_accel.Accel_z - last_accel.Accel_z) >= still_lsb ||
-                abs(current_accel.Accel_x) >= level_lsb || abs(current_accel.Accel_y) >= level_lsb ||
-                abs(current_accel.Accel_z - MPU6050_ACCEL_LSB_PER_G) >= level_lsb)
+                abs(current_accel.Accel_z - last_accel.Accel_z) >= still_lsb || abs(current_accel.Accel_x) >= level_lsb ||
+                abs(current_accel.Accel_y) >= level_lsb || abs(current_accel.Accel_z - MPU6050_ACCEL_LSB_PER_G) >= level_lsb)
             {
                 return 1;
             }
@@ -243,9 +242,9 @@ uint8_t my_mpu6050_zero_offset(void)
         offset_accel_y += (int16_t)(offset_sum_y / 100);
         offset_accel_z += (int16_t)(offset_sum_z / 100);
 
-        offset_gyro_x  += (int16_t)(offset_sum_x_g / 100);
-        offset_gyro_y  += (int16_t)(offset_sum_y_g / 100);
-        offset_gyro_z  += (int16_t)(offset_sum_z_g / 100);
+        offset_gyro_x += (int16_t)(offset_sum_x_g / 100);
+        offset_gyro_y += (int16_t)(offset_sum_y_g / 100);
+        offset_gyro_z += (int16_t)(offset_sum_z_g / 100);
     }
 
     return 0;
@@ -336,9 +335,9 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
     data->Accel.Accel_x = (int16_t)(((buf[0] << 8) | buf[1]) - offset_accel_x);
     data->Accel.Accel_y = (int16_t)(((buf[2] << 8) | buf[3]) - offset_accel_y);
     data->Accel.Accel_z = (int16_t)(((buf[4] << 8) | buf[5]) - offset_accel_z);
-    data->Gyro.Gyro_x   = (int16_t)(((buf[8] << 8) | buf[9])  - offset_gyro_x);
-    data->Gyro.Gyro_y   = (int16_t)(((buf[10] << 8) | buf[11]) - offset_gyro_y);
-    data->Gyro.Gyro_z   = (int16_t)(((buf[12] << 8) | buf[13]) - offset_gyro_z);
+    data->Gyro.Gyro_x = (int16_t)(((buf[8] << 8) | buf[9]) - offset_gyro_x);
+    data->Gyro.Gyro_y = (int16_t)(((buf[10] << 8) | buf[11]) - offset_gyro_y);
+    data->Gyro.Gyro_z = (int16_t)(((buf[12] << 8) | buf[13]) - offset_gyro_z);
     return 0;
 }
 
@@ -381,7 +380,7 @@ uint16_t my_mpu6050_int_count(void)
 uint8_t my_mpu6050_int_check_clear(void)
 {
     uint32_t primask = __get_PRIMASK();
-    uint8_t  flag;
+    uint8_t flag;
 
     __disable_irq();
     flag = mpu6050_int_flag;

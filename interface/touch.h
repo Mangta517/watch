@@ -15,25 +15,26 @@
 #define __TOUCH_H
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 #include "main.h"
 #include <stdint.h>
 
-/* 返回读到的 ChipID (CST816S≈0xB5, CST816D≈0xB7); 总线异常返回 0 */
-uint8_t Touch_Init(void);
+    /* 返回读到的 ChipID (CST816S≈0xB5, CST816D≈0xB7); 总线异常返回 0 */
+    uint8_t Touch_Init(void);
 
-extern volatile uint8_t g_tp_chip_id;   /* 最近一次 ChipID 读数 (0xB5/0xB7=I2C通, 0=总线死) */
+    extern volatile uint8_t g_tp_chip_id; /* 最近一次 ChipID 读数 (0xB5/0xB7=I2C通, 0=总线死) */
 
-uint8_t Touch_GetChipID(void);
+    uint8_t Touch_GetChipID(void);
 
-/* 读取一个触点: 返回手指数(0=无触摸/读失败), x/y 为屏幕坐标(与 LCD 对齐) */
-uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y);
+    /* 读取一个触点: 返回手指数(0=无触摸/读失败), x/y 为屏幕坐标(与 LCD 对齐) */
+    uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y);
 
-void    Touch_Reset(void);
-void    Touch_Sleep(void);                       /* 进低功耗(触摸自唤醒) */
-void    Touch_Wakeup(void);                      /* 复位唤醒 */
+    void Touch_Reset(void);
+    void Touch_Sleep(void);  /* 进低功耗(触摸自唤醒) */
+    void Touch_Wakeup(void); /* 复位唤醒 */
 
 #ifdef __cplusplus
 }

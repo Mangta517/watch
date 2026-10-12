@@ -19,28 +19,30 @@
 ***/
 #include "touch.h"
 #include "stm32f4xx_hal.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 /*--- CST816 寄存器 (同 OV_Watch CST816.h) ---*/
-#define REG_GestureID       0x01
-#define REG_FingerNum       0x02
-#define REG_XposH           0x03            /* 0x03~0x06: XH XL YH YL */
-#define REG_ChipID          0xA7
-#define REG_SLEEP_CTRL      0xE5
-#define REG_AutoSleepTime   0xF9
+#define REG_GestureID     0x01
+#define REG_FingerNum     0x02
+#define REG_XposH         0x03 /* 0x03~0x06: XH XL YH YL */
+#define REG_ChipID        0xA7
+#define REG_SLEEP_CTRL    0xE5
+#define REG_AutoSleepTime 0xF9
 
 /* 候选 7bit 从机地址 (转 8bit 写格式): 0x15=CST816S 官方, 0x14=部分兼容片 */
-#define CST816_ADDR_1       (0x15 << 1)
-#define CST816_ADDR_2       (0x14 << 1)
-static uint8_t s_tp_addr8 = CST816_ADDR_1;  /* 当前在用的 8bit 写地址 */
+#define CST816_ADDR_1 (0x15 << 1)
+#define CST816_ADDR_2 (0x14 << 1)
+static uint8_t s_tp_addr8 = CST816_ADDR_1; /* 当前在用的 8bit 写地址 */
 
 /* 触摸面板与 LCD 装配差 180°(同 OV_Watch REVERSE=1): 坐标需镜像。
  * 若实测按下点与显示点呈中心对称错位, 将此宏改 0 即可。 */
-#define TOUCH_REVERSE       1
-#define TOUCH_SCREEN_W      240
-#define TOUCH_SCREEN_H      280
+#define TOUCH_REVERSE  1
+#define TOUCH_SCREEN_W 240
+#define TOUCH_SCREEN_H 280
 
-#define TP_RST_0()  HAL_GPIO_WritePin(TP_RST_GPIO_Port, TP_RST_Pin, GPIO_PIN_RESET)
-#define TP_RST_1()  HAL_GPIO_WritePin(TP_RST_GPIO_Port, TP_RST_Pin, GPIO_PIN_SET)
+#define TP_RST_0() HAL_GPIO_WritePin(TP_RST_GPIO_Port, TP_RST_Pin, GPIO_PIN_RESET)
+#define TP_RST_1() HAL_GPIO_WritePin(TP_RST_GPIO_Port, TP_RST_Pin, GPIO_PIN_SET)
 
 /*--- 软 I2C 引脚原语 ---*/
 #define TP_SCL_0()  HAL_GPIO_WritePin(TP_SCL_GPIO_Port, TP_SCL_Pin, GPIO_PIN_RESET)
@@ -49,7 +51,20 @@ static uint8_t s_tp_addr8 = CST816_ADDR_1;  /* 当前在用的 8bit 写地址 */
 #define TP_SDA_1()  HAL_GPIO_WritePin(TP_SDA_GPIO_Port, TP_SDA_Pin, GPIO_PIN_SET)
 #define TP_SDA_RD() (HAL_GPIO_ReadPin(TP_SDA_GPIO_Port, TP_SDA_Pin) == GPIO_PIN_SET)
 
-volatile uint8_t g_tp_chip_id = 0;   /* 诊断: 最近一次读到的 CST816 ChipID (0xB5/0xB7=正常) */
+volatile uint8_t g_tp_chip_id = 0; /* 诊断: 最近一次读到的 CST816 ChipID (0xB5/0xB7=正常) */
+
+static void tp_delay_ms(uint32_t ms)
+{
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+    {
+        /* 多等一拍，避免调用落在tick末尾时缩短复位/引导等待时间。 */
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+    }
+    else
+    {
+        HAL_Delay(ms);
+    }
+}
 
 /******************************************************************************
  * 位周期延时 (~3µs/半周期 @100MHz, volatile 防 -O3 吞掉)
@@ -57,7 +72,9 @@ volatile uint8_t g_tp_chip_id = 0;   /* 诊断: 最近一次读到的 CST816 Chi
 static void tp_delay(void)
 {
     volatile uint32_t n = 80;
-    while (n--) { }
+    while (n--)
+    {
+    }
 }
 
 /* SDA 方向切换: 输出(主机发送) / 输入+上拉(读 ACK 与数据)
@@ -69,9 +86,9 @@ static void tp_sda_out(void)
 {
     GPIO_InitTypeDef g = {0};
     uint32_t primask = __get_PRIMASK();
-    g.Pin   = TP_SDA_Pin;
-    g.Mode  = GPIO_MODE_OUTPUT_PP;
-    g.Pull  = GPIO_PULLUP;
+    g.Pin = TP_SDA_Pin;
+    g.Mode = GPIO_MODE_OUTPUT_PP;
+    g.Pull = GPIO_PULLUP;
     g.Speed = GPIO_SPEED_FREQ_HIGH;
     __disable_irq();
     HAL_GPIO_Init(TP_SDA_GPIO_Port, &g);
@@ -82,9 +99,9 @@ static void tp_sda_in(void)
 {
     GPIO_InitTypeDef g = {0};
     uint32_t primask = __get_PRIMASK();
-    g.Pin   = TP_SDA_Pin;
-    g.Mode  = GPIO_MODE_INPUT;
-    g.Pull  = GPIO_PULLUP;
+    g.Pin = TP_SDA_Pin;
+    g.Mode = GPIO_MODE_INPUT;
+    g.Pull = GPIO_PULLUP;
     g.Speed = GPIO_SPEED_FREQ_HIGH;
     __disable_irq();
     HAL_GPIO_Init(TP_SDA_GPIO_Port, &g);
@@ -97,8 +114,10 @@ static void tp_sda_in(void)
 static void iic_start(void)
 {
     tp_sda_out();
-    TP_SDA_1(); TP_SCL_1(); tp_delay();
-    TP_SDA_0();             /* SCL 高电平期间 SDA 下降沿 = START */
+    TP_SDA_1();
+    TP_SCL_1();
+    tp_delay();
+    TP_SDA_0(); /* SCL 高电平期间 SDA 下降沿 = START */
     tp_delay();
     TP_SCL_0();
     tp_delay();
@@ -107,9 +126,11 @@ static void iic_start(void)
 static void iic_stop(void)
 {
     tp_sda_out();
-    TP_SDA_0(); tp_delay();
-    TP_SCL_1(); tp_delay();
-    TP_SDA_1();             /* SCL 高电平期间 SDA 上升沿 = STOP */
+    TP_SDA_0();
+    tp_delay();
+    TP_SCL_1();
+    tp_delay();
+    TP_SDA_1(); /* SCL 高电平期间 SDA 上升沿 = STOP */
     tp_delay();
 }
 
@@ -119,17 +140,29 @@ static uint8_t iic_write_byte(uint8_t dat)
     uint8_t i, nack;
 
     tp_sda_out();
-    for (i = 0; i < 8; i++) {
-        if (dat & 0x80) TP_SDA_1(); else TP_SDA_0();
+    for (i = 0; i < 8; i++)
+    {
+        if (dat & 0x80)
+        {
+            TP_SDA_1();
+        }
+        else
+        {
+            TP_SDA_0();
+        }
         dat = (uint8_t)(dat << 1);
         tp_delay();
-        TP_SCL_1(); tp_delay();
-        TP_SCL_0(); tp_delay();
+        TP_SCL_1();
+        tp_delay();
+        TP_SCL_0();
+        tp_delay();
     }
-    tp_sda_in();                        /* 释放总线, 读从机 ACK */
-    TP_SCL_1(); tp_delay();
+    tp_sda_in(); /* 释放总线, 读从机 ACK */
+    TP_SCL_1();
+    tp_delay();
     nack = TP_SDA_RD() ? 1 : 0;
-    TP_SCL_0(); tp_delay();
+    TP_SCL_0();
+    tp_delay();
     tp_sda_out();
     return nack;
 }
@@ -140,16 +173,28 @@ static uint8_t iic_read_byte(uint8_t ack)
     uint8_t i, dat = 0;
 
     tp_sda_in();
-    for (i = 0; i < 8; i++) {
-        TP_SCL_1(); tp_delay();
+    for (i = 0; i < 8; i++)
+    {
+        TP_SCL_1();
+        tp_delay();
         dat = (uint8_t)((dat << 1) | (TP_SDA_RD() ? 1 : 0));
-        TP_SCL_0(); tp_delay();
+        TP_SCL_0();
+        tp_delay();
     }
     tp_sda_out();
-    if (ack) TP_SDA_0(); else TP_SDA_1();
+    if (ack)
+    {
+        TP_SDA_0();
+    }
+    else
+    {
+        TP_SDA_1();
+    }
     tp_delay();
-    TP_SCL_1(); tp_delay();
-    TP_SCL_0(); tp_delay();
+    TP_SCL_1();
+    tp_delay();
+    TP_SCL_0();
+    tp_delay();
     TP_SDA_1();
     return dat;
 }
@@ -162,11 +207,24 @@ static uint8_t tp_read_regs_at(uint8_t addr8, uint8_t reg, uint8_t *buf, uint16_
     uint16_t i;
 
     iic_start();
-    if (iic_write_byte(addr8))            { iic_stop(); return 0; }   /* 从机地址 NACK */
-    if (iic_write_byte(reg))              { iic_stop(); return 0; }   /* 寄存器地址 NACK */
-    iic_start();                                                      /* 重复起始, 转读 */
-    if (iic_write_byte((uint8_t)(addr8 | 1))) { iic_stop(); return 0; }
-    for (i = 0; i < len; i++) {
+    if (iic_write_byte(addr8))
+    {
+        iic_stop();
+        return 0;
+    } /* 从机地址 NACK */
+    if (iic_write_byte(reg))
+    {
+        iic_stop();
+        return 0;
+    } /* 寄存器地址 NACK */
+    iic_start(); /* 重复起始, 转读 */
+    if (iic_write_byte((uint8_t)(addr8 | 1)))
+    {
+        iic_stop();
+        return 0;
+    }
+    for (i = 0; i < len; i++)
+    {
         buf[i] = iic_read_byte((i + 1 < len) ? 1 : 0);
     }
     iic_stop();
@@ -181,9 +239,21 @@ static uint8_t tp_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
 static uint8_t tp_write_reg(uint8_t reg, uint8_t val)
 {
     iic_start();
-    if (iic_write_byte(s_tp_addr8))       { iic_stop(); return 0; }
-    if (iic_write_byte(reg))              { iic_stop(); return 0; }
-    if (iic_write_byte(val))              { iic_stop(); return 0; }
+    if (iic_write_byte(s_tp_addr8))
+    {
+        iic_stop();
+        return 0;
+    }
+    if (iic_write_byte(reg))
+    {
+        iic_stop();
+        return 0;
+    }
+    if (iic_write_byte(val))
+    {
+        iic_stop();
+        return 0;
+    }
     iic_stop();
     return 1;
 }
@@ -193,9 +263,14 @@ static void iic_bus_recover(void)
 {
     uint8_t i;
 
-    tp_sda_out();
-    TP_SDA_1();
-    for (i = 0; i < 9; i++) { TP_SCL_1(); tp_delay(); TP_SCL_0(); tp_delay(); }
+    tp_sda_in(); /* 释放SDA，避免与卡在低电平的从机争用 */
+    for (i = 0; i < 9; i++)
+    {
+        TP_SCL_0();
+        tp_delay();
+        TP_SCL_1();
+        tp_delay();
+    }
     iic_stop();
 }
 
@@ -205,35 +280,37 @@ static void iic_bus_recover(void)
 void Touch_Reset(void)
 {
     TP_RST_0();
-    HAL_Delay(10);
+    tp_delay_ms(10);
     TP_RST_1();
-    HAL_Delay(300);
+    tp_delay_ms(300);
 }
 
 uint8_t Touch_GetChipID(void)
 {
     uint8_t id = 0;
     (void)tp_read_regs(REG_ChipID, &id, 1);
-    g_tp_chip_id = id;    /* 调试器/UI 读这个: 0xB5/0xB7=通, 0=总线未见器件 */
-    return id;    /* CST816S≈0xB5, CST816D≈0xB7 */
+    g_tp_chip_id = id; /* 调试器/UI 读这个: 0xB5/0xB7=通, 0=总线未见器件 */
+    return id;         /* CST816S≈0xB5, CST816D≈0xB7 */
 }
 
 /* 双候选地址探测 ChipID: 命中则记住地址; retries_per_addr 控制每个地址重试次数
  * (上电给 5 覆盖引导窗口; 运行时自愈给 1, 避免 lvgl 任务被拖住 1s+) */
 static uint8_t tp_probe(uint8_t retries_per_addr)
 {
-    static const uint8_t addrs[2] = { CST816_ADDR_1, CST816_ADDR_2 };
+    static const uint8_t addrs[2] = {CST816_ADDR_1, CST816_ADDR_2};
     uint8_t a, try_n, id;
 
-    for (a = 0; a < 2; a++) {
-        for (try_n = 0; try_n < retries_per_addr; try_n++) {
-            if (tp_read_regs_at(addrs[a], REG_ChipID, &id, 1) &&
-                id != 0x00 && id != 0xFF) {
+    for (a = 0; a < 2; a++)
+    {
+        for (try_n = 0; try_n < retries_per_addr; try_n++)
+        {
+            if (tp_read_regs_at(addrs[a], REG_ChipID, &id, 1) && id != 0x00 && id != 0xFF)
+            {
                 s_tp_addr8 = addrs[a];
                 g_tp_chip_id = id;
                 return id;
             }
-            HAL_Delay(100);
+            tp_delay_ms(100);
         }
     }
     g_tp_chip_id = 0;
@@ -248,7 +325,7 @@ uint8_t Touch_Init(void)
     tp_sda_out();
     TP_SCL_1();
     TP_SDA_1();
-    HAL_Delay(2);
+    tp_delay_ms(2);
 
     Touch_Reset();
     id = tp_probe(5);
@@ -257,8 +334,9 @@ uint8_t Touch_Init(void)
      * 探测失败也照写 (地址可能尚未定, 写失败无害, GetPoint 兜底自愈再关) */
     (void)tp_write_reg(REG_AutoSleepTime, 0x00);
 
-    if (id == 0) {
-        iic_bus_recover();    /* 未见器件: 先清一次可能的总线卡死再进运行时自愈 */
+    if (id == 0)
+    {
+        iic_bus_recover(); /* 未见器件: 先清一次可能的总线卡死再进运行时自愈 */
     }
     return id;
 }
@@ -271,7 +349,7 @@ uint8_t Touch_Init(void)
  * 做一次 "复位+重新探测地址+重关休眠" 自愈; 没有永久放弃的死角 ——
  * 触摸后来才接好/换料也能自动恢复。
  *****************************************************************************/
-#define TP_FAIL_STREAK_RECOVER  200    /* 5ms/次 约1s，与LVGL输入周期一致 */
+#define TP_FAIL_STREAK_RECOVER 200 /* 5ms/次 约1s，与LVGL输入周期一致 */
 static uint32_t s_tp_fail_streak = 0;
 
 uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
@@ -279,19 +357,30 @@ uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
     uint8_t num, d[4];
     uint16_t px, py;
 
-    if (!tp_read_regs(REG_FingerNum, &num, 1)) {
-        if (++s_tp_fail_streak >= TP_FAIL_STREAK_RECOVER) {
+    if (!tp_read_regs(REG_FingerNum, &num, 1))
+    {
+        if (++s_tp_fail_streak >= TP_FAIL_STREAK_RECOVER)
+        {
             s_tp_fail_streak = 0;
-            Touch_Wakeup();     /* 复位+重探测 (~400ms 一次性代价, 1s 节奏封顶) */
+            Touch_Wakeup(); /* 恢复+复位+重探测，约310~510ms；等待时让出CPU */
         }
         return 0;
     }
     s_tp_fail_streak = 0;
 
-    if (num == 0xFF) return 0;                        /* 芯片在休眠扫描(理论已关) */
-    if (num == 0x00) return 0;                        /* 无手指 */
+    if (num == 0xFF)
+    {
+        return 0; /* 芯片在休眠扫描(理论已关) */
+    }
+    if (num == 0x00)
+    {
+        return 0; /* 无手指 */
+    }
 
-    if (!tp_read_regs(REG_XposH, d, 4)) return 0;       /* XposH..YposL 连读 */
+    if (!tp_read_regs(REG_XposH, d, 4))
+    {
+        return 0; /* XposH..YposL 连读 */
+    }
     px = (uint16_t)(((uint16_t)(d[0] & 0x0F) << 8) | d[1]);
     py = (uint16_t)(((uint16_t)(d[2] & 0x0F) << 8) | d[3]);
 
@@ -312,6 +401,8 @@ void Touch_Sleep(void)
 
 void Touch_Wakeup(void)
 {
-    (void)tp_probe(1);                        /* 复位唤醒 + 地址/ID 轻探测 */
-    (void)tp_write_reg(REG_AutoSleepTime, 0x00);    /* 复位后配置丢失, 重关休眠 */
+    iic_bus_recover();
+    Touch_Reset();
+    (void)tp_probe(1);                         /* 两个候选地址各探测一次 */
+    (void)tp_write_reg(REG_AutoSleepTime, 0x00); /* 复位后配置丢失, 重关休眠 */
 }

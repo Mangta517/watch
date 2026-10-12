@@ -25,15 +25,15 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
 {
     /* 三轴数组统一按机体X/Y/Z排列；四元数q0为标量，q1/q2/q3为向量。 */
     float q0 = s_q.q0, q1 = s_q.q1, q2 = s_q.q2, q3 = s_q.q3;
-    float gravity[3];             /* 四元数预测的单位重力向量 */
-    float accel[3];               /* 加速度，先为LSB，再归一化 */
-    float gyro[3];                /* 修正后的机体角速度，rad/s */
-    float error[3] = {0};         /* 加速度与预测重力的方向误差 */
+    float gravity[3];     /* 四元数预测的单位重力向量 */
+    float accel[3];       /* 加速度，先为LSB，再归一化 */
+    float gyro[3];        /* 修正后的机体角速度，rad/s */
+    float error[3] = {0}; /* 加速度与预测重力的方向误差 */
     float norm, dot;
-    float north[3];               /* 四元数预测的单位磁北向量 */
-    float horizontal[3];          /* 实测磁场的水平投影 */
-    float cross[3];               /* 水平磁场与预测磁北的叉积 */
-    float heading_error;          /* 航向误差，rad */
+    float north[3];      /* 四元数预测的单位磁北向量 */
+    float horizontal[3]; /* 实测磁场的水平投影 */
+    float cross[3];      /* 水平磁场与预测磁北的叉积 */
+    float heading_error; /* 航向误差，rad */
     float sine, cosine, pitch_sine;
     uint8_t i, mag_used = 0;
 
@@ -83,7 +83,7 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
             horizontal[i] = mag_uT[i] - dot * gravity[i];
         }
         norm = sqrtf(horizontal[0] * horizontal[0] + horizontal[1] * horizontal[1] + horizontal[2] * horizontal[2]);
-        if (norm > 5.0f)  /* 水平磁场大于5μT时才修正航向 */
+        if (norm > 5.0f) /* 水平磁场大于5μT时才修正航向 */
         {
             for (i = 0; i < 3; ++i)
             {
@@ -110,8 +110,8 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
     /* 4. 用修正后的三轴角速度递推四元数，再归一化。 */
     dt *= 0.5f;
     s_q.q0 += (-q1 * gyro[0] - q2 * gyro[1] - q3 * gyro[2]) * dt;
-    s_q.q1 += ( q0 * gyro[0] - q3 * gyro[1] + q2 * gyro[2]) * dt;
-    s_q.q2 += ( q3 * gyro[0] + q0 * gyro[1] - q1 * gyro[2]) * dt;
+    s_q.q1 += (q0 * gyro[0] - q3 * gyro[1] + q2 * gyro[2]) * dt;
+    s_q.q2 += (q3 * gyro[0] + q0 * gyro[1] - q1 * gyro[2]) * dt;
     s_q.q3 += (-q2 * gyro[0] + q1 * gyro[1] + q0 * gyro[2]) * dt;
     norm = sqrtf(s_q.q0 * s_q.q0 + s_q.q1 * s_q.q1 + s_q.q2 * s_q.q2 + s_q.q3 * s_q.q3);
     s_q.q0 /= norm;

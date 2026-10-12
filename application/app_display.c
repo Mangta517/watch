@@ -14,8 +14,8 @@
 #include "semphr.h"
 
 #include "lvgl.h"
-#include "lv_port_disp_template.h"    /* → interface/lcd.c   (ST7789, SPI1+背光PWM) */
-#include "lv_port_indev_template.h"   /* → interface/touch.c (CST816, 软件I2C 轮询) */
+#include "lv_port_disp_template.h"  /* → interface/lcd.c   (ST7789, SPI1+背光PWM) */
+#include "lv_port_indev_template.h" /* → interface/touch.c (CST816, 软件I2C 轮询) */
 
 /*********************
  *  锁
@@ -35,9 +35,9 @@ void App_Display_Init(void)
     lv_init();
 
     /* 硬件拉起 + LVGL 注册 + 建树, 全程跑在调用方(lvgl)任务栈上 */
-    lv_port_disp_init();        /* → LCD_Init: ST7789 序列+刷黑+背光 80%      */
-    lv_port_indev_init();       /* → Touch_Init: CST816 复位+配置 (软件I2C轮询) */
-    App_UI_Create();            /* 屏幕/触摸测试页                             */
+    lv_port_disp_init();  /* → LCD_Init: ST7789 序列+刷黑+背光 80%      */
+    lv_port_indev_init(); /* → Touch_Init: CST816 复位+配置 (软件I2C轮询) */
+    App_UI_Create();      /* 屏幕/触摸测试页                             */
 }
 
 void App_Display_Service(void)
@@ -50,11 +50,15 @@ void App_Display_Service(void)
 void App_Display_Lock(void)
 {
     if (s_lvgl_mux != NULL)
+    {
         xSemaphoreTake(s_lvgl_mux, portMAX_DELAY);
+    }
 }
 
 void App_Display_Unlock(void)
 {
     if (s_lvgl_mux != NULL)
+    {
         xSemaphoreGive(s_lvgl_mux);
+    }
 }

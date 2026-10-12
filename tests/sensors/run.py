@@ -24,3 +24,9 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     subprocess.run([exe, "restored"], cwd=root, check=True)
     subprocess.run([exe, "load_failed"], cwd=root, check=True)
     subprocess.run([exe, "save_failed"], cwd=root, check=True)
+    driver_exe = str(Path(out) / "drivers.exe")
+    subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                    "-Itests/sensors/host", "-ICore/Inc", "-Iinterface",
+                    "tests/sensors/driver_harness.c", "interface/lcd.c", "interface/touch.c",
+                    "-o", driver_exe], cwd=root, check=True)
+    subprocess.run([driver_exe], cwd=root, check=True)

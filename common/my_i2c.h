@@ -23,40 +23,39 @@
 #define __MY_I2C_H
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 #include "main.h"
 #include <stdint.h>
 
-/* EEPROM与传感器在调度器启动后均由sensor任务独占；UI只读快照。 */
-typedef enum
-{
-    MY_I2C_BUS_SENSOR = 0,   /* PB14=SCL, PB13=SDA, MPU6050 */
-    MY_I2C_BUS_TP     = 1,   /* PB6 =SCL, PB4 =SDA, 触摸屏   */
-    MY_I2C_BUS_EEPROM = 2,   /* PA12=SCL, PA11=SDA, EEPROM */
-    MY_I2C_BUS_COUNT
-} my_i2c_bus_t;
+    /* EEPROM与传感器在调度器启动后均由sensor任务独占；UI只读快照。 */
+    typedef enum
+    {
+        MY_I2C_BUS_SENSOR = 0, /* PB14=SCL, PB13=SDA, MPU6050 */
+        MY_I2C_BUS_TP = 1,     /* PB6 =SCL, PB4 =SDA, 触摸屏   */
+        MY_I2C_BUS_EEPROM = 2, /* PA12=SCL, PA11=SDA, EEPROM */
+        MY_I2C_BUS_COUNT
+    } my_i2c_bus_t;
 
-/* ---------------------------------------------------------------- 底层时序 */
-void    my_i2c_init(my_i2c_bus_t bus);              /* 初始化该总线 GPIO 并释放总线 */
-void    my_i2c_start(my_i2c_bus_t bus);             /* 起始信号：SCL 高期间 SDA 下降沿 */
-void    my_i2c_stop(my_i2c_bus_t bus);              /* 停止信号：SCL 高期间 SDA 上升沿 */
-uint8_t my_i2c_wait_ack(my_i2c_bus_t bus);          /* 等 slave ACK：0=ACK, 1=NACK */
-void    my_i2c_send_ack(my_i2c_bus_t bus, uint8_t ack); /* 主机发应答：0=ACK, 1=NACK */
-void    my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat);           /* MSB first */
-uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack);            /* MSB first */
+    /* ---------------------------------------------------------------- 底层时序 */
+    void my_i2c_init(my_i2c_bus_t bus);                      /* 初始化该总线 GPIO 并释放总线 */
+    void my_i2c_start(my_i2c_bus_t bus);                     /* 起始信号：SCL 高期间 SDA 下降沿 */
+    void my_i2c_stop(my_i2c_bus_t bus);                      /* 停止信号：SCL 高期间 SDA 上升沿 */
+    uint8_t my_i2c_wait_ack(my_i2c_bus_t bus);               /* 等 slave ACK：0=ACK, 1=NACK */
+    void my_i2c_send_ack(my_i2c_bus_t bus, uint8_t ack);     /* 主机发应答：0=ACK, 1=NACK */
+    void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat);   /* MSB first */
+    uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack); /* MSB first */
 
-/* ---------------------------------------------------------- 成块读写封装 */
-/* dev_addr 为 7 位地址（内部自动移位），reg_addr 为 8 位寄存器地址。
+    /* ---------------------------------------------------------- 成块读写封装 */
+    /* dev_addr 为 7 位地址（内部自动移位），reg_addr 为 8 位寄存器地址。
  * 返回：0=成功，1=NACK/参数错误                                    */
-uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
-                           const uint8_t *dat, uint16_t len);
-uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
-                          uint8_t *dat, uint16_t len);
+    uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr, const uint8_t *dat, uint16_t len);
+    uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr, uint8_t *dat, uint16_t len);
 
-/* 只发送器件写地址并检查ACK，不写寄存器；用于EEPROM内部写周期轮询。 */
-uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev_addr);
+    /* 只发送器件写地址并检查ACK，不写寄存器；用于EEPROM内部写周期轮询。 */
+    uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev_addr);
 
 #ifdef __cplusplus
 }

@@ -29,12 +29,12 @@ if not library.exists() or max(p.stat().st_mtime for p in dependencies) > librar
     print("Building the project's LVGL renderer...", flush=True)
     subprocess.run([gcc, "@" + str(response)], cwd=ROOT, check=True)
 print("Building and testing the watch UI...", flush=True)
-subprocess.run([gcc] + args + ["-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
+subprocess.run([gcc] + args + ["-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/app_clock.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
 from PIL import Image, ImageDraw, ImageFont
 
-names = ["watch", "sensors", "settings", "motion", "environment"]
-titles = ["WATCH", "SENSORS", "SETTINGS", "MOTION", "ENVIRONMENT"]
+names = ["watch", "settings", "motion", "environment", "bluetooth"]
+titles = ["WATCH / FIXED", "SETTINGS / TOP", "SETTINGS / MOTION", "SETTINGS / ENVIRONMENT", "BLUETOOTH"]
 montage = Image.new("RGB", (1360, 406), "#080c12")
 draw = ImageDraw.Draw(montage)
 try:
@@ -52,6 +52,8 @@ for index, (name, title) in enumerate(zip(names, titles)):
     draw.text((x, 355), title, font=small, fill="#7b8ba2")
 draw.text((28, 386), "Preview uses simulated sensor data. Firmware reads the existing sensor snapshot services.", fill="#7b8ba2", font=small)
 montage.save(OUT / "watch-ui-preview.png")
-for name in ["motion_magnetic", "motion_calibrating", "motion_calibration_status", "motion_restored", "motion_save_failed"]:
+for name in ["motion_magnetic", "motion_calibrating", "motion_calibration_status", "motion_restored", "motion_save_failed",
+             "bluetooth", "bluetooth_empty", "bluetooth_tx", "bluetooth_time",
+             "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds"]:
     Image.open(OUT / (name + ".ppm")).save(OUT / (name + ".png"))
 print("Preview:", OUT / "watch-ui-preview.png")

@@ -21,6 +21,7 @@
 #include "dma.h"
 #include "spi.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -92,6 +93,7 @@ int main(void)
   MX_DMA_Init();
   MX_SPI1_Init();
   MX_TIM3_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   /* main 只做 CubeMX 初始化; 任务归口 app_task, 背光/屏幕/触摸由应用层接管 */
   App_Task_Create();   /* 创建全部 FreeRTOS 任务 (含 lvgl 测试任务) */

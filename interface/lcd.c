@@ -18,18 +18,33 @@
 #include "lcd.h"
 #include "spi.h"
 #include "tim.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 /* 引脚快捷宏 (全部来自 CubeMX 生成的 main.h) */
-#define LCD_CS_Clr()  HAL_GPIO_WritePin(LCD_CS_GPIO_Port,  LCD_CS_Pin,  GPIO_PIN_RESET)
-#define LCD_CS_Set()  HAL_GPIO_WritePin(LCD_CS_GPIO_Port,  LCD_CS_Pin,  GPIO_PIN_SET)
-#define LCD_DC_Clr()  HAL_GPIO_WritePin(LCD_DC_GPIO_Port,  LCD_DC_Pin,  GPIO_PIN_RESET)
-#define LCD_DC_Set()  HAL_GPIO_WritePin(LCD_DC_GPIO_Port,  LCD_DC_Pin,  GPIO_PIN_SET)
+#define LCD_CS_Clr()  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET)
+#define LCD_CS_Set()  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET)
+#define LCD_DC_Clr()  HAL_GPIO_WritePin(LCD_DC_GPIO_Port, LCD_DC_Pin, GPIO_PIN_RESET)
+#define LCD_DC_Set()  HAL_GPIO_WritePin(LCD_DC_GPIO_Port, LCD_DC_Pin, GPIO_PIN_SET)
 #define LCD_RES_Clr() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_RESET)
 #define LCD_RES_Set() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_SET)
 
 /* SPI 单笔传输超时(ms)。HAL 用 HAL_GetTick 计时, 内核运行后由 it.c 的
  * SysTick_Handler → HAL_IncTick 持续维护。总线异常时不会永久卡死。 */
-#define LCD_SPI_TMO   1000
+#define LCD_SPI_TMO 1000
+
+static void lcd_delay_ms(uint32_t ms)
+{
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+    {
+        /* 多等一拍，避免调用落在tick末尾时缩短硬件最小等待时间。 */
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+    }
+    else
+    {
+        HAL_Delay(ms);
+    }
+}
 
 /******************************************************************************
  * 底层: 硬件SPI 写 (SPI1 主模式, CubeMX 实配 CPOL=1/CPHA=1 即 Mode3, MSB first;
@@ -37,8 +52,9 @@
  *****************************************************************************/
 static void LCD_Writ_Bus(uint8_t dat)
 {
-    if (HAL_SPI_Transmit(&hspi1, &dat, 1, LCD_SPI_TMO) != HAL_OK) {
-        Error_Handler();   /* SPI 总线故障, 停机便于调试 */
+    if (HAL_SPI_Transmit(&hspi1, &dat, 1, LCD_SPI_TMO) != HAL_OK)
+    {
+        Error_Handler(); /* SPI 总线故障, 停机便于调试 */
     }
 }
 
@@ -53,16 +69,17 @@ void LCD_WR_DATA(uint16_t dat)
     uint8_t tmp[2];
     tmp[0] = (uint8_t)(dat >> 8);
     tmp[1] = (uint8_t)(dat);
-    if (HAL_SPI_Transmit(&hspi1, tmp, 2, LCD_SPI_TMO) != HAL_OK) {
+    if (HAL_SPI_Transmit(&hspi1, tmp, 2, LCD_SPI_TMO) != HAL_OK)
+    {
         Error_Handler();
     }
 }
 
 void LCD_WR_REG(uint8_t reg)
 {
-    LCD_DC_Clr();             /* 命令 */
+    LCD_DC_Clr(); /* 命令 */
     LCD_Writ_Bus(reg);
-    LCD_DC_Set();             /* 恢复数据模式 */
+    LCD_DC_Set(); /* 恢复数据模式 */
 }
 
 /******************************************************************************
@@ -73,13 +90,17 @@ void LCD_Address_Set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
     y1 += LCD_OFFSET_Y;
     y2 += LCD_OFFSET_Y;
 
-    LCD_WR_REG(0x2A);         /* 列地址 */
-    LCD_WR_DATA8(0x00); LCD_WR_DATA8((uint8_t)x1);
-    LCD_WR_DATA8(0x00); LCD_WR_DATA8((uint8_t)x2);
-    LCD_WR_REG(0x2B);         /* 行地址 */
-    LCD_WR_DATA8((uint8_t)(y1 >> 8)); LCD_WR_DATA8((uint8_t)y1);
-    LCD_WR_DATA8((uint8_t)(y2 >> 8)); LCD_WR_DATA8((uint8_t)y2);
-    LCD_WR_REG(0x2C);         /* 进入显存写入 */
+    LCD_WR_REG(0x2A); /* 列地址 */
+    LCD_WR_DATA8(0x00);
+    LCD_WR_DATA8((uint8_t)x1);
+    LCD_WR_DATA8(0x00);
+    LCD_WR_DATA8((uint8_t)x2);
+    LCD_WR_REG(0x2B); /* 行地址 */
+    LCD_WR_DATA8((uint8_t)(y1 >> 8));
+    LCD_WR_DATA8((uint8_t)y1);
+    LCD_WR_DATA8((uint8_t)(y2 >> 8));
+    LCD_WR_DATA8((uint8_t)y2);
+    LCD_WR_REG(0x2C); /* 进入显存写入 */
 }
 
 /******************************************************************************
@@ -95,16 +116,22 @@ void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, 
     HAL_StatusTypeDef st = HAL_OK;
 
     LCD_Address_Set(xsta, ysta, xend, yend);
-    while (bytes > 0xFFFF) {                     /* 每片 <=64KB-2, 保证整像素边界 */
+    while (bytes > 0xFFFF)
+    { /* 每片 <=64KB-2, 保证整像素边界 */
         st = HAL_SPI_Transmit(&hspi1, (uint8_t *)p, 0xFFFE, LCD_SPI_TMO);
-        if (st != HAL_OK) break;
+        if (st != HAL_OK)
+        {
+            break;
+        }
         p += 0xFFFE;
         bytes -= 0xFFFE;
     }
-    if (st == HAL_OK && bytes) {
+    if (st == HAL_OK && bytes)
+    {
         st = HAL_SPI_Transmit(&hspi1, (uint8_t *)p, (uint16_t)bytes, LCD_SPI_TMO);
     }
-    if (st != HAL_OK) {               /* 刷屏发送失败不再静默丢帧 */
+    if (st != HAL_OK)
+    { /* 刷屏发送失败不再静默丢帧 */
         Error_Handler();
     }
 }
@@ -127,14 +154,17 @@ void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t ye
 
     LCD_Address_Set(xsta, ysta, xend, yend);
 
-    if (bytes > 0xFFFE) {            /* F4 HAL Size 为 uint16: 超 64KB 罕见大块, 退回阻塞分片 */
+    if (bytes > 0xFFFE)
+    { /* F4 HAL Size 为 uint16: 超 64KB 罕见大块, 退回阻塞分片 */
         LCD_Color_Fill(xsta, ysta, xend, yend, color_p);
-        if (s_lcd_flush_done_cb != NULL) {
-            s_lcd_flush_done_cb();    /* 阻塞路径无 DMA 中断, 手动补完成事件 */
+        if (s_lcd_flush_done_cb != NULL)
+        {
+            s_lcd_flush_done_cb(); /* 阻塞路径无 DMA 中断, 手动补完成事件 */
         }
         return;
     }
-    if (HAL_SPI_Transmit_DMA(&hspi1, (uint8_t *)color_p, (uint16_t)bytes) != HAL_OK) {
+    if (HAL_SPI_Transmit_DMA(&hspi1, (uint8_t *)color_p, (uint16_t)bytes) != HAL_OK)
+    {
         Error_Handler();
     }
 }
@@ -143,10 +173,14 @@ void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t ye
  * 注意: 只做"等末字节移位完成 + 清残留标志 + 通知", 不调任何 FreeRTOS API。 */
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    if (hspi->Instance == SPI1) {
-        while (READ_BIT(hspi->Instance->SR, SPI_SR_BSY) != 0) { }  /* 等末字节移出(~1字节位时间) */
-        (void)hspi->Instance->DR;                                   /* 清可能残留的 RXNE/OVR */
-        if (s_lcd_flush_done_cb != NULL) {
+    if (hspi->Instance == SPI1)
+    {
+        while (READ_BIT(hspi->Instance->SR, SPI_SR_BSY) != 0)
+        {
+        } /* 等末字节移出(~1字节位时间) */
+        (void)hspi->Instance->DR; /* 清可能残留的 RXNE/OVR */
+        if (s_lcd_flush_done_cb != NULL)
+        {
             s_lcd_flush_done_cb();
         }
     }
@@ -159,11 +193,27 @@ void LCD_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, uint16
     uint16_t buf[64];
     uint32_t i;
 
-    for (i = 0; i < 64; i++) buf[i] = color;
+    for (i = 0; i < 64; i++)
+    {
+        buf[i] = color;
+    }
 
     LCD_Address_Set(xsta, ysta, xend, yend);
-    while (px >= 64) { HAL_SPI_Transmit(&hspi1, (uint8_t *)buf, 128, LCD_SPI_TMO); px -= 64; }
-    if (px) HAL_SPI_Transmit(&hspi1, (uint8_t *)buf, (uint16_t)(px * 2), LCD_SPI_TMO);
+    while (px >= 64)
+    {
+        if (HAL_SPI_Transmit(&hspi1, (uint8_t *)buf, 128, LCD_SPI_TMO) != HAL_OK)
+        {
+            Error_Handler();
+        }
+        px -= 64;
+    }
+    if (px)
+    {
+        if (HAL_SPI_Transmit(&hspi1, (uint8_t *)buf, (uint16_t)(px * 2), LCD_SPI_TMO) != HAL_OK)
+        {
+            Error_Handler();
+        }
+    }
 }
 
 void LCD_Clear(uint16_t color)
@@ -185,18 +235,21 @@ void LCD_Open_Light(void)
     /* 防御性对齐: CubeMX(.ioc) 已配 Period=300, 此处按 LCD_BL_ARR 重写一次,
      * 防止 .ioc 的 Period 被改动后频率漂移 (Preload=DISABLE, 写 AR 立即生效) */
     __HAL_TIM_SET_AUTORELOAD(&htim3, LCD_BL_ARR);
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0);   /* 先熄灭再启动, 避免闪一下满亮 */
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0); /* 先熄灭再启动, 避免闪一下满亮 */
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
 }
 
 void LCD_Set_Light(uint8_t percent)
 {
     uint32_t ccr;
-    if (percent > 100) percent = 100;
+    if (percent > 100)
+    {
+        percent = 100;
+    }
 #if LCD_BL_CCR_INVERT
     ccr = (uint32_t)(100 - percent) * LCD_BL_ARR / 100;
 #else
-    ccr = (uint32_t)percent * LCD_BL_ARR / 100;       /* 高极性: CCR 越大越亮 */
+    ccr = (uint32_t)percent * LCD_BL_ARR / 100; /* 高极性: CCR 越大越亮 */
 #endif
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, ccr);
 }
@@ -212,56 +265,90 @@ void LCD_Close_Light(void)
 void LCD_Init(void)
 {
     /* CS/DC/RST 已由 CubeMX 的 MX_GPIO_Init() 配好推挽输出, 这里只管电平 */
-    LCD_CS_Clr();             /* 单从机, CS 常拉低 (同 OV_Watch) */
+    LCD_CS_Clr(); /* 单从机, CS 常拉低 (同 OV_Watch) */
 
     /* SPI1_TX DMA 完成中断优先级: 从 CubeMX 的 0 提到 12 (≥configMAX_SYSCALL
      * 等效优先级 11 之下)。本回调链不触 FreeRTOS API, 原值也能工作, 提级后
      * 与临界区共处更稳 (刷屏完成事件不会打断内核临界段)。 */
     HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 12, 0);
 
-    LCD_RES_Clr();            /* 硬复位 */
-    HAL_Delay(100);
+    LCD_RES_Clr(); /* 硬复位 */
+    lcd_delay_ms(100);
     LCD_RES_Set();
-    HAL_Delay(100);
+    lcd_delay_ms(100);
 
-    LCD_WR_REG(0x11);         /* Sleep Out */
-    HAL_Delay(120);
+    LCD_WR_REG(0x11); /* Sleep Out */
+    lcd_delay_ms(120);
 
-    LCD_WR_REG(0x36); LCD_WR_DATA8(0xC0);   /* MADCTL: 竖屏 */
-    LCD_WR_REG(0x3A); LCD_WR_DATA8(0x05);   /* 16bit RGB565 */
+    LCD_WR_REG(0x36);
+    LCD_WR_DATA8(0xC0); /* MADCTL: 竖屏 */
+    LCD_WR_REG(0x3A);
+    LCD_WR_DATA8(0x05); /* 16bit RGB565 */
 
-    LCD_WR_REG(0xB2);                       /* Porch: 0C 0C 00 33 33 */
-    LCD_WR_DATA8(0x0C); LCD_WR_DATA8(0x0C); LCD_WR_DATA8(0x00);
-    LCD_WR_DATA8(0x33); LCD_WR_DATA8(0x33);
+    LCD_WR_REG(0xB2); /* Porch: 0C 0C 00 33 33 */
+    LCD_WR_DATA8(0x0C);
+    LCD_WR_DATA8(0x0C);
+    LCD_WR_DATA8(0x00);
+    LCD_WR_DATA8(0x33);
+    LCD_WR_DATA8(0x33);
 
-    LCD_WR_REG(0xB7); LCD_WR_DATA8(0x35);   /* Gate Control */
-    LCD_WR_REG(0xBB); LCD_WR_DATA8(0x19);   /* VCOM */
-    LCD_WR_REG(0xC0); LCD_WR_DATA8(0x2C);   /* LCM */
-    LCD_WR_REG(0xC2); LCD_WR_DATA8(0x01);   /* VDV/VRH Enable */
-    LCD_WR_REG(0xC3); LCD_WR_DATA8(0x12);   /* VRH Set */
-    LCD_WR_REG(0xC4); LCD_WR_DATA8(0x20);   /* VDV Set */
-    LCD_WR_REG(0xC6); LCD_WR_DATA8(0x0F);   /* Frame Rate 60Hz */
-    LCD_WR_REG(0xD0); LCD_WR_DATA8(0xA4); LCD_WR_DATA8(0xA1); /* Power Enable */
+    LCD_WR_REG(0xB7);
+    LCD_WR_DATA8(0x35); /* Gate Control */
+    LCD_WR_REG(0xBB);
+    LCD_WR_DATA8(0x19); /* VCOM */
+    LCD_WR_REG(0xC0);
+    LCD_WR_DATA8(0x2C); /* LCM */
+    LCD_WR_REG(0xC2);
+    LCD_WR_DATA8(0x01); /* VDV/VRH Enable */
+    LCD_WR_REG(0xC3);
+    LCD_WR_DATA8(0x12); /* VRH Set */
+    LCD_WR_REG(0xC4);
+    LCD_WR_DATA8(0x20); /* VDV Set */
+    LCD_WR_REG(0xC6);
+    LCD_WR_DATA8(0x0F); /* Frame Rate 60Hz */
+    LCD_WR_REG(0xD0);
+    LCD_WR_DATA8(0xA4);
+    LCD_WR_DATA8(0xA1); /* Power Enable */
 
-    LCD_WR_REG(0xE0);                       /* GTCT 正极性 14 字节 */
-    LCD_WR_DATA8(0xD0); LCD_WR_DATA8(0x04); LCD_WR_DATA8(0x0D); LCD_WR_DATA8(0x11);
-    LCD_WR_DATA8(0x13); LCD_WR_DATA8(0x2B); LCD_WR_DATA8(0x3F); LCD_WR_DATA8(0x54);
-    LCD_WR_DATA8(0x4C); LCD_WR_DATA8(0x18); LCD_WR_DATA8(0x0D); LCD_WR_DATA8(0x0B);
-    LCD_WR_DATA8(0x1F); LCD_WR_DATA8(0x23);
+    LCD_WR_REG(0xE0); /* GTCT 正极性 14 字节 */
+    LCD_WR_DATA8(0xD0);
+    LCD_WR_DATA8(0x04);
+    LCD_WR_DATA8(0x0D);
+    LCD_WR_DATA8(0x11);
+    LCD_WR_DATA8(0x13);
+    LCD_WR_DATA8(0x2B);
+    LCD_WR_DATA8(0x3F);
+    LCD_WR_DATA8(0x54);
+    LCD_WR_DATA8(0x4C);
+    LCD_WR_DATA8(0x18);
+    LCD_WR_DATA8(0x0D);
+    LCD_WR_DATA8(0x0B);
+    LCD_WR_DATA8(0x1F);
+    LCD_WR_DATA8(0x23);
 
-    LCD_WR_REG(0xE1);                       /* GTCT 负极性 14 字节 */
-    LCD_WR_DATA8(0xD0); LCD_WR_DATA8(0x04); LCD_WR_DATA8(0x0C); LCD_WR_DATA8(0x11);
-    LCD_WR_DATA8(0x13); LCD_WR_DATA8(0x2C); LCD_WR_DATA8(0x3F); LCD_WR_DATA8(0x44);
-    LCD_WR_DATA8(0x51); LCD_WR_DATA8(0x2F); LCD_WR_DATA8(0x1F); LCD_WR_DATA8(0x1F);
-    LCD_WR_DATA8(0x20); LCD_WR_DATA8(0x23);
+    LCD_WR_REG(0xE1); /* GTCT 负极性 14 字节 */
+    LCD_WR_DATA8(0xD0);
+    LCD_WR_DATA8(0x04);
+    LCD_WR_DATA8(0x0C);
+    LCD_WR_DATA8(0x11);
+    LCD_WR_DATA8(0x13);
+    LCD_WR_DATA8(0x2C);
+    LCD_WR_DATA8(0x3F);
+    LCD_WR_DATA8(0x44);
+    LCD_WR_DATA8(0x51);
+    LCD_WR_DATA8(0x2F);
+    LCD_WR_DATA8(0x1F);
+    LCD_WR_DATA8(0x1F);
+    LCD_WR_DATA8(0x20);
+    LCD_WR_DATA8(0x23);
 
-    LCD_WR_REG(0x21);                       /* Display Inversion ON (OV_Watch 实配) */
-    LCD_WR_REG(0x29);                       /* Display ON */
+    LCD_WR_REG(0x21); /* Display Inversion ON (OV_Watch 实配) */
+    LCD_WR_REG(0x29); /* Display ON */
 
-    LCD_Clear(LCD_BLACK);   /* 上电 GRAM 是随机数据, 立即刷黑, 干净启动 */
+    LCD_Clear(LCD_BLACK); /* 上电 GRAM 是随机数据, 立即刷黑, 干净启动 */
 
     LCD_Open_Light();
-    LCD_Set_Light(80);                      /* 默认 80% 亮度 */
+    LCD_Set_Light(80); /* 默认 80% 亮度 */
 }
 
 /******************************************************************************
@@ -270,11 +357,11 @@ void LCD_Init(void)
 void LCD_ST7789_SleepIn(void)
 {
     LCD_WR_REG(0x10);
-    HAL_Delay(100);
+    lcd_delay_ms(100);
 }
 
 void LCD_ST7789_SleepOut(void)
 {
     LCD_WR_REG(0x11);
-    HAL_Delay(100);
+    lcd_delay_ms(100);
 }

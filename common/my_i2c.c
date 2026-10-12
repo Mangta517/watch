@@ -20,24 +20,23 @@
 #include "my_i2c.h"
 
 /* 位半周期延时: 与 touch.c 的 tp_delay(n=80) 同档, ~3µs @100MHz */
-#define MY_I2C_DELAY_LOOPS   80
+#define MY_I2C_DELAY_LOOPS 80
 
 /* ================================================================ 总线表 */
 typedef struct
 {
     GPIO_TypeDef *scl_port;
-    uint16_t      scl_pin;
+    uint16_t scl_pin;
     GPIO_TypeDef *sda_port;
-    uint16_t      sda_pin;
+    uint16_t sda_pin;
 } my_i2c_pin_t;
 
-static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] =
-{
+static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] = {
     /* SENSOR 总线: MPU6050 等 */
-    { SENSOR_SCL_GPIO_Port, SENSOR_SCL_Pin, SENSOR_SDA_GPIO_Port, SENSOR_SDA_Pin },
+    {SENSOR_SCL_GPIO_Port, SENSOR_SCL_Pin, SENSOR_SDA_GPIO_Port, SENSOR_SDA_Pin},
     /* TP 总线: 触摸屏 (touch.c 用自己的位翻实现, 本表项为其保留) */
-    { TP_SCL_GPIO_Port,     TP_SCL_Pin,     TP_SDA_GPIO_Port,     TP_SDA_Pin     },
-    { EEPROM_SCL_GPIO_Port, EEPROM_SCL_Pin, EEPROM_SDA_GPIO_Port, EEPROM_SDA_Pin },
+    {TP_SCL_GPIO_Port, TP_SCL_Pin, TP_SDA_GPIO_Port, TP_SDA_Pin},
+    {EEPROM_SCL_GPIO_Port, EEPROM_SCL_Pin, EEPROM_SDA_GPIO_Port, EEPROM_SDA_Pin},
 };
 
 /* ================================================================ 私有工具 */
@@ -75,8 +74,7 @@ static inline void sda_lo(my_i2c_bus_t bus)
 
 static inline uint8_t sda_read(my_i2c_bus_t bus)
 {
-    return (HAL_GPIO_ReadPin(my_i2c_pin[bus].sda_port, my_i2c_pin[bus].sda_pin)
-            == GPIO_PIN_SET) ? 1 : 0;
+    return (HAL_GPIO_ReadPin(my_i2c_pin[bus].sda_port, my_i2c_pin[bus].sda_pin) == GPIO_PIN_SET) ? 1 : 0;
 }
 
 /**
@@ -91,13 +89,13 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
     GPIO_InitTypeDef gpio = {0};
     uint32_t primask = __get_PRIMASK();
 
-    gpio.Pin   = my_i2c_pin[bus].sda_pin;
-    gpio.Mode  = as_input ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT_PP;
+    gpio.Pin = my_i2c_pin[bus].sda_pin;
+    gpio.Mode = as_input ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT_PP;
     if (!as_input && bus == MY_I2C_BUS_EEPROM)
     {
         gpio.Mode = GPIO_MODE_OUTPUT_OD;
     }
-    gpio.Pull  = GPIO_PULLUP;
+    gpio.Pull = GPIO_PULLUP;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
 
     __disable_irq();
@@ -133,20 +131,20 @@ void my_i2c_init(my_i2c_bus_t bus)
 
     /* SCL: 推挽输出, 初始高 (SDA 方向随后由 sda_dir 逐相切换) */
     __disable_irq();
-    gpio.Pin   = my_i2c_pin[bus].scl_pin;
-    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    gpio.Pin = my_i2c_pin[bus].scl_pin;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
     if (bus == MY_I2C_BUS_EEPROM)
     {
         gpio.Mode = GPIO_MODE_OUTPUT_OD;
     }
-    gpio.Pull  = GPIO_PULLUP;
+    gpio.Pull = GPIO_PULLUP;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(my_i2c_pin[bus].scl_port, &gpio);
     __set_PRIMASK(primask);
 
     scl_hi(bus);
-    my_i2c_sda_dir(bus, 0);   /* SDA 配为输出 */
-    sda_hi(bus);               /* 释放总线, 空闲高 */
+    my_i2c_sda_dir(bus, 0); /* SDA 配为输出 */
+    sda_hi(bus);            /* 释放总线, 空闲高 */
     my_i2c_delay();
 }
 
@@ -159,7 +157,7 @@ void my_i2c_start(my_i2c_bus_t bus)
     sda_hi(bus);
     scl_hi(bus);
     my_i2c_delay();
-    sda_lo(bus);     /* SCL 高电平期间 SDA 拉低 = START */
+    sda_lo(bus); /* SCL 高电平期间 SDA 拉低 = START */
     my_i2c_delay();
     scl_lo(bus);
     my_i2c_delay();
@@ -174,7 +172,7 @@ void my_i2c_stop(my_i2c_bus_t bus)
     sda_lo(bus);
     scl_hi(bus);
     my_i2c_delay();
-    sda_hi(bus);     /* SCL 高电平期间 SDA 释放 = STOP */
+    sda_hi(bus); /* SCL 高电平期间 SDA 释放 = STOP */
     my_i2c_delay();
 }
 
@@ -185,10 +183,10 @@ void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat)
 {
     uint8_t i;
 
-    my_i2c_sda_dir(bus, 0);                   /* 发送相: SDA 输出 */
+    my_i2c_sda_dir(bus, 0); /* 发送相: SDA 输出 */
     for (i = 0; i < 8; i++)
     {
-        scl_lo(bus);                           /* SCL 低电平期间换数据 */
+        scl_lo(bus); /* SCL 低电平期间换数据 */
         if (dat & 0x80)
         {
             sda_hi(bus);
@@ -197,10 +195,10 @@ void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat)
         {
             sda_lo(bus);
         }
-        my_i2c_delay();                        /* 数据建立 */
-        scl_hi(bus);                           /* SCL 上升沿从机采样 */
+        my_i2c_delay(); /* 数据建立 */
+        scl_hi(bus);    /* SCL 上升沿从机采样 */
         my_i2c_delay();
-        scl_lo(bus);                           /* 下降沿后再移位 */
+        scl_lo(bus); /* 下降沿后再移位 */
         dat <<= 1;
     }
 }
@@ -214,13 +212,13 @@ uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
     uint8_t i;
     uint8_t dat = 0;
 
-    my_i2c_sda_dir(bus, 1);                   /* 接收相: SDA 输入, 交给从机 */
+    my_i2c_sda_dir(bus, 1); /* 接收相: SDA 输入, 交给从机 */
     for (i = 0; i < 8; i++)
     {
         scl_lo(bus);
         my_i2c_delay();
-        scl_hi(bus);                           /* SCL 上升沿从机更新数据 */
-        my_i2c_delay();                        /* 等线路稳定后再采样 (关键!) */
+        scl_hi(bus);    /* SCL 上升沿从机更新数据 */
+        my_i2c_delay(); /* 等线路稳定后再采样 (关键!) */
         dat <<= 1;
         if (sda_read(bus))
         {
@@ -229,7 +227,7 @@ uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
     }
     scl_lo(bus);
 
-    my_i2c_send_ack(bus, ack);                 /* 主机产生第 9 个时钟 + ACK/NACK */
+    my_i2c_send_ack(bus, ack); /* 主机产生第 9 个时钟 + ACK/NACK */
     return dat;
 }
 
@@ -241,18 +239,18 @@ uint8_t my_i2c_wait_ack(my_i2c_bus_t bus)
 {
     uint8_t ack;
 
-    my_i2c_sda_dir(bus, 1);                   /* 释放 SDA 让从机拉低 */
+    my_i2c_sda_dir(bus, 1); /* 释放 SDA 让从机拉低 */
     scl_lo(bus);
     my_i2c_delay();
     scl_hi(bus);
-    my_i2c_delay();                            /* 等从机驱动建立 */
-    ack = sda_read(bus);                       /* 从机拉低 = ACK */
+    my_i2c_delay();      /* 等从机驱动建立 */
+    ack = sda_read(bus); /* 从机拉低 = ACK */
     scl_lo(bus);
     my_i2c_delay();
-    my_i2c_sda_dir(bus, 0);                   /* 恢复输出相 */
+    my_i2c_sda_dir(bus, 0); /* 恢复输出相 */
     sda_hi(bus);
 
-    return ack;                                /* 0=ACK, 1=NACK */
+    return ack; /* 0=ACK, 1=NACK */
 }
 
 /**
@@ -265,17 +263,17 @@ void my_i2c_send_ack(my_i2c_bus_t bus, uint8_t ack)
     scl_lo(bus);
     if (ack)
     {
-        sda_hi(bus);                           /* NACK */
+        sda_hi(bus); /* NACK */
     }
     else
     {
-        sda_lo(bus);                           /* ACK  */
+        sda_lo(bus); /* ACK  */
     }
     my_i2c_delay();
     scl_hi(bus);
     my_i2c_delay();
     scl_lo(bus);
-    my_i2c_sda_dir(bus, 1);                   /* 数据阶段前释放 SDA (输入+上拉=高) */
+    my_i2c_sda_dir(bus, 1); /* 数据阶段前释放 SDA (输入+上拉=高) */
     my_i2c_delay();
 }
 
@@ -299,8 +297,7 @@ uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev_addr)
  * @param dev_addr 7 位器件地址（如 MPU6050 为 0x68）
  * @return 0=成功，1=NACK/参数错误（已自动发 STOP）
  */
-uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
-                           const uint8_t *dat, uint16_t len)
+uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr, const uint8_t *dat, uint16_t len)
 {
     uint16_t i;
 
@@ -310,7 +307,7 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
     }
 
     my_i2c_start(bus);
-    my_i2c_write_byte(bus, (uint8_t)(dev_addr << 1));        /* 地址 + 写位 */
+    my_i2c_write_byte(bus, (uint8_t)(dev_addr << 1)); /* 地址 + 写位 */
     if (my_i2c_wait_ack(bus))
     {
         my_i2c_stop(bus);
@@ -344,8 +341,7 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
  * @param dev_addr 7 位器件地址（如 MPU6050 为 0x68）
  * @return 0=成功，1=NACK/参数错误（已自动发 STOP）
  */
-uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
-                          uint8_t *dat, uint16_t len)
+uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr, uint8_t *dat, uint16_t len)
 {
     uint16_t i;
 

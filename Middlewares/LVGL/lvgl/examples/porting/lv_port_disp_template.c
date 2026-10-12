@@ -26,7 +26,7 @@ static void lcd_flush_ready_cb(void);
  *  STATIC VARIABLES
  **********************/
 /* 双块 1/10 屏 partial buffer, 内部 SRAM (.bss): buf_1 DMA 搬运期间 LVGL 渲染 buf_2 */
-#define LVGL_BUF_PX   (LCD_WIDTH * LCD_HEIGHT / 10)
+#define LVGL_BUF_PX (LCD_WIDTH * LCD_HEIGHT / 10)
 static lv_color_t buf_1[LVGL_BUF_PX];
 static lv_color_t buf_2[LVGL_BUF_PX];
 
@@ -49,8 +49,8 @@ void lv_port_disp_init(void)
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res  = LCD_WIDTH;
-    disp_drv.ver_res  = LCD_HEIGHT;
+    disp_drv.hor_res = LCD_WIDTH;
+    disp_drv.ver_res = LCD_HEIGHT;
     disp_drv.flush_cb = disp_flush;
     disp_drv.draw_buf = &draw_buf_dsc;
     lv_disp_drv_register(&disp_drv);
@@ -68,9 +68,7 @@ static void disp_init(void)
 static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
 {
     s_flush_drv = disp_drv;
-    LCD_Color_Fill_DMA((uint16_t)area->x1, (uint16_t)area->y1,
-                       (uint16_t)area->x2, (uint16_t)area->y2,
-                       (const uint16_t *)color_p);
+    LCD_Color_Fill_DMA((uint16_t)area->x1, (uint16_t)area->y1, (uint16_t)area->x2, (uint16_t)area->y2, (const uint16_t *)color_p);
 }
 
 /* lcd.c 的 HAL_SPI_TxCpltCallback 在 DMA2_Stream2 中断上下文调用此处。
@@ -78,7 +76,8 @@ static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_
 static void lcd_flush_ready_cb(void)
 {
     lv_disp_drv_t *drv = (lv_disp_drv_t *)s_flush_drv;
-    if (drv != NULL) {
+    if (drv != NULL)
+    {
         s_flush_drv = NULL;
         lv_disp_flush_ready(drv);
     }

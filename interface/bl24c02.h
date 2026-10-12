@@ -8,9 +8,9 @@
 
 #include <stdint.h>
 
-#define BL24C02_ADDR            0x50
-#define BL24C02_CAPACITY_BYTES  256U
-#define BL24C02_PAGE_BYTES      16U
+#define BL24C02_ADDR           0x50
+#define BL24C02_CAPACITY_BYTES 256U
+#define BL24C02_PAGE_BYTES     16U
 
 void bl24c02_init(void);
 /* 返回0=成功、1=参数/通信/写周期超时；read可跨页，write自动按页边界拆分。 */
