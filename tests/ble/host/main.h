@@ -33,8 +33,8 @@ typedef struct
 #define BLE_EN_Pin                     (1U << 8)
 #define BLE_TX_Pin                     (1U << 9)
 #define BLE_RX_Pin                     (1U << 10)
-#define BLE_LED_GPIO_Port              GPIOB
-#define BLE_LED_Pin                    (1U << 15)
+#define HEART_LED_GPIO_Port              GPIOB
+#define HEART_LED_Pin                    (1U << 15)
 #define GPIO_MODE_INPUT                0U
 #define GPIO_MODE_AF_PP                2U
 #define GPIO_PULLDOWN                  2U

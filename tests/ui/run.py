@@ -54,6 +54,8 @@ draw.text((28, 386), "Preview uses simulated sensor data. Firmware reads the exi
 montage.save(OUT / "watch-ui-preview.png")
 for name in ["motion_magnetic", "motion_calibrating", "motion_calibration_status", "motion_restored", "motion_save_failed",
              "bluetooth", "bluetooth_empty", "bluetooth_tx", "bluetooth_time",
-             "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds"]:
+             "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds",
+             "heart", "heart_measuring", "heart_no_signal", "heart_unavailable",
+             "aht21", "aht21_measuring", "aht21_crc_error", "aht21_unavailable"]:
     Image.open(OUT / (name + ".ppm")).save(OUT / (name + ".png"))
 print("Preview:", OUT / "watch-ui-preview.png")

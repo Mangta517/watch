@@ -5,14 +5,14 @@
 #include <string.h>
 
 UART_HandleTypeDef huart1 = {USART1, {115200}};
-static uint32_t tick, power_tick, mask;
+static uint32_t tick, mask;
 static uint8_t *rx_target;
 static int rx_armed, powered, connected, boots, writes, silent, reject_setting;
 static int fail_tx, fail_rx;
 static uint32_t uart_gpio_mode;
 static char saved_name[31] = "F411-Watch-SPP", current_name[31];
 static char saved_ble_name[31] = "KT6368A-BLE", current_ble_name[31];
-static char saved_ble[3] = "00", saved_spp[3] = "01";
+static char saved_ble[3] = "00", saved_spp[3] = "00";
 static char current_ble[3], current_spp[3];
 static char pending[256];
 static size_t pending_pos, pending_size;
@@ -81,7 +81,6 @@ void HAL_GPIO_WritePin(void *port, uint16_t pin, GPIO_PinState value)
     if (value == GPIO_PIN_SET && !powered)
     {
         boots++;
-        power_tick = tick;
         strcpy(current_name, saved_name);
         strcpy(current_ble_name, saved_ble_name);
         strcpy(current_ble, saved_ble);
@@ -96,8 +95,10 @@ void HAL_GPIO_WritePin(void *port, uint16_t pin, GPIO_PinState value)
 }
 GPIO_PinState HAL_GPIO_ReadPin(void *port, uint16_t pin)
 {
-    assert(port == BLE_LED_GPIO_Port && pin == BLE_LED_Pin);
-    return (powered && (connected || (uint32_t)(tick - power_tick) < 1000U)) ? GPIO_PIN_SET : GPIO_PIN_RESET;
+    (void)port;
+    (void)pin;
+    assert(0 && "BLE driver must not read the heart LED or any unconnected status GPIO");
+    return GPIO_PIN_RESET;
 }
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size)
 {
@@ -201,12 +202,12 @@ int main(void)
     uint32_t errors;
 
     assert(kt6368a_get_init_status() == HAL_ERROR);
-    /* 从之前的SPP配置切回BLE，设置只有重新上电才生效，SPP名称保持不变。 */
+    /* 开启BLE和SPP，设置只有重新上电才生效，SPP名称保持不变。 */
     assert(kt6368a_init() == HAL_OK);
     assert(kt6368a_get_init_status() == HAL_OK);
     assert(strcmp(current_ble_name, KT6368A_BLE_NAME) == 0);
     assert(strcmp(current_name, "F411-Watch-SPP") == 0);
-    assert(strcmp(current_spp, "00") == 0 && strcmp(current_ble, "01") == 0);
+    assert(strcmp(current_spp, "01") == 0 && strcmp(current_ble, "01") == 0);
     assert(boots == 2 && writes == 3 && !kt6368a_is_connected());
     before = writes;
     assert(kt6368a_init() == HAL_OK);
@@ -249,12 +250,13 @@ int main(void)
     assert(kt6368a_read(buffer, sizeof(buffer)) == 1 && buffer[0] == 0xA5);
 
     connected = 1;
-    assert(kt6368a_is_connected());
+    assert(!kt6368a_is_connected()); /* 手机连接也不能通过本板 GPIO 确认 */
     assert(kt6368a_write((const uint8_t *)"hello", 5, 100) == HAL_OK);
     assert(kt6368a_write(buffer, 513, 100) == HAL_ERROR);
-    assert(kt6368a_at_command("AT+TM\r\n", "TM+", response, sizeof(response), 100) == HAL_BUSY);
+    assert(kt6368a_at_command("AT+TM\r\n", "TM+", response, sizeof(response), 100) == HAL_TIMEOUT);
     connected = 0;
-    assert(kt6368a_write(buffer, 1, 100) == HAL_BUSY);
+    /* 无状态脚时不按连接状态拦截，UART 成功不保证手机收到。 */
+    assert(kt6368a_write(buffer, 1, 100) == HAL_OK);
     assert(kt6368a_at_command("AT+TM", "TM+", response, sizeof(response), 100) == HAL_ERROR);
     assert(kt6368a_configure("bad\r\nname") == HAL_ERROR);
 
@@ -283,6 +285,7 @@ int main(void)
     reject_setting = 0;
     kt6368a_power_off();
     assert(!powered && !rx_armed && uart_gpio_mode == GPIO_MODE_INPUT);
+    assert(kt6368a_write(buffer, 1, 100) == HAL_BUSY);
     assert(!kt6368a_is_connected() && kt6368a_read(buffer, sizeof(buffer)) == 0);
     fail_rx = 1;
     assert(kt6368a_power_on() == HAL_ERROR && !powered);
@@ -291,11 +294,11 @@ int main(void)
     assert(kt6368a_power_on() == HAL_OK); /* HAL tick回绕不影响启动判断 */
     assert(!kt6368a_is_connected());
     connected = 1;
-    assert(kt6368a_is_connected());
+    assert(!kt6368a_is_connected()); /* 手机连接也不能通过本板 GPIO 确认 */
     connected = 0;
     silent = 1;
     assert(kt6368a_init() == HAL_TIMEOUT);
     assert(kt6368a_get_init_status() == HAL_TIMEOUT);
-    puts("KT6368A: config persistence, RX wrap/overflow, UART error recovery, AT framing/timeouts, power and link checks passed.");
+    puts("KT6368A: config persistence, RX wrap/overflow, UART error recovery, AT framing/timeouts, power gating and absence of status GPIO checks passed.");
     return 0;
 }

@@ -8,19 +8,17 @@
  *   MY_I2C_BUS_TP     : SCL = PB6  (TP_SCL)      SDA = PB4  (TP_SDA)
  *   MY_I2C_BUS_EEPROM : SCL = PA12 (EEPROM_SCL) SDA = PA11 (EEPROM_SDA)，开漏+外部上拉
  *
- * 驱动方式 (与 interface/touch.c 实测可用的 51 风格一致, 取代最初"开漏+内部
- * 上拉"方案 —— 内部上拉 ~40k 的上升沿 RC 在 200kHz 节拍下不满足建立时间,
- * 外部无可靠上拉时总线直接失效):
- *   SCL: 推挽输出, 全程持有;
- *   SDA: 发送相 = 推挽输出, 读 ACK/数据相 = 输入+上拉, 逐相切换方向。
- * 半周期延时 ~3µs → 总线约 100~150kHz, 低于 MPU6050/CST816 的 400kHz 上限,
- * 给线路寄生电容留足上升余量。
+ * SENSOR/EEPROM 使用开漏输出，必须有外部上拉到 3.3V；内部上拉不能替代外部上拉。
+ * TP 保留原推挽发送实现；SDA 读 ACK/数据和发送 NACK 时切换为输入释放。
+ * SENSOR 总线将原位延时加倍，增加从机准备数据及线路稳定的余量；实际频率需实测。
+ * TP/EEPROM 位延时保持原值；ACK拉低前预置输出，NACK以输入释放SDA。
  ******************************************************************************
  */
 #include "my_i2c.h"
 
-/* 位半周期延时: 与 touch.c 的 tp_delay(n=80) 同档, ~3µs @100MHz */
-#define MY_I2C_DELAY_LOOPS 80
+/* 原有位延时；仅SENSOR总线加倍，不改变触摸和EEPROM的节拍。 */
+#define MY_I2C_DELAY_LOOPS        80U
+#define MY_I2C_SENSOR_DELAY_LOOPS 160U
 
 /* ================================================================ 总线表 */
 typedef struct
@@ -43,9 +41,9 @@ static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] = {
 /**
  * @brief 简单忙等待延时，控制 SCL 翻转速度
  */
-static void my_i2c_delay(void)
+static void my_i2c_delay(my_i2c_bus_t bus)
 {
-    volatile uint32_t n = MY_I2C_DELAY_LOOPS;
+    volatile uint32_t n = bus == MY_I2C_BUS_SENSOR ? MY_I2C_SENSOR_DELAY_LOOPS : MY_I2C_DELAY_LOOPS;
     while (n--)
     {
         __NOP();
@@ -78,7 +76,7 @@ static inline uint8_t sda_read(my_i2c_bus_t bus)
 }
 
 /**
- * @brief 切换SDA方向：0=输出(EEPROM开漏，其余推挽)，1=输入+上拉(读ACK/数据)
+ * @brief 切换SDA方向：0=输出(SENSOR/EEPROM开漏，TP推挽)，1=输入+上拉(读ACK/数据)
  * @note  HAL_GPIO_Init 对 GPIOB 的 MODER/PUPDR 是非原子读-改-写; 本工程的
  *        touch.c 每个字节也会切 PB4 方向, sensor 任务会切 PB13 方向 ——
  *        两边互相可能把对方刚写入的位用旧快照覆盖。故整个切换用 PRIMASK
@@ -91,7 +89,7 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
 
     gpio.Pin = my_i2c_pin[bus].sda_pin;
     gpio.Mode = as_input ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT_PP;
-    if (!as_input && bus == MY_I2C_BUS_EEPROM)
+    if (!as_input && bus != MY_I2C_BUS_TP)
     {
         gpio.Mode = GPIO_MODE_OUTPUT_OD;
     }
@@ -105,7 +103,7 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
 
 /* ================================================================ 时序原语 */
 /**
- * @brief 初始化软件I2C：EEPROM开漏，其余总线推挽，空闲释放为高
+ * @brief 初始化软件I2C：SENSOR/EEPROM开漏，TP推挽，空闲释放为高
  * @param bus 要初始化的总线
  * @note  需在 HAL_Init()/时钟配置完成后调用; 会覆盖 MX_GPIO_Init 中对应引脚
  *        的推挽初始配置。重复调用无害(幂等)。
@@ -129,11 +127,11 @@ void my_i2c_init(my_i2c_bus_t bus)
         __HAL_RCC_GPIOB_CLK_ENABLE();
     }
 
-    /* SCL: 推挽输出, 初始高 (SDA 方向随后由 sda_dir 逐相切换) */
+    /* SCL: SENSOR/EEPROM 开漏；SDA 方向随后由 sda_dir 逐相切换。 */
     __disable_irq();
     gpio.Pin = my_i2c_pin[bus].scl_pin;
     gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    if (bus == MY_I2C_BUS_EEPROM)
+    if (bus != MY_I2C_BUS_TP)
     {
         gpio.Mode = GPIO_MODE_OUTPUT_OD;
     }
@@ -145,7 +143,7 @@ void my_i2c_init(my_i2c_bus_t bus)
     scl_hi(bus);
     my_i2c_sda_dir(bus, 0); /* SDA 配为输出 */
     sda_hi(bus);            /* 释放总线, 空闲高 */
-    my_i2c_delay();
+    my_i2c_delay(bus);
 }
 
 /**
@@ -156,11 +154,11 @@ void my_i2c_start(my_i2c_bus_t bus)
     my_i2c_sda_dir(bus, 0);
     sda_hi(bus);
     scl_hi(bus);
-    my_i2c_delay();
+    my_i2c_delay(bus);
     sda_lo(bus); /* SCL 高电平期间 SDA 拉低 = START */
-    my_i2c_delay();
+    my_i2c_delay(bus);
     scl_lo(bus);
-    my_i2c_delay();
+    my_i2c_delay(bus);
 }
 
 /**
@@ -170,10 +168,11 @@ void my_i2c_stop(my_i2c_bus_t bus)
 {
     my_i2c_sda_dir(bus, 0);
     sda_lo(bus);
+    my_i2c_delay(bus); /* SCL 拉高前建立 SDA 低电平 */
     scl_hi(bus);
-    my_i2c_delay();
+    my_i2c_delay(bus);
     sda_hi(bus); /* SCL 高电平期间 SDA 释放 = STOP */
-    my_i2c_delay();
+    my_i2c_delay(bus);
 }
 
 /**
@@ -195,9 +194,9 @@ void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat)
         {
             sda_lo(bus);
         }
-        my_i2c_delay(); /* 数据建立 */
+        my_i2c_delay(bus); /* 数据建立 */
         scl_hi(bus);    /* SCL 上升沿从机采样 */
-        my_i2c_delay();
+        my_i2c_delay(bus);
         scl_lo(bus); /* 下降沿后再移位 */
         dat <<= 1;
     }
@@ -216,9 +215,9 @@ uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
     for (i = 0; i < 8; i++)
     {
         scl_lo(bus);
-        my_i2c_delay();
-        scl_hi(bus);    /* SCL 上升沿从机更新数据 */
-        my_i2c_delay(); /* 等线路稳定后再采样 (关键!) */
+        my_i2c_delay(bus);
+        scl_hi(bus);    /* 从机在 SCL 低期间准备数据，高期间保持稳定 */
+        my_i2c_delay(bus); /* 等线路稳定后再采样 (关键!) */
         dat <<= 1;
         if (sda_read(bus))
         {
@@ -241,14 +240,14 @@ uint8_t my_i2c_wait_ack(my_i2c_bus_t bus)
 
     my_i2c_sda_dir(bus, 1); /* 释放 SDA 让从机拉低 */
     scl_lo(bus);
-    my_i2c_delay();
+    my_i2c_delay(bus);
     scl_hi(bus);
-    my_i2c_delay();      /* 等从机驱动建立 */
+    my_i2c_delay(bus);      /* 等从机驱动建立 */
     ack = sda_read(bus); /* 从机拉低 = ACK */
     scl_lo(bus);
-    my_i2c_delay();
-    my_i2c_sda_dir(bus, 0); /* 恢复输出相 */
-    sda_hi(bus);
+    my_i2c_delay(bus);
+    /* 保持输入释放 SDA；读地址 ACK 后从机已开始驱动第一位。
+     * 下一次 write/start/stop 自己切回输出，不能在这里推挽拉高。 */
 
     return ack; /* 0=ACK, 1=NACK */
 }
@@ -259,22 +258,22 @@ uint8_t my_i2c_wait_ack(my_i2c_bus_t bus)
  */
 void my_i2c_send_ack(my_i2c_bus_t bus, uint8_t ack)
 {
-    my_i2c_sda_dir(bus, 0);
     scl_lo(bus);
     if (ack)
     {
-        sda_hi(bus); /* NACK */
+        my_i2c_sda_dir(bus, 1); /* NACK释放SDA，由上拉形成高电平。 */
     }
     else
     {
-        sda_lo(bus); /* ACK  */
+        sda_lo(bus); /* 先预置低电平，避免切输出瞬间推挽拉高。 */
+        my_i2c_sda_dir(bus, 0);
     }
-    my_i2c_delay();
+    my_i2c_delay(bus);
     scl_hi(bus);
-    my_i2c_delay();
+    my_i2c_delay(bus);
     scl_lo(bus);
     my_i2c_sda_dir(bus, 1); /* 数据阶段前释放 SDA (输入+上拉=高) */
-    my_i2c_delay();
+    my_i2c_delay(bus);
 }
 
 /* ============================================================ 成块读写封装 */

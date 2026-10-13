@@ -63,11 +63,8 @@ HAL_StatusTypeDef kt6368a_get_init_status(void)
 
 uint8_t kt6368a_is_connected(void)
 {
-    if (!ble.powered || ((uint32_t)(HAL_GetTick() - ble.power_on_tick) < KT6368A_BOOT_DELAY_MS))
-    {
-        return 0;
-    }
-    return (HAL_GPIO_ReadPin(BLE_LED_GPIO_Port, BLE_LED_Pin) == GPIO_PIN_SET) ? 1U : 0U;
+    /* KT_LED 未接到 STM32，保留接口：0 表示无法确认连接，不能用心率 PB15 推断。 */
+    return 0;
 }
 
 void kt6368a_power_off(void)
@@ -125,7 +122,7 @@ HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t tim
     {
         return HAL_ERROR;
     }
-    if (!kt6368a_is_connected())
+    if (!ble.powered || ((uint32_t)(HAL_GetTick() - ble.power_on_tick) < KT6368A_BOOT_DELAY_MS))
     {
         return HAL_BUSY;
     }
@@ -159,7 +156,7 @@ HAL_StatusTypeDef kt6368a_at_command(const char *command, const char *expected_p
     {
         return HAL_ERROR;
     }
-    if (!ble.powered || kt6368a_is_connected())
+    if (!ble.powered)
     {
         return HAL_BUSY;
     }
@@ -175,10 +172,6 @@ HAL_StatusTypeDef kt6368a_at_command(const char *command, const char *expected_p
 
     while ((uint32_t)(HAL_GetTick() - start) < timeout_ms)
     {
-        if (kt6368a_is_connected())
-        {
-            return HAL_BUSY;
-        }
         if ((ble.rx_errors != errors) || (ble.rx_dropped != dropped))
         {
             return HAL_ERROR;
@@ -239,10 +232,6 @@ static HAL_StatusTypeDef kt6368a_set_if_needed(const char *query, const char *pr
     {
         return HAL_OK;
     }
-    if (kt6368a_is_connected())
-    {
-        return HAL_BUSY;
-    }
     status = HAL_UART_Transmit(&huart1, (uint8_t *)setting, (uint16_t)strlen(setting), KT6368A_AT_TIMEOUT_MS);
     if (status != HAL_OK)
     {
@@ -268,7 +257,7 @@ HAL_StatusTypeDef kt6368a_configure(const char *name)
     {
         return HAL_ERROR;
     }
-    if (!ble.powered || kt6368a_is_connected())
+    if (!ble.powered)
     {
         return HAL_BUSY;
     }
@@ -287,7 +276,7 @@ HAL_StatusTypeDef kt6368a_configure(const char *name)
     {
         return status;
     }
-    status = kt6368a_set_if_needed("AT+T5\r\n", "T5+", "00", "AT+B500\r\n", &changed);
+    status = kt6368a_set_if_needed("AT+T5\r\n", "T5+", "01", "AT+B501\r\n", &changed);
     if (status != HAL_OK)
     {
         return status;
@@ -325,7 +314,7 @@ HAL_StatusTypeDef kt6368a_configure(const char *name)
     {
         return status;
     }
-    return (strcmp(response, "T5+00") == 0) ? HAL_OK : HAL_ERROR;
+    return (strcmp(response, "T5+01") == 0) ? HAL_OK : HAL_ERROR;
 }
 
 HAL_StatusTypeDef kt6368a_init(void)

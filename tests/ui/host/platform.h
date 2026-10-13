@@ -5,6 +5,8 @@
 #define __MAIN_H
 #define KEY_1_GPIO_Port ((void *)0)
 #define KEY_1_Pin       32U
+#define WAKE_GPIO_Port  ((void *)0)
+#define WAKE_Pin        16U
 typedef enum
 {
     GPIO_PIN_RESET = 0,

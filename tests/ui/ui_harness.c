@@ -7,6 +7,7 @@
 
 static uint32_t host_tick = 9U * 3600000U + 30U * 60000U + 42000U;
 static GPIO_PinState host_key = GPIO_PIN_SET;
+static GPIO_PinState host_wake = GPIO_PIN_RESET;
 static lv_indev_state_t host_touch = LV_INDEV_STATE_RELEASED;
 static lv_point_t host_point;
 static uint8_t host_online = 1;
@@ -19,13 +20,12 @@ static uint8_t host_light;
 static lv_color_t framebuffer[240 * 280];
 static lv_color_t draw_buffer[240 * 12];
 static unsigned min_free = 40960;
-static uint8_t host_bt_connected;
 static HAL_StatusTypeDef host_bt_init_status = HAL_OK;
 static uint8_t host_bt_rx[1024];
 static uint16_t host_bt_rx_size;
 static uint16_t host_bt_rx_pos;
 static HAL_StatusTypeDef host_bt_tx_result = HAL_OK;
-static uint8_t host_bt_tx_data[64];
+static uint8_t host_bt_tx_data[256];
 static uint16_t host_bt_tx_size;
 static uint32_t host_bt_tx_calls;
 static uint32_t host_rtc_seconds = 10U * 3600U + 10U * 60U;
@@ -33,6 +33,35 @@ static uint32_t host_rtc_tick = 9U * 3600000U + 30U * 60000U + 42000U;
 static uint32_t host_rtc_set_calls;
 static uint8_t host_rtc_synced = 1;
 static HAL_StatusTypeDef host_rtc_status = HAL_OK;
+static app_heart_struct host_heart;
+static app_heart_sample_struct host_heart_samples[4];
+static uint16_t host_heart_samples_count;
+static app_aht21_struct host_aht21;
+
+void app_aht21_get_snapshot(app_aht21_struct *snapshot)
+{
+    *snapshot = host_aht21;
+}
+
+uint16_t app_heart_read_samples(app_heart_sample_struct *samples, uint16_t size)
+{
+    uint16_t count = host_heart_samples_count < size ? host_heart_samples_count : size;
+    memcpy(samples, host_heart_samples, count * sizeof(samples[0]));
+    host_heart_samples_count = 0;
+    return count;
+}
+
+void app_heart_get_snapshot(app_heart_struct *heart)
+{
+    *heart = host_heart;
+}
+
+void app_heart_set_enabled(uint8_t enabled)
+{
+    host_heart.enabled = enabled;
+    host_heart.bpm = 0;
+    host_heart.state = enabled ? APP_HEART_MEASURING : APP_HEART_OFF;
+}
 
 HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time)
 {
@@ -68,10 +97,6 @@ HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t tim
 {
     assert(data != NULL && size < sizeof(host_bt_tx_data) && timeout_ms == UI_BT_TX_TIMEOUT_MS);
     ++host_bt_tx_calls;
-    if (!host_bt_connected)
-    {
-        return HAL_BUSY;
-    }
     if (host_bt_tx_result != HAL_OK)
     {
         return host_bt_tx_result;
@@ -84,7 +109,7 @@ HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t tim
 
 uint8_t kt6368a_is_connected(void)
 {
-    return host_bt_connected;
+    return 0; /* 本板没有连接状态输入 */
 }
 HAL_StatusTypeDef kt6368a_get_init_status(void)
 {
@@ -120,8 +145,7 @@ TickType_t xTaskGetTickCount(void)
 GPIO_PinState HAL_GPIO_ReadPin(void *port, uint16_t pin)
 {
     (void)port;
-    (void)pin;
-    return host_key;
+    return pin == WAKE_Pin ? host_wake : host_key;
 }
 void LCD_Set_Light(uint8_t percent)
 {
@@ -274,16 +298,19 @@ int main(void)
     input.gesture_min_velocity = 0;
     input.gesture_limit = 40;
     lv_indev_drv_register(&input);
+    host_wake = GPIO_PIN_SET; /* 模拟按住 SW2 开机。 */
     App_UI_Create();
     advance(30);
-    assert(s_page == PAGE_WATCH && host_light == 30);
+    assert(s_page == PAGE_WATCH && host_light == 50);
     assert(strcmp(lv_label_get_text(s_time), "10:10") == 0);
     assert(s_hour_points[1].x < 100 && s_hour_points[1].y < 100);
     assert(s_minute_points[1].x > 100 && s_minute_points[1].y < 100);
     assert(!lv_obj_has_flag(s_body, LV_OBJ_FLAG_SCROLLABLE) && lv_obj_get_scroll_bottom(s_body) == 0);
+    host_wake = GPIO_PIN_RESET;
     drag(110, 216, 0, -100);
     drag(110, 100, 0, 120);
     assert(s_page == PAGE_WATCH && lv_obj_get_scroll_y(s_body) == 0 && s_history_count == 0);
+    assert(s_screen_on && host_light == 50); /* 开机按键松开不熄屏。 */
     screenshot("watch");
     /* 秒针读取RTC秒数：15秒指向3、30秒指向6，60秒回到12并推进分钟。 */
     assert(s_second_points[1].x == 100 && s_second_points[1].y == 18);
@@ -301,12 +328,132 @@ int main(void)
     drag(180, 140, -120, 0);
     assert(s_page == PAGE_SETTINGS && s_history_count == 1);
     assert(s_brightness_label && s_angles[0] && s_pressure && s_altitude);
+    /* 真实心率卡片的按钮、有效值和异常状态，不让旧 BPM 留在无效状态。 */
+    {
+        lv_area_t area;
+        assert(s_heart_card != NULL && strcmp(lv_label_get_text(s_heart_value), "--") == 0);
+        lv_obj_scroll_to_y(s_body, 244, LV_ANIM_OFF);
+        advance(120);
+        lv_obj_get_coords(s_heart_button, &area);
+        tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
+        assert(host_heart.enabled && strcmp(lv_label_get_text(s_heart_button), "STOP") == 0);
+        assert(strstr(lv_label_get_text(s_heart_status), "MEASURING") != NULL);
+        screenshot("heart_measuring");
+        host_heart.state = APP_HEART_VALID;
+        host_heart.bpm = 72;
+        host_heart.raw = 12345;
+        host_heart.signal_x10 = 160;
+        host_heart.interval_ms = 830;
+        host_heart_samples[0].raw = 30000;
+        host_heart_samples[0].filtered = -42.5f;
+        host_heart_samples[0].dc = 30042.5f;
+        host_heart_samples[0].bpm = 72;
+        host_heart_samples[0].interval_ms = 830;
+        host_heart_samples[0].elapsed_ms = 30;
+        host_heart_samples[0].sequence = 65535;
+        host_heart_samples[0].state = APP_HEART_VALID;
+        host_heart_samples[1] = host_heart_samples[0];
+        host_heart_samples[1].raw = 65535;
+        host_heart_samples[1].elapsed_ms = 60;
+        host_heart_samples[1].sequence = 0;
+        host_heart_samples_count = 2;
+        advance(120);
+        assert(host_bt_tx_size == 72);
+        {
+            static const float expected[2][8] = {{30000.0f, -42.5f, 30042.5f, 72.0f, 830.0f, 0.03f, 65535.0f, 2.0f},
+                                                  {65535.0f, -42.5f, 30042.5f, 72.0f, 830.0f, 0.06f, 0.0f, 2.0f}};
+            unsigned frame, channel, offset;
+            uint32_t bits;
+            float value;
+            FILE *stream;
+            for (frame = 0; frame < 2; ++frame)
+            {
+                for (channel = 0; channel < 8; ++channel)
+                {
+                    offset = frame * 36 + channel * 4;
+                    bits = (uint32_t)host_bt_tx_data[offset] | ((uint32_t)host_bt_tx_data[offset + 1] << 8) |
+                           ((uint32_t)host_bt_tx_data[offset + 2] << 16) | ((uint32_t)host_bt_tx_data[offset + 3] << 24);
+                    memcpy(&value, &bits, sizeof(value));
+                    assert(value == expected[frame][channel]);
+                }
+                assert(memcmp(host_bt_tx_data + frame * 36 + 32, "\x00\x00\x80\x7F", 4) == 0);
+            }
+            stream = fopen("tests/ui/output/heart-telemetry.bin", "wb");
+            assert(stream != NULL && fwrite(host_bt_tx_data, 1, host_bt_tx_size, stream) == host_bt_tx_size);
+            assert(fclose(stream) == 0);
+        }
+        assert(strcmp(lv_label_get_text(s_heart_value), "72") == 0);
+        assert(strstr(lv_label_get_text(s_heart_status), "HRS1 12345  AC 16.0") != NULL);
+        assert(strstr(lv_label_get_text(s_heart_status), "PERIOD 830 ms") != NULL);
+        screenshot("heart");
+        host_heart.state = APP_HEART_NO_SIGNAL;
+        advance(120);
+        assert(strcmp(lv_label_get_text(s_heart_value), "--") == 0);
+        assert(strstr(lv_label_get_text(s_heart_status), "NO SIGNAL") != NULL);
+        screenshot("heart_no_signal");
+        host_heart.state = APP_HEART_ERROR;
+        host_heart.enabled = 0;
+        host_heart.fault.kind = EM7028_FAULT_READ;
+        host_heart.fault.reg = 0x29;
+        advance(120);
+        assert(strstr(lv_label_get_text(s_heart_status), "UNAVAILABLE") != NULL);
+        assert(strstr(lv_label_get_text(s_heart_status), "I2C READ REG 29") != NULL);
+        assert(strcmp(lv_label_get_text(s_heart_button), "START") == 0);
+        screenshot("heart_unavailable");
+        host_heart.fault.kind = EM7028_FAULT_CONFIG;
+        host_heart.fault.reg = 0x0D;
+        host_heart.fault.value = 0x32;
+        advance(120);
+        assert(strstr(lv_label_get_text(s_heart_status), "CONFIG CHECK REG 0D") != NULL);
+        assert(strstr(lv_label_get_text(s_heart_status), "VALUE 32") != NULL);
+        tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
+        assert(host_heart.enabled);
+        tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
+        assert(!host_heart.enabled && strstr(lv_label_get_text(s_heart_status), "STANDBY") != NULL);
+        lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+        advance(120);
+    }
     drag(170, 100, -110, 0);
     assert(s_page == PAGE_SETTINGS && s_history_count == 1);
     screenshot("settings");
     /* Slider is isolated from page navigation. */
     drag(77, 129, 85, 0);
     assert(s_page == PAGE_SETTINGS && host_light > 30 && s_history_count == 1);
+    /* SW2 消抖、按住不重复、亮度恢复，以及熄屏期间禁止触摸和返回操作。 */
+    {
+        uint8_t saved_brightness = host_light;
+        uint8_t saved_history = s_history_count;
+        lv_coord_t screen_scroll = lv_obj_get_scroll_y(s_body);
+        host_wake = GPIO_PIN_SET;
+        advance(10);
+        host_wake = GPIO_PIN_RESET;
+        advance(60);
+        assert(s_screen_on && host_light == saved_brightness);
+        host_wake = GPIO_PIN_SET;
+        advance(1000);
+        assert(s_screen_on && host_light == saved_brightness);
+        host_wake = GPIO_PIN_RESET;
+        advance(60);
+        assert(!s_screen_on && host_light == 0);
+        drag(77, 129, 85, 0);
+        drag(60, 140, 120, 0);
+        key_back();
+        assert(!s_screen_on && host_light == 0 && s_brightness == saved_brightness);
+        assert(s_page == PAGE_SETTINGS && s_history_count == saved_history);
+        assert(lv_obj_get_scroll_y(s_body) == screen_scroll);
+        host_point.x = 110;
+        host_point.y = 140;
+        host_touch = LV_INDEV_STATE_PRESSED;
+        host_wake = GPIO_PIN_SET;
+        advance(60);
+        host_wake = GPIO_PIN_RESET;
+        advance(60);
+        assert(s_screen_on && host_light == saved_brightness);
+        host_touch = LV_INDEV_STATE_RELEASED;
+        advance(60);
+        assert(s_page == PAGE_SETTINGS && s_history_count == saved_history);
+        assert(lv_obj_get_scroll_y(s_body) == screen_scroll);
+    }
     /* A short electrical glitch must not trigger Back. */
     host_key = GPIO_PIN_RESET;
     advance(10);
@@ -321,7 +468,7 @@ int main(void)
     screenshot("settings_scrolled");
     drag(115, 100, 0, 120);
     assert(s_page == PAGE_SETTINGS && lv_obj_get_scroll_y(s_body) == 0);
-    lv_obj_scroll_to_y(s_body, 260, LV_ANIM_OFF);
+    lv_obj_scroll_to_y(s_body, 420, LV_ANIM_OFF);
     advance(30);
     assert(strcmp(lv_label_get_text(s_angles[2]), "5.2") == 0);
     assert(strcmp(lv_label_get_text(s_yaw_source), "MAG UNCAL / calibrate first") == 0);
@@ -352,7 +499,7 @@ int main(void)
     lv_obj_scroll_to_view(s_mag_cal_status, LV_ANIM_OFF);
     advance(30);
     screenshot("motion_calibration_status");
-    lv_obj_scroll_to_y(s_body, 340, LV_ANIM_OFF);
+    lv_obj_scroll_to_y(s_body, 500, LV_ANIM_OFF);
     advance(30);
     screenshot("motion_magnetic");
     host_mag_online = 0;
@@ -394,7 +541,7 @@ int main(void)
     host_mag_cal_state = APP_MAG_CAL_DONE;
     host_mag_fusion_state = APP_MAG_FUSION_ACTIVE;
     advance(120);
-    lv_obj_scroll_to_y(s_body, 284, LV_ANIM_OFF);
+    lv_obj_scroll_to_y(s_body, 444, LV_ANIM_OFF);
     advance(30);
     drag(110, 216, 0, -100);
     assert(s_page == PAGE_SETTINGS && lv_obj_get_scroll_y(s_body) > 284);
@@ -406,13 +553,59 @@ int main(void)
     host_online = 1;
     advance(120);
     /* Environment is another section of the same page, with no detail navigation. */
-    lv_obj_scroll_to_y(s_body, 1140, LV_ANIM_OFF);
+    lv_obj_scroll_to_y(s_body, 1300, LV_ANIM_OFF);
     advance(30);
     saved_scroll = lv_obj_get_scroll_y(s_body);
     assert(s_page == PAGE_SETTINGS && s_history_count == 1);
     assert(strcmp(lv_label_get_text(s_pressure), "1013.25") == 0);
     assert(strcmp(lv_label_get_text(s_altitude), "-0.5") == 0);
     screenshot("environment");
+    lv_obj_scroll_to_y(s_body, 1640, LV_ANIM_OFF);
+    advance(120);
+    assert(s_aht21_card != NULL && strcmp(lv_label_get_text(s_aht21_status), "WAITING") == 0);
+    assert(strcmp(lv_label_get_text(s_humidity), "--") == 0);
+    host_aht21.measuring = 1;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_aht21_status), "MEASURING") == 0);
+    screenshot("aht21_measuring");
+    host_aht21.measuring = 0;
+    host_aht21.valid = 1;
+    host_aht21.sample.humidity_rh = 50.0f;
+    host_aht21.sample.temperature_c = 25.0f;
+    host_aht21.sample_count = 12;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_humidity), "50.0") == 0);
+    assert(strcmp(lv_label_get_text(s_air_temperature), "25.0") == 0);
+    assert(strcmp(lv_label_get_text(s_aht21_status), "ONLINE / CRC OK") == 0);
+    assert(strcmp(lv_label_get_text(s_aht21_samples), "SAMPLES 12 / 2s") == 0);
+    screenshot("aht21");
+    host_aht21.sample.temperature_c = -25.0f;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_air_temperature), "-25.0") == 0);
+    host_aht21.valid = 0;
+    host_aht21.result = AHT21_CRC_ERROR;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_humidity), "--") == 0);
+    assert(strcmp(lv_label_get_text(s_air_temperature), "--") == 0);
+    assert(strcmp(lv_label_get_text(s_aht21_status), "CRC ERROR") == 0);
+    screenshot("aht21_crc_error");
+    host_aht21.result = AHT21_I2C_ERROR;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_aht21_status), "I2C ERROR") == 0);
+    screenshot("aht21_unavailable");
+    host_aht21.result = AHT21_CALIBRATION_ERROR;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_aht21_status), "NOT CALIBRATED") == 0);
+    host_aht21.result = AHT21_TIMEOUT;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_aht21_status), "CONVERSION TIMEOUT") == 0);
+    host_aht21.result = AHT21_OK;
+    host_aht21.valid = 1;
+    host_aht21.sample.temperature_c = 25.0f;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_aht21_status), "ONLINE / CRC OK") == 0);
+    lv_obj_scroll_to_y(s_body, saved_scroll, LV_ANIM_OFF);
+    advance(30);
     /* Leave the long page and return through history to its exact scroll position. */
     drag(60, 140, 120, 0);
     assert(s_page == PAGE_WATCH);
@@ -432,6 +625,7 @@ int main(void)
     }
     lv_mem_monitor(&after);
     assert(after.free_size >= before.free_size - 512);
+    fprintf(stderr, "LVGL minimum after navigation: %u bytes\n", min_free);
     assert(min_free > 4096);
     /* Back never repeats while the key is held. */
     drag(180, 140, -120, 0);
@@ -485,6 +679,7 @@ int main(void)
         uint8_t split[66], long_data[600];
         static const uint8_t binary[] = {0x00, 0xFF};
         uint32_t received;
+        uint32_t tx_before = host_bt_tx_calls;
         host_bluetooth_feed(message, sizeof(message) - 1);
         advance(120);
         assert(host_bt_rx_pos == host_bt_rx_size);
@@ -494,19 +689,20 @@ int main(void)
         tap(110, 220);
         assert(s_page == PAGE_BLUETOOTH);
         assert(strcmp(lv_label_get_text(s_bt_log), s_bt_text) == 0);
-        assert(strcmp(lv_label_get_text(s_bt_status), "DISCONNECTED") == 0);
+        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE+SPP") == 0);
+        host_bt_tx_result = HAL_BUSY;
         tap(74, 114);
-        assert(host_bt_tx_calls == 0);
-        assert(strcmp(lv_label_get_text(s_bt_tx_status), "TX NO LINK") == 0);
-        host_bt_connected = 1;
+        assert(host_bt_tx_calls == tx_before + 1);
+        assert(strcmp(lv_label_get_text(s_bt_tx_status), "TX BUSY") == 0);
+        host_bt_tx_result = HAL_OK;
         advance(120);
-        assert(strcmp(lv_label_get_text(s_bt_status), "CONNECTED / BLE") == 0);
+        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE+SPP") == 0);
         screenshot("bluetooth");
 
         /* 点击真实发送按钮，检查UART获得的内容及各失败状态，RX记录不受影响。 */
         received = s_bt_rx_bytes;
         tap(74, 114);
-        assert(host_bt_tx_calls == 1 && host_bt_tx_size == 18);
+        assert(host_bt_tx_calls == tx_before + 2 && host_bt_tx_size == 18);
         assert(strcmp((const char *)host_bt_tx_data, "hello from watch\r\n") == 0);
         assert(strcmp(lv_label_get_text(s_bt_tx_status), "TX UART OK") == 0);
         assert(s_bt_rx_bytes == received && strcmp(s_bt_text, "hello from BLE\npitch=12.4\n") == 0);
@@ -559,13 +755,12 @@ int main(void)
         assert(s_bt_rx_bytes == received + 19);
         assert(strstr(lv_label_get_text(s_bt_log), "received off-page") != NULL);
 
-        host_bt_connected = 0;
         host_bt_init_status = HAL_TIMEOUT;
         advance(120);
         assert(strcmp(lv_label_get_text(s_bt_status), "INIT TIMEOUT") == 0);
         host_bt_init_status = HAL_OK;
         advance(120);
-        assert(strcmp(lv_label_get_text(s_bt_status), "DISCONNECTED") == 0);
+        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE+SPP") == 0);
         lv_mem_monitor(&before);
         for (iteration = 0; iteration < 10; ++iteration)
         {
@@ -579,7 +774,6 @@ int main(void)
 
         /* 使用真实校时解析器；HH:MM跨接收片段，空闲结束后才设置RTC。 */
         tap(174, 114);
-        host_bt_connected = 1;
         host_bluetooth_feed((const uint8_t *)"14:", 3);
         advance(100);
         assert(host_rtc_set_calls == 0);
@@ -629,14 +823,17 @@ int main(void)
         assert(!lv_obj_has_flag(s_second_hand, LV_OBJ_FLAG_HIDDEN));
         assert(min_free > 4096);
     }
-    printf("PASS: BLE receive page entry/back, off-page reception, clear, split CRLF, binary bytes, bounded log and link states.\n");
-    printf("PASS: Send Test touch button, exact TX bytes, disconnected guard, UART timeout/busy/error, RX unchanged.\n");
+    printf("PASS: BLE receive page entry/back, off-page reception, clear, split CRLF, binary bytes, bounded log and initialization states.\n");
+    printf("PASS: heart card START/STOP, BPM display, measuring/no-signal/unavailable states and preserved navigation.\n");
+    printf("PASS: AHT21 values, negative temperature, waiting/measuring, CRC/I2C/calibration/timeout states and recovery.\n");
+    printf("PASS: Send Test touch button, exact TX bytes, UART attempt without link GPIO, timeout/busy/error, RX unchanged.\n");
     printf("PASS: BLE HH:MM -> RTC -> analog/digital UI, fragmented input, invalid-time preservation, autonomous ticking, midnight and "
            "unsynced/error states.\n");
     printf("PASS: RTC second hand at 0/15/30 seconds, minute wrap and hidden/recovered states.\n");
     printf("PASS: fixed watch, combined settings/motion/environment, swipes, slider, calibration, scroll history and 200 transitions.\n");
     printf("PASS: 16-entry history overflow/return, empty history, slow swipes with repeated coordinates.\n");
-    printf("LVGL 40 KiB pool: minimum free %u bytes; free before/after stress %lu/%lu bytes.\n", min_free, (unsigned long)before.free_size,
+    printf("PASS: PA4 boot hold, debounce, release-only backlight toggle, brightness restore and screen-off input isolation.\n");
+    printf("LVGL pool: minimum free %u bytes; free before/after stress %lu/%lu bytes.\n", min_free, (unsigned long)before.free_size,
            (unsigned long)after.free_size);
     return 0;
 }

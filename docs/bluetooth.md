@@ -1,4 +1,4 @@
-# KT6368A 蓝牙驱动（当前使用BLE）
+# KT6368A 蓝牙驱动（BLE与SPP均开启）
 
 驱动位于 `interface/kt6368a.c/.h`，由 `App_Task_Create()` 在启动调度器前初始化。
 CubeMX仍负责USART1及GPIO初始化；驱动不改波特率、MAC地址，不恢复出厂，不配置KT6328A的低功耗指令。
@@ -11,18 +11,18 @@ USART1的MSP初始化`USER CODE`区在电源关闭时将UART引脚暂设为下�
 | PA9 / USART1_TX | KT6368A 7脚RX，原理图的BLE_RX | 115200 / 8N1 / 无流控 |
 | PA10 / USART1_RX | KT6368A 8脚TX，原理图的BLE_TX | 同上 |
 | PA8 / BLE_EN | BL1551B ENB，A1接3.3V，A2接GND，B接蓝牙电源 | 高电平供电，低电平关电 |
-| PB15 / BLE_LED | KT6368A 2脚LED/连接状态 | 下拉输入，连接成功为高 |
+| PB15 / HEART_LED（旧名 BLE_LED） | 心率 LED_EN，经 Core H5-5 / Back H2-5 控制心率 LED2～LED5 | 推挽输出、下拉、低速，初始化低电平关闭外部 LED |
 
-模块端和MCU端的TX/RX命名方向相反，须核对PCB实际连接。模块第2脚在上电约1秒内也会输出高电平，驱动等待1200ms后才允许识别连接。LED串联的10kΩ为限流电阻，不是状态信号下拉。
+模块端和MCU端的TX/RX命名方向相反，须核对PCB实际连接。原理图中的蓝牙 KT_LED 接 KT6328A1 第2脚及指示灯，与 STM32 PB15 不相连；LED串联的10kΩ为限流电阻。`kt6368a_is_connected()` 保留接口并固定返回0，表示无法确认连接，不代表手机一定未连接。蓝牙驱动不读写心率 PB15；模块供电并完成1200ms启动等待后，发送直接交给UART。
 
 ## 开机配置
 
 1. UART引脚切为下拉输入，关闭蓝牙供电；随后上电并恢复串口复用。
 2. 先启动单字节中断接收，再等待1200ms启动。
-3. 用`AT+TM`查询BLE名称，用`AT+T4/T5`查询BLE/SPP开关。默认名称由头文件`KT6368A_BLE_NAME`指定，当前为`F411-Watch`；BLE开启、SPP关闭。
-   修改名称使用`AT+BM`，开启BLE使用`AT+B401`，关闭SPP使用`AT+B500`；原来的SPP名称不改。
+3. 用`AT+TM`查询BLE名称，用`AT+T4/T5`查询BLE/SPP开关。默认名称由头文件`KT6368A_BLE_NAME`指定，当前为`F411-Watch`；BLE与SPP均开启。
+   修改名称使用`AT+BM`，开启BLE使用`AT+B401`，开启SPP使用`AT+B501`；原来的SPP名称不改。
 4. 仅修改与目标不同的参数，修改后重新上电并查询验证。不依赖设置指令的OK回传，兼容之前关闭回传的配置。
-5. 无响应、参数未生效、或手机提前连接时返回错误/超时/忙。`App_Task_Create()`不因此停机；可通过`kt6368a_get_init_status()`查看结果。
+5. 无响应、参数未生效、时返回错误/超时/忙；手机提前连接可能使AT查询超时，软件无法通过GPIO识别。`App_Task_Create()`不因此停机；可通过`kt6368a_get_init_status()`查看结果。
 
 首次修改参数时需要两次启动等待，已匹配时只有一次。初始化、上电和AT接口含阻塞等待，应在调度器启动前使用；运行期的电源切换需由应用安排暂停收发。
 
@@ -38,19 +38,18 @@ if (size != 0)
 {
     /* 累积到应用层消息缓冲，按业务协议拼包/解析。 */
 }
-if (kt6368a_is_connected())
-{
-    HAL_StatusTypeDef status = kt6368a_write((const uint8_t *)"hello\n", 6, 100);
-    (void)status;
-}
+/* 本板没有连接状态输入，发送结果由 UART 返回。 */
+HAL_StatusTypeDef status = kt6368a_write((const uint8_t *)"hello\n", 6, 100);
+(void)status;
 ```
 
 安卓手机在BLE调试APP中扫描并连接`F411-Watch`。选择服务`FFF0`，向特征`FFF1`执行Write Without Response发送数据；接收手表回传数据须订阅`FFF1`的Notify。连接成功后模块的LED状态脚为高，外接LED应亮起。
-完整服务UUID为`0000fff0-0000-1000-8000-00805f9b34fb`，特征UUID为`0000fff1-0000-1000-8000-00805f9b34fb`。不通过经典蓝牙/SPP串口连接。
+完整服务UUID为`0000fff0-0000-1000-8000-00805f9b34fb`，特征UUID为`0000fff1-0000-1000-8000-00805f9b34fb`。
+SPP方式在安卓手机选择模块的经典蓝牙名称，使用标准串口UUID `00001101-0000-1000-8000-00805f9b34fb`连接；SPP名称沿用模块原配置，不一定是BLE名称`F411-Watch`。两种连接方式择一使用，BLE方式仍须订阅Notify。
 STM32与模块之间仍是USART1、115200/8N1。UART发送成功仅代表字节交给了模块，不保证手机收到；未订阅Notify时模块可能回传`ER+7`。
-从Settings页点击Bluetooth进入接收窗口，可以查看BLE连接状态、接收字节数及最近的接收内容。Clear按钮清空记录和计数。
+从Settings页点击Bluetooth进入接收窗口，可以查看初始化结果、接收字节数及最近的接收内容；`INIT OK / BLE+SPP` 不表示手机已连接。Clear按钮清空记录和计数。
 点击Send Test向手机发送固定文本`hello from watch\r\n`（18字节，不发送末尾NUL）。手机必须先开启FFF1 Notify，然后在接收窗口查看消息。
-窗口显示上次发送结果：`TX UART OK`仅代表UART发送完成，不代表手机收到；未连接显示`TX NO LINK`，超时/忙/错误分别显示`TX TIMEOUT`、`TX BUSY`、`TX ERROR`。发送在LVGL任务内调用，超时上限20ms，不自动重试。
+窗口显示上次发送结果：`TX UART OK`仅代表UART发送完成，不代表手机收到；模块未供电或仍在启动等待时返回忙，超时/忙/错误分别显示`TX TIMEOUT`、`TX BUSY`、`TX ERROR`。发送在LVGL任务内调用，超时上限20ms，不自动重试。
 UI定时器每10ms非阻塞读取接收缓冲，每轮最多读取256字节；离开蓝牙页面也继续接收，最近511个显示字符保存在RAM中，重启后清空。窗口每100ms更新，有新数据时滚动到最新内容，也可以手动上下滚动查看。
 ASCII按文本显示，CRLF归一为一次换行；非打印字节和非ASCII字节显示为`\xHH`，当前未增加中文字库。接收数据不会自动返回给手机。
 
@@ -60,13 +59,59 @@ ASCII按文本显示，CRLF归一为一次换行；非打印字节和非ASCII字
 时分校时已接入同一个UART接收入口：手机向FFF1发送`14:35`（ASCII），或`14:35\n`。解析与日志显示共用数据，未增加第二个接收消费者。完整消息校验通过后更新RTC并将秒置零；不带换行时以200ms空闲作为消息结束，连续多条消息请加换行。支持一到两位小时、分钟，范围为0–23和0–59。
 Bluetooth页显示`TIME SYNCED`、`TIME INVALID`或`RTC ERROR`，主界面显示对应的时针、分针和数字时分。Clear只清接收记录，不重置RTC。未实现自动校时回执，仍需看手表界面确认校时结果。
 
-RTC的LSE初始化在`watch_rtc_init()`中完成，HAL RTC模块及RTC/RTCEx源文件已启用。CubeMX配置已启用RTC和LSE，但未启用其默认日历设置：日期、时间首次初始化及复位保留由驱动管理，避免每次开机被生成的默认时间覆盖。RTC读写仅在LVGL任务中进行，IRQ不设置RTC。
+RTC的LSE初始化在`watch_rtc_init()`中完成，HAL RTC模块及RTC/RTCEx源文件已启用。CubeMX的Advanced Settings已关闭`SystemClock_Config`和`MX_RTC_Init`的自动调用；main的USER CODE区使用原有100MHz HSI/PLL参数初始化系统时钟，LSE失败不进入系统Error_Handler。生成RTC的MSP USER CODE区对watch_rtc的自有句柄直接返回，时钟配置由现有RTC驱动管理。日期、时间首次初始化及复位保留仍由驱动管理；RTC读写仅在LVGL任务中进行，IRQ不设置RTC。
 
 USART1中断仅写入环形缓冲，不调用FreeRTOS接口。启动阶段仍在调度器前配置；运行期接收由LVGL任务独占，其他任务不要再调用`kt6368a_read()`抢走同一份数据。电源切换及发送须与接收串行安排；不在串口中断中更新LVGL。将来若在UART回调使用FromISR接口，需要另外按FreeRTOS配置调整UART中断优先级。
 
 ## 验证
 
-`python -X utf8 tests/ble/run.py`在主机上编译真实驱动，模拟UART/GPIO，验证参数保存/重启、分片响应、环形回绕/溢出、错误后接收、超时、断电和连接状态。
+### 心率诊断波形与安卓APK
+
+手表心率页点击START后，每次成功读取EM7028时缓存同一次读取的原始光强、滤波信号、背景基线、BPM、间隔、时间、序号和状态，不等待BPM有效。
+现有sensor任务仍按30ms下限轮询，现有LVGL任务每10ms最多取2个样本发送；不新增任务。启动/突变恢复及候选连续性按`docs/em7028.md`的2026-10-13修补说明执行，照明启停不变。
+样本队列用现有心率快照锁保护，保存32个诊断结构体（本次构建768字节），满时丢最旧样本；STOP、重新START或测量失败清空队列。
+UART发送在释放快照锁之后完成，失败不重发，后续继续发送新样本；本板无连接状态输入，未连接时UART成功不代表手机收到。
+
+每个样本是一帧[VOFA JustFloat](https://www.vofa.plus/docs/learning/dataengines/justfloat/)数据：
+
+```text
+8个通道均为IEEE754 float32，小端，每个通道4字节
+帧尾 = 00 00 80 7F
+整帧36字节，每轮最多72字节；115200/8N1时72字节约6.3ms
+```
+
+| 通道 | 数据 | 单位/含义 |
+| --- | --- | --- |
+| CH1 | HRS1原始光强 | ADC计数，0～65535 |
+| CH2 | 去背景并低通后的信号 | 有符号ADC计数，直接记录现有detector.filtered |
+| CH3 | 背景基线 | ADC计数，直接记录现有detector.dc |
+| CH4 | BPM | 仅CH8=2有效，其余状态为0 |
+| CH5 | 峰间隔诊断值 | ms，沿用原interval_ms，未选优时可能是被拒绝短峰的诊断间隔 |
+| CH6 | 板端读取时间 | 本次START后经过的秒数，与算法使用同一HAL tick，非器件内部转换时刻 |
+| CH7 | 成功样本序号 | 0～65535循环，实际重新启动测量时归零 |
+| CH8 | 心率状态 | 0关闭、1测量中、2有效、3无有效信号、4错误 |
+
+失败读数不入队，不增加成功样本序号；持续失败仍按原流程停灯、关闭测量并清队列，错误细节看手表心率页，不伪造错误时的光强样本。
+CH6时间相邻差可排查读取节奏；CH7相邻差可发现成功样本未进入记录的情况，但不能单独区分缓存丢弃、UART失败或蓝牙丢失。
+重新START时CH6和CH7重新起算；HAL tick回绕使用无符号差值。秒数按float传输，CSV保留原CH6及由其计算的毫秒时间。
+30ms是现有轮询下限，实际频率由任务调度和读取成功率决定；器件原有25ms典型转换时间和读取限制保持不变。
+APK保留原蓝牙连接、收发及设置功能，加入“实时波形 · HRS1 / VOFA”入口；波形解析直接订阅原始SPP/BLE接收字节，不抢读socket，不依赖原应用的文本/数据包模式。
+支持JustFloat及FireWater/CSV文本（`d: 1,2\n`或`1,2\n`），1～8通道；默认“心率诊断（JustFloat）”，只勾选CH2滤波信号，避免时间、序号和原始光强压缩滤波纵轴。其他通道可勾选查看，CSV仍导出全部通道。
+通用JustFloat与CSV模式不按心率布局解释，旧单通道固件可选择通用JustFloat查看。
+提供暂停/继续、清空、通道选择、64～2048点窗口及自动纵轴缩放，横轴为采样序号。
+缓存最近2048帧，图形最高约30帧/秒刷新；关闭波形窗口时仍保存接收数据。切换协议或重连时清空解析缓冲和曲线。
+
+APK输出为`C:\Users\27795\Downloads\Bluetooth-Wave.apk`，包名`xnj.lazydog.btcontroller.wave`，可与原版并存。
+修改后的模块源码、协议测试和构建脚本在`C:\Users\27795\Downloads\bluetooth-wave-work`；原始`base.apk`保留。
+使用流程：烧录`C:\Users\27795\Downloads\F411-Heart-Continuity.hex` → 等待模块完成开机配置 → 安装`Bluetooth-Wave-Export.apk` v1.95-wave.3（已装此版本可沿用） → APK连接SPP → 点实时波形并选择心率诊断 → 手表心率页点START；STOP结束测量和数据流。
+一键导出ZIP包含参数定义、所有通道CSV和当前图形；CSV还附加板端读取时间/间隔、成功样本序号/步长和状态文字，参数文件注明时间及序号的含义。
+
+主机测试验证同帧数据一致性、队列顺序/溢出、失败读数排除、启停与HAL tick回绕，以及8通道UART字节序/帧尾。
+`HeartTelemetryTest.java`直接解析UI主机测试从真实C发送函数取得的UART数据，覆盖所有分包位置，并验证导出的板端时间、序号回绕/缺口和重新START。
+原心率40～200BPM、弱信号、噪声、基线漂移、次峰及I2C失败回归继续通过。
+APK签名及Keil构建通过不等于手机安装、界面运行或实板蓝牙通信通过；需要手机与手表完成上述流程验证。
+
+`python -X utf8 tests/ble/run.py`在主机上编译真实驱动，模拟UART/GPIO，验证参数保存/重启、分片响应、环形回绕/溢出、错误后接收、超时、断电、发送供电门控及不读取心率GPIO。
 `python -X utf8 tests/clock/run.py`验证RTC配置、备份保留、时间范围、分段解析、无换行消息、跨午夜与计时回绕；`tests/ui/run.py`验证校时结果进入真实LVGL表盘。
 
 主机测试和Keil构建不等于实物通信成功；上板仍需验证串口交叉接线、供电电平、手机BLE连接、Notify及双向收发。

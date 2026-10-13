@@ -16,11 +16,14 @@
 #include "app_display.h"
 #include "app_imu.h"
 #include "app_baro.h"
+#include "app_heart.h"
+#include "app_aht21.h"
 #include "lvgl.h"
 #include "my_i2c.h"
 #include "mpu6050.h"
 #include "spl006.h"
 #include "lsm303dlhc.h"
+#include "em7028.h"
 #include "kt6368a.h"
 #include "watch_rtc.h"
 
@@ -61,6 +64,7 @@ void App_Task_Create(void)
     (void)spl006_init();         /* 与 MPU6050 共用 SENSOR 总线, 同样调度器前一次性初始化;
                               * 内含 HAL_Delay(20/50) 复位等待, 失败不阻塞开机 */
     (void)lsm303dlhc_mag_init(); /* 仅磁力计；后续服务读失败时禁用磁参考 */
+    (void)em7028_init(); /* 心率先配置为待机；sensor 任务调用 start 后才开启采样和照明 */
     /* 零偏校准 my_mpu6050_zero_offset() 内含 vTaskDelay, 不放这里,
      * 已移到 sensor 任务体首跑时执行 (上电默认静置台架)。 */
 
@@ -100,7 +104,7 @@ static void app_lvgl_task(void *pvParameters)
     }
 }
 
-/* 传感器采样任务: SENSOR 总线 (PB13/PB14) 唯一 owner, MPU6050+SPL006+LSM303DLHC
+/* 传感器采样任务: SENSOR 总线 (PB13/PB14) 唯一 owner, MPU6050+SPL006+LSM303DLHC+EM7028+AHT21
  * 都只在本任务读写 —— 与 flight 端 flight_task 独占 I2C1 的约定同构。
  * 低频器件不新建任务, 用static计数器在本任务内分频 (气压250ms)。
  * EXTI 只记标志；GPIOB 的方向寄存器 RMW 保留短 PRIMASK 临界区。 */
@@ -113,12 +117,14 @@ static void app_sensor_task(void *pvParameters)
     /* 数据锁须在任务上下文创建 (调度器已运行, 见 app_display 同款注释) */
     App_IMU_Init();
     App_Baro_Init();
+    app_heart_init();
 
     /* 上电零偏校准(第一级): 正常约2s，等待稳定最多3s；内部vTaskDelay让出CPU，
      * 只推迟首帧快照, 不影响 lvgl 任务。返回 1=超时放弃(校准时被搬动),
      * 保留原零点继续采样。第二级温漂抑制(静止微调)在 App_IMU_Service 内,
      * 策略同 flight 端 gyro_trim: 检测到静止才逐轮吃掉残余零偏。 */
     (void)my_mpu6050_zero_offset();
+    app_aht21_init(); /* 仅启动阶段等待上电/初始化；周期测量由下方非阻塞服务处理。 */
     xLastWakeTime = xTaskGetTickCount(); /* 校准耗时不形成 vTaskDelayUntil 补跑 */
 
     for (;;)
@@ -126,6 +132,8 @@ static void app_sensor_task(void *pvParameters)
         static uint8_t baro_cnt = 0;
 
         App_IMU_Service();
+        app_heart_service();
+        app_aht21_service();
         if (++baro_cnt >= APP_SENSOR_BARO_DIV) /* 每25拍轮询一次气压 */
         {
             App_Baro_Service();

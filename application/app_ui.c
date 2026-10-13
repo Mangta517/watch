@@ -3,10 +3,13 @@
  * @brief 240x280 dark watch UI. All LVGL calls run in the display task.
  *        表盘不滚动；设置、姿态和环境共用一个纵向滚动页面。
  *        KEY_1 (PA5, active low) goes back through page/scroll history.
+ *        WAKE (PA4, active high) toggles the backlight after a debounced release.
  */
 #include "app_ui.h"
 #include "app_imu.h"
 #include "app_baro.h"
+#include "app_heart.h"
+#include "app_aht21.h"
 #include "kt6368a.h"
 #include "watch_rtc.h"
 #include "app_clock.h"
@@ -70,6 +73,15 @@ static lv_obj_t *s_mag_cal_label;
 static lv_obj_t *s_mag_cal_status;
 static lv_obj_t *s_pressure;
 static lv_obj_t *s_altitude;
+static lv_obj_t *s_heart_card;
+static lv_obj_t *s_heart_value;
+static lv_obj_t *s_heart_status;
+static lv_obj_t *s_heart_button;
+static lv_obj_t *s_aht21_card;
+static lv_obj_t *s_humidity;
+static lv_obj_t *s_air_temperature;
+static lv_obj_t *s_aht21_status;
+static lv_obj_t *s_aht21_samples;
 static lv_obj_t *s_brightness_label;
 static lv_obj_t *s_bt_status;
 static lv_obj_t *s_bt_count;
@@ -88,7 +100,8 @@ static uint32_t s_bt_tx_color = UI_MUTED;
 static ui_page_t s_page;
 static ui_history_t s_history[UI_HISTORY];
 static uint8_t s_history_count;
-static uint8_t s_brightness = 30;
+static uint8_t s_brightness = 50;
+static uint8_t s_screen_on = 1;
 static uint8_t s_pending_back;
 static ui_page_t s_pending_page = PAGE_COUNT;
 static uint8_t s_transition;
@@ -99,6 +112,10 @@ static uint8_t s_key_raw;
 static uint8_t s_key_stable;
 static uint8_t s_key_armed;
 static uint32_t s_key_tick;
+static uint8_t s_wake_raw;
+static uint8_t s_wake_stable;
+static uint8_t s_wake_armed;
+static uint32_t s_wake_tick;
 
 static void ui_timer_cb(lv_timer_t *timer);
 static void refresh_data(void);
@@ -387,7 +404,7 @@ static void baro_page(int y)
 static void brightness_cb(lv_event_t *event)
 {
     s_brightness = (uint8_t)lv_slider_get_value(lv_event_get_target(event));
-    LCD_Set_Light(s_brightness);
+    LCD_Set_Light(s_screen_on ? s_brightness : 0);
     lv_label_set_text_fmt(s_brightness_label, "%d%%", (int)s_brightness);
 }
 
@@ -485,40 +502,75 @@ static void bluetooth_send_test_cb(lv_event_t *event)
     {
         return;
     }
-    if (!kt6368a_is_connected())
+    /* 本板未接蓝牙状态脚，直接发送并显示 UART 返回结果。 */
+    status = kt6368a_write(message, sizeof(message) - 1, UI_BT_TX_TIMEOUT_MS);
+    s_bt_tx_color = status == HAL_OK ? UI_GREEN : UI_ORANGE;
+    switch (status)
     {
-        s_bt_tx_text = "TX NO LINK";
+    case HAL_OK:
+        s_bt_tx_text = "TX UART OK";
+        break;
+    case HAL_BUSY:
+        s_bt_tx_text = "TX BUSY";
+        break;
+    case HAL_TIMEOUT:
+        s_bt_tx_text = "TX TIMEOUT";
+        break;
+    default:
+        s_bt_tx_text = "TX ERROR";
         s_bt_tx_color = UI_RED;
-    }
-    else
-    {
-        /* 与接收同在LVGL任务，短文本仅占少量串口时间；HAL_OK不代表手机已收到。 */
-        status = kt6368a_write(message, sizeof(message) - 1, UI_BT_TX_TIMEOUT_MS);
-        s_bt_tx_color = status == HAL_OK ? UI_GREEN : UI_ORANGE;
-        switch (status)
-        {
-        case HAL_OK:
-            s_bt_tx_text = "TX UART OK";
-            break;
-        case HAL_BUSY:
-            s_bt_tx_text = "TX BUSY";
-            break;
-        case HAL_TIMEOUT:
-            s_bt_tx_text = "TX TIMEOUT";
-            break;
-        default:
-            s_bt_tx_text = "TX ERROR";
-            s_bt_tx_color = UI_RED;
-            break;
-        }
+        break;
     }
     refresh_bluetooth();
+}
+
+/* 与原有蓝牙收发共用LVGL任务；每轮最多2帧/72字节，115200下约6.3ms，sensor任务不等待UART。 */
+static void bluetooth_send_heart(void)
+{
+    app_heart_sample_struct samples[2];
+    uint8_t frames[72];
+    float channels[8];
+    uint16_t count, i, channel, offset;
+    uint32_t bits;
+    HAL_StatusTypeDef status;
+    count = app_heart_read_samples(samples, sizeof(samples) / sizeof(samples[0]));
+    if (count == 0)
+    {
+        return;
+    }
+    for (i = 0; i < count; ++i)
+    {
+        channels[0] = (float)samples[i].raw;
+        channels[1] = samples[i].filtered;
+        channels[2] = samples[i].dc;
+        channels[3] = (float)samples[i].bpm;
+        channels[4] = (float)samples[i].interval_ms;
+        channels[5] = (float)samples[i].elapsed_ms / 1000.0f;
+        channels[6] = (float)samples[i].sequence;
+        channels[7] = (float)samples[i].state;
+        for (channel = 0; channel < 8; ++channel)
+        {
+            offset = i * 36 + channel * 4;
+            memcpy(&bits, &channels[channel], sizeof(bits));
+            frames[offset] = (uint8_t)bits;
+            frames[offset + 1] = (uint8_t)(bits >> 8);
+            frames[offset + 2] = (uint8_t)(bits >> 16);
+            frames[offset + 3] = (uint8_t)(bits >> 24);
+        }
+        frames[i * 36 + 32] = 0;
+        frames[i * 36 + 33] = 0;
+        frames[i * 36 + 34] = 0x80;
+        frames[i * 36 + 35] = 0x7F;
+    }
+    status = kt6368a_write(frames, count * 36U, UI_BT_TX_TIMEOUT_MS);
+    s_bt_tx_text = status == HAL_OK ? "TX HEART OK" : "TX HEART ERROR";
+    s_bt_tx_color = status == HAL_OK ? UI_GREEN : UI_RED;
 }
 
 static void bluetooth_page(void)
 {
     lv_obj_t *button, *caption;
-    s_bt_status = label(s_body, "DISCONNECTED", 4, 4, &lv_font_montserrat_10, UI_MUTED);
+    s_bt_status = label(s_body, "INIT PENDING", 4, 4, &lv_font_montserrat_10, UI_MUTED);
     note(s_body, KT6368A_BLE_NAME, 22);
     s_bt_count = label(s_body, "RX 0 B", 4, 44, &lv_font_montserrat_10, UI_BLUE);
     s_bt_tx_status = label(s_body, s_bt_tx_text, 84, 44, &lv_font_montserrat_10, s_bt_tx_color);
@@ -552,19 +604,15 @@ static void bluetooth_page(void)
 static void refresh_bluetooth(void)
 {
     HAL_StatusTypeDef status;
-    const char *text = "DISCONNECTED";
+    const char *text = "INIT OK / BLE+SPP";
     uint32_t color = UI_MUTED;
     if (s_bt_status == NULL)
     {
         return;
     }
     status = kt6368a_get_init_status();
-    if (kt6368a_is_connected())
-    {
-        text = "CONNECTED / BLE";
-        color = UI_GREEN;
-    }
-    else if (status != HAL_OK)
+    /* 初始化结果不等于手机连接状态，KT_LED 没有接入 STM32。 */
+    if (status != HAL_OK)
     {
         text = status == HAL_TIMEOUT ? "INIT TIMEOUT" : (status == HAL_BUSY ? "INIT BUSY" : "INIT ERROR");
         color = UI_ORANGE;
@@ -601,6 +649,113 @@ static void refresh_bluetooth(void)
     }
 }
 
+static void heart_toggle_cb(lv_event_t *event)
+{
+    app_heart_struct heart;
+    (void)event;
+    if (s_transition)
+    {
+        return;
+    }
+    app_heart_get_snapshot(&heart);
+    app_heart_set_enabled(!heart.enabled);
+    refresh_data();
+}
+
+static void heart_window(void)
+{
+    s_heart_card = panel(s_body, 0, 252, 212, 144, UI_CARD);
+    label(s_heart_card, "HEART RATE / BPM", 14, 12, &lv_font_montserrat_10, UI_RED);
+    s_heart_value = label(s_heart_card, "--", 14, 35, &lv_font_montserrat_30, UI_RED);
+    s_heart_status = label(s_heart_card, "STANDBY", 14, 82, &lv_font_montserrat_10, UI_MUTED);
+    s_heart_button = label(s_heart_card, "START", 116, 42, &lv_font_montserrat_10, UI_TEXT);
+    lv_obj_set_size(s_heart_button, 82, 30);
+    lv_obj_set_style_bg_color(s_heart_button, lv_color_hex(UI_BLUE), 0);
+    lv_obj_set_style_bg_opa(s_heart_button, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_heart_button, 12, 0);
+    lv_obj_set_style_pad_top(s_heart_button, 8, 0);
+    lv_obj_set_style_text_align(s_heart_button, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(s_heart_button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_heart_button, heart_toggle_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static void refresh_heart(void)
+{
+    app_heart_struct heart;
+    const char *status = "STANDBY";
+    if (s_heart_card == NULL)
+    {
+        return;
+    }
+    app_heart_get_snapshot(&heart);
+    if (heart.state == APP_HEART_VALID)
+    {
+        lv_label_set_text_fmt(s_heart_value, "%u", (unsigned)heart.bpm);
+        status = "TRACKING";
+    }
+    else
+    {
+        lv_label_set_text(s_heart_value, "--");
+        switch (heart.state)
+        {
+        case APP_HEART_MEASURING:
+            status = "MEASURING";
+            break;
+        case APP_HEART_NO_SIGNAL:
+            status = "NO SIGNAL";
+            break;
+        case APP_HEART_ERROR:
+            status = "UNAVAILABLE";
+            break;
+        default:
+            break;
+        }
+    }
+    /* 故障时保留实际失败步骤；读取失败不能只显示算法的 NO SIGNAL。 */
+    if (heart.state == APP_HEART_ERROR)
+    {
+        const char *reason;
+        switch (heart.fault.kind)
+        {
+        case EM7028_FAULT_READ:
+            reason = "I2C READ";
+            break;
+        case EM7028_FAULT_WRITE:
+            reason = "I2C WRITE";
+            break;
+        case EM7028_FAULT_PID:
+            reason = "PID CHECK";
+            break;
+        case EM7028_FAULT_CONFIG:
+            reason = "CONFIG CHECK";
+            break;
+        case EM7028_FAULT_DATA_CHANGED:
+            reason = "DATA CHANGED";
+            break;
+        default:
+            reason = "SAMPLE WAIT";
+            break;
+        }
+        if (heart.fault.kind == EM7028_FAULT_PID || heart.fault.kind == EM7028_FAULT_CONFIG)
+        {
+            lv_label_set_text_fmt(s_heart_status, "%s\n%s REG %02X\nVALUE %02X", status, reason, (unsigned)heart.fault.reg,
+                                  (unsigned)heart.fault.value);
+        }
+        else
+        {
+            lv_label_set_text_fmt(s_heart_status, "%s\n%s REG %02X\nRetry START", status, reason, (unsigned)heart.fault.reg);
+        }
+    }
+    else
+    {
+        lv_label_set_text_fmt(s_heart_status, "%s\nHRS1 %u  AC %lu.%lu\nPERIOD %u ms", status, (unsigned)heart.raw,
+                              (unsigned long)(heart.signal_x10 / 10U), (unsigned long)(heart.signal_x10 % 10U),
+                              (unsigned)heart.interval_ms);
+    }
+    lv_obj_set_style_text_color(s_heart_status, lv_color_hex(heart.state == APP_HEART_ERROR ? UI_RED : UI_MUTED), 0);
+    lv_label_set_text(s_heart_button, heart.enabled ? "STOP" : "START");
+}
+
 static void settings_page(void)
 {
     static const ui_page_t bluetooth = PAGE_BLUETOOTH;
@@ -632,10 +787,23 @@ static void settings_page(void)
     lv_obj_add_event_cb(slider, brightness_cb, LV_EVENT_VALUE_CHANGED, NULL);
     card(LV_SYMBOL_BLUETOOTH, "Bluetooth", "BLE / received data", 140, UI_BLUE, &bluetooth);
     note(s_body, "Brightness resets after restart.", 226);
-    label(s_body, "MOTION", 2, 260, &lv_font_montserrat_14, UI_BLUE);
-    imu_page(284);
-    label(s_body, "ENVIRONMENT", 2, 1140, &lv_font_montserrat_14, UI_ORANGE);
-    baro_page(1164);
+    heart_window();
+    label(s_body, "MOTION", 2, 420, &lv_font_montserrat_14, UI_BLUE);
+    imu_page(444);
+    label(s_body, "ENVIRONMENT", 2, 1300, &lv_font_montserrat_14, UI_ORANGE);
+    baro_page(1324);
+    s_aht21_card = panel(s_body, 0, 1640, 212, 212, UI_CARD);
+    label(s_aht21_card, "AHT21 / TEMP + HUMIDITY", 14, 12, &lv_font_montserrat_10, UI_BLUE);
+    s_aht21_status = label(s_aht21_card, "WAITING", 14, 30, &lv_font_montserrat_10, UI_MUTED);
+    label(s_aht21_card, "HUMIDITY", 14, 54, &lv_font_montserrat_10, UI_MUTED);
+    label(s_aht21_card, "%RH", 169, 80, &lv_font_montserrat_10, UI_GREEN);
+    s_humidity = label(s_aht21_card, "--", 14, 70, &lv_font_montserrat_30, UI_GREEN);
+    lv_obj_set_width(s_humidity, 146);
+    label(s_aht21_card, "AIR TEMPERATURE", 14, 116, &lv_font_montserrat_10, UI_MUTED);
+    label(s_aht21_card, "C", 184, 142, &lv_font_montserrat_10, UI_ORANGE);
+    s_air_temperature = label(s_aht21_card, "--", 14, 132, &lv_font_montserrat_30, UI_ORANGE);
+    lv_obj_set_width(s_air_temperature, 146);
+    s_aht21_samples = label(s_aht21_card, "SAMPLES 0 / 2s", 14, 186, &lv_font_montserrat_10, UI_MUTED);
 }
 
 static void clear_page_refs(void)
@@ -643,6 +811,8 @@ static void clear_page_refs(void)
     s_time = s_hour_hand = s_minute_hand = s_second_hand = s_clock_hint = NULL;
     s_imu_status = s_baro_status = NULL;
     s_pressure = s_altitude = s_brightness_label = NULL;
+    s_heart_card = s_heart_value = s_heart_status = s_heart_button = NULL;
+    s_aht21_card = s_humidity = s_air_temperature = s_aht21_status = s_aht21_samples = NULL;
     memset(s_angles, 0, sizeof(s_angles));
     memset(s_mag_values, 0, sizeof(s_mag_values));
     s_mag_status = s_yaw_source = s_mag_cal_label = NULL;
@@ -822,6 +992,66 @@ static void mag_calibration_status(const app_imu_struct *imu)
                           (long)imu->mag_cal_span_uT[0], (long)imu->mag_cal_span_uT[1], (long)imu->mag_cal_span_uT[2]);
 }
 
+static void refresh_aht21(void)
+{
+    app_aht21_struct snapshot;
+    const char *status = "WAITING";
+    uint32_t color = UI_MUTED;
+    if (s_aht21_card == NULL)
+    {
+        return;
+    }
+    app_aht21_get_snapshot(&snapshot);
+    if (snapshot.valid != 0)
+    {
+        set_decimal(s_humidity, snapshot.sample.humidity_rh, 0);
+        set_decimal(s_air_temperature, snapshot.sample.temperature_c, 0);
+    }
+    else
+    {
+        lv_label_set_text(s_humidity, "--");
+        lv_label_set_text(s_air_temperature, "--");
+    }
+    if (snapshot.result != AHT21_OK)
+    {
+        color = UI_RED;
+        switch (snapshot.result)
+        {
+        case AHT21_BUSY:
+            status = "BUSY";
+            break;
+        case AHT21_I2C_ERROR:
+            status = "I2C ERROR";
+            break;
+        case AHT21_CALIBRATION_ERROR:
+            status = "NOT CALIBRATED";
+            break;
+        case AHT21_CRC_ERROR:
+            status = "CRC ERROR";
+            break;
+        case AHT21_TIMEOUT:
+            status = "CONVERSION TIMEOUT";
+            break;
+        default:
+            status = "READ ERROR";
+            break;
+        }
+    }
+    else if (snapshot.measuring != 0)
+    {
+        status = "MEASURING";
+        color = UI_ORANGE;
+    }
+    else if (snapshot.valid != 0)
+    {
+        status = "ONLINE / CRC OK";
+        color = UI_GREEN;
+    }
+    lv_label_set_text(s_aht21_status, status);
+    lv_obj_set_style_text_color(s_aht21_status, lv_color_hex(color), 0);
+    lv_label_set_text_fmt(s_aht21_samples, "SAMPLES %lu / 2s", (unsigned long)snapshot.sample_count);
+}
+
 static void refresh_data(void)
 {
     app_imu_struct imu;
@@ -916,6 +1146,8 @@ static void refresh_data(void)
         }
     }
     refresh_bluetooth();
+    refresh_heart();
+    refresh_aht21();
 }
 
 void App_UI_Back(void)
@@ -938,12 +1170,55 @@ static void poll_key(void)
         s_key_stable = s_key_raw;
         if (s_key_stable)
         {
-            s_key_armed = 1;
+            s_key_armed = s_screen_on;
         }
         else if (s_key_armed)
         {
             s_key_armed = 0;
-            App_UI_Back();
+            if (s_screen_on)
+            {
+                App_UI_Back();
+            }
+        }
+    }
+}
+
+/* PA4 上升沿中断由 HAL 清除；UI 任务扫描电平，按下和松开均消抖，不在 ISR 操作屏幕。 */
+static void poll_wake_key(void)
+{
+    uint8_t pressed = HAL_GPIO_ReadPin(WAKE_GPIO_Port, WAKE_Pin) == GPIO_PIN_SET;
+    lv_indev_t *indev;
+
+    if (pressed != s_wake_raw)
+    {
+        s_wake_raw = pressed;
+        s_wake_tick = lv_tick_get();
+    }
+    if (s_wake_raw != s_wake_stable && lv_tick_elaps(s_wake_tick) >= UI_KEY_MS)
+    {
+        s_wake_stable = s_wake_raw;
+        if (s_wake_stable)
+        {
+            s_wake_armed = 1;
+        }
+        else if (s_wake_armed)
+        {
+            s_wake_armed = 0;
+            s_screen_on = !s_screen_on;
+            LCD_Set_Light(s_screen_on ? s_brightness : 0);
+            /* 熄屏不接收触摸；亮屏时等待原触点松开，避免误点击。 */
+            for (indev = lv_indev_get_next(NULL); indev != NULL; indev = lv_indev_get_next(indev))
+            {
+                if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER)
+                {
+                    lv_indev_reset(indev, NULL);
+                    lv_indev_enable(indev, s_screen_on != 0);
+                    if (s_screen_on)
+                    {
+                        lv_indev_wait_release(indev);
+                    }
+                }
+            }
         }
     }
 }
@@ -967,6 +1242,8 @@ static void ui_timer_cb(lv_timer_t *timer)
     ui_page_t next;
     (void)timer;
     bluetooth_receive(); /* 唯一接收消费者；切到其他页面时也继续保存数据。 */
+    bluetooth_send_heart();
+    poll_wake_key();
     poll_key();
     if (s_transition && lv_tick_elaps(s_transition_tick) >= UI_ANIM_MS + UI_POLL_MS)
     {
@@ -974,7 +1251,7 @@ static void ui_timer_cb(lv_timer_t *timer)
     }
     /* Rebuild only after release and after the previous animation, so event
      * targets stay valid and a gesture cannot turn into a card click. */
-    if (!s_transition && !touch_pressed())
+    if (s_screen_on && !s_transition && !touch_pressed())
     {
         if (s_pending_back)
         {
@@ -1024,6 +1301,8 @@ void App_UI_Create(void)
     LCD_Set_Light(s_brightness);
     /* A key held during boot must be released before it can trigger Back. */
     s_key_raw = s_key_stable = HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET;
-    s_key_tick = s_refresh_tick = lv_tick_get();
+    /* 开机时按住 SW2 只用于上电，松开不立即熄屏。 */
+    s_wake_raw = s_wake_stable = HAL_GPIO_ReadPin(WAKE_GPIO_Port, WAKE_Pin) == GPIO_PIN_SET;
+    s_wake_tick = s_key_tick = s_refresh_tick = lv_tick_get();
     lv_timer_create(ui_timer_cb, UI_POLL_MS, NULL);
 }

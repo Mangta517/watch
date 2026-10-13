@@ -1,9 +1,9 @@
 /**
  ******************************************************************************
  * @file    kt6368a.h
- * @brief   KT6368A 蓝牙串口驱动：USART1 + BL1551B 电源开关 + 连接状态。
+ * @brief   KT6368A 蓝牙串口驱动：USART1 + BL1551B 电源开关。
  *          PA9(TX)接模块7脚(RX)，PA10(RX)接模块8脚(TX)。
- *          PA8高电平供电；PB15下拉输入，连接成功为高。
+ *          PA8高电平供电；PB15（HEART_LED，旧名 BLE_LED）实际为心率 LED_EN，与蓝牙 KT_LED 不相连。
  ******************************************************************************
  */
 #ifndef __KT6368A_H__
@@ -19,11 +19,11 @@ extern "C"
 #define KT6368A_BLE_NAME       "F411-Watch"
 #define KT6368A_RX_BUFFER_SIZE 1024U /* 环形缓冲有效容量1023字节 */
 #define KT6368A_TX_MAX_SIZE    512U
-#define KT6368A_BOOT_DELAY_MS  1200U /* 避开上电约1秒的状态脚高电平 */
+#define KT6368A_BOOT_DELAY_MS  1200U /* 蓝牙模块上电等待时间 */
 #define KT6368A_AT_TIMEOUT_MS  500U
 
     /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。
- * 在调度器启动前调用：上电、启动接收、配置BLE名称/BLE开/SPP关并查询验证。
+ * 在调度器启动前调用：上电、启动接收、配置BLE名称/BLE开/SPP开并查询验证。
  * 参数已匹配时不写配置；修改后重新上电。失败不阻止其他手表功能启动。
  * 本型号不配置CL/UT低功耗功能。返回HAL_OK/ERROR/TIMEOUT/BUSY。 */
     HAL_StatusTypeDef kt6368a_init(void);
@@ -31,15 +31,16 @@ extern "C"
 
     /* 电源切换/配置/收发接口须由同一个调用上下文串行使用，禁止在ISR调用。
  * power_on含HAL_Delay；power_off先将UART引脚置下拉输入，避免断电反向供电。
- * 上电不改参数；configure设置BLE模式及名称，仅在未连接时可用。
+ * 上电不改参数；configure开启BLE/SPP并设置BLE名称，仅在手机未连接时调用；本板无法读取连接状态。
  * name为1~30字节且不含CR/LF。 */
     HAL_StatusTypeDef kt6368a_power_on(void);
     void kt6368a_power_off(void);
     HAL_StatusTypeDef kt6368a_configure(const char *name);
+    /* 本板未接蓝牙状态脚，保留接口固定返回0（无法确认），不代表手机一定未连接。 */
     uint8_t kt6368a_is_connected(void);
 
     /* 手机向FFF1执行Write Without Response；接收手表数据须订阅FFF1 Notify。
- * write返回值仅表示UART发送结果，不代表手机已收到。
+ * write在模块供电并完成启动等待后直接发送；返回值仅表示UART发送结果，不代表手机已收到。
  * 单次最多512字节；大数据需应用层安排发送节奏，不能无限连续灌满模块缓存。
  * read为非阻塞字节流，业务消息的分包/拼包由应用层处理。 */
     HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t timeout_ms);

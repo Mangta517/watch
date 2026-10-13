@@ -69,6 +69,7 @@ uint32_t __get_PRIMASK(void);
 void __disable_irq(void);
 void __set_PRIMASK(uint32_t mask);
 void HAL_Delay(uint32_t ms);
+uint32_t HAL_GetTick(void);
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config);
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
