@@ -50,7 +50,7 @@ HAL_StatusTypeDef watch_rtc_init(void)
     marker = HAL_RTCEx_BKUPRead(&watch_rtc, RTC_BKP_DR0);
     if (marker != WATCH_RTC_INITIALIZED && marker != WATCH_RTC_SYNCED)
     {
-        /* 手机只发时分，日期为内部日历占位。首次初始化，后续复位保留走时。 */
+        /* 手机发送时间，日期为内部日历占位。首次初始化，后续复位保留走时。 */
         date.Year = 0;
         date.Month = RTC_MONTH_JANUARY;
         date.Date = 1;
@@ -73,17 +73,17 @@ HAL_StatusTypeDef watch_rtc_init(void)
     return HAL_OK;
 }
 
-HAL_StatusTypeDef watch_rtc_set_time(uint8_t hours, uint8_t minutes)
+HAL_StatusTypeDef watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t seconds)
 {
     RTC_TimeTypeDef time = {0};
     HAL_StatusTypeDef status;
-    if (!rtc_ready || hours > 23 || minutes > 59)
+    if (!rtc_ready || hours > 23 || minutes > 59 || seconds > 59)
     {
         return HAL_ERROR;
     }
     time.Hours = hours;
     time.Minutes = minutes;
-    time.Seconds = 0;
+    time.Seconds = seconds;
     time.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
     time.StoreOperation = RTC_STOREOPERATION_RESET;
     status = HAL_RTC_SetTime(&watch_rtc, &time, RTC_FORMAT_BIN);

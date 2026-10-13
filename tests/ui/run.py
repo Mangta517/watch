@@ -29,33 +29,41 @@ if not library.exists() or max(p.stat().st_mtime for p in dependencies) > librar
     print("Building the project's LVGL renderer...", flush=True)
     subprocess.run([gcc, "@" + str(response)], cwd=ROOT, check=True)
 print("Building and testing the watch UI...", flush=True)
-subprocess.run([gcc] + args + ["-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/app_clock.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
+subprocess.run([gcc] + args + ["-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
 from PIL import Image, ImageDraw, ImageFont
 
-names = ["watch", "settings", "motion", "environment", "bluetooth"]
-titles = ["WATCH / FIXED", "SETTINGS / TOP", "SETTINGS / MOTION", "SETTINGS / ENVIRONMENT", "BLUETOOTH"]
-montage = Image.new("RGB", (1360, 406), "#080c12")
-draw = ImageDraw.Draw(montage)
 try:
     font = ImageFont.truetype("arial.ttf", 15)
     small = ImageFont.truetype("arial.ttf", 13)
 except OSError:
     font = small = ImageFont.load_default()
-draw.text((28, 18), "DARK WATCH / 240 x 280 / ACTUAL LVGL RENDER", fill="#c5cfdd", font=font)
-for index, (name, title) in enumerate(zip(names, titles)):
-    frame = Image.open(OUT / (name + ".ppm"))
-    frame.save(OUT / (name + ".png"))
-    x = 28 + index * 266
-    draw.rounded_rectangle((x - 4, 57, x + 243, 344), radius=18, outline="#253348", width=2)
-    montage.paste(frame, (x, 61))
-    draw.text((x, 355), title, font=small, fill="#7b8ba2")
-draw.text((28, 386), "Preview uses simulated sensor data. Firmware reads the existing sensor snapshot services.", fill="#7b8ba2", font=small)
-montage.save(OUT / "watch-ui-preview.png")
-for name in ["motion_magnetic", "motion_calibrating", "motion_calibration_status", "motion_restored", "motion_save_failed",
+def make_preview(names, titles, columns, filename):
+    rows = (len(names) + columns - 1) // columns
+    montage = Image.new("RGB", (30 + columns * 266, 66 + rows * 340), "#041426")
+    draw = ImageDraw.Draw(montage)
+    draw.text((28, 18), "SYDNEY / 240 x 280 / ACTUAL LVGL RENDER", fill="#f4faff", font=font)
+    for index, (name, title) in enumerate(zip(names, titles)):
+        frame = Image.open(OUT / (name + ".ppm"))
+        frame.save(OUT / (name + ".png"))
+        x = 28 + (index % columns) * 266
+        y = 61 + (index // columns) * 340
+        draw.rounded_rectangle((x - 4, y - 4, x + 243, y + 283), radius=18, outline="#173b54", width=2)
+        montage.paste(frame, (x, y))
+        draw.text((x, y + 294), title, font=small, fill="#7eabc1")
+    draw.text((28, montage.height - 20), "Preview uses simulated sensor data.", fill="#7eabc1", font=small)
+    montage.save(OUT / filename)
+
+
+make_preview(["sydney", "settings", "settings_scrolled"], ["SYDNEY / HOME", "APPS / TOP", "APPS / SCROLLED"],
+             3, "watch-ui-preview.png")
+make_preview(["heart", "motion", "environment", "aht21", "phone_weather", "bluetooth", "display"],
+             ["HEART RATE", "MOTION", "BAROMETER", "CLIMATE", "PHONE WEATHER", "BLUETOOTH", "DISPLAY"],
+             4, "watch-ui-details.png")
+for name in ["watch", "motion_magnetic", "motion_calibrating", "motion_calibration_status", "motion_restored", "motion_save_failed",
              "bluetooth", "bluetooth_empty", "bluetooth_tx", "bluetooth_time",
              "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds",
              "heart", "heart_measuring", "heart_no_signal", "heart_unavailable",
-             "aht21", "aht21_measuring", "aht21_crc_error", "aht21_unavailable"]:
+             "aht21", "aht21_measuring", "aht21_crc_error", "aht21_unavailable", "battery_waiting", "battery_error", "phone_weather", "watch_weather"]:
     Image.open(OUT / (name + ".ppm")).save(OUT / (name + ".png"))
 print("Preview:", OUT / "watch-ui-preview.png")

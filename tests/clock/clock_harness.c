@@ -1,5 +1,6 @@
 #include "watch_rtc.h"
 #include "app_clock.h"
+#include "app_weather.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -89,7 +90,7 @@ static void feed(const char *text, uint32_t ms)
 {
     app_clock_receive((const uint8_t *)text, (uint16_t)strlen(text), ms);
 }
-int main(void)
+int main(int argc, char **argv)
 {
     watch_time_struct time;
     uint32_t calls, seconds;
@@ -140,15 +141,62 @@ int main(void)
     feed("18:20\n", 1400);
     assert(app_clock_get_result() == APP_CLOCK_RTC_ERROR && set_calls == calls && rtc_seconds == seconds);
     set_status = HAL_OK;
-    feed("01:02", UINT32_MAX - 100U);
+    /* 含秒消息在每个UART分包位置均能完整解析，不在消息结束前写RTC。 */
+    for (uint16_t split = 0; split <= 8; ++split)
+    {
+        static const uint8_t frame[] = "14:35:47\n";
+        calls = set_calls;
+        app_clock_receive(frame, split, 2000);
+        assert(set_calls == calls);
+        app_clock_receive(frame + split, sizeof(frame) - 1 - split, 2010);
+        assert(set_calls == calls + 1 && rtc_seconds == 14U * 3600U + 35U * 60U + 47U);
+    }
+    calls = set_calls;
+    seconds = rtc_seconds;
+    {
+        static const char *invalid[] = {"12:34:60\n", "24:00:00\n", "12:34:\n", "12::34\n",
+                                        "12:34:56:7\n", "12:34:005\n", "123:1:2\n"};
+        for (uint8_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
+        {
+            feed(invalid[i], 2100);
+            assert(app_clock_get_result() == APP_CLOCK_INVALID && set_calls == calls && rtc_seconds == seconds);
+        }
+    }
+    assert(watch_rtc_set_time(12, 34, 60) == HAL_ERROR && set_calls == calls);
+    set_status = HAL_ERROR;
+    feed("18:20:59\n", 2200);
+    assert(app_clock_get_result() == APP_CLOCK_RTC_ERROR && set_calls == calls && rtc_seconds == seconds);
+    set_status = HAL_OK;
+    feed("9:5:7\r\n", 2300);
+    assert(rtc_seconds == 9U * 3600U + 5U * 60U + 7U);
+    feed("23:59:59\n", 2400);
+    rtc_seconds = (rtc_seconds + 1) % 86400;
+    assert(watch_rtc_get_time(&time) == HAL_OK && time.hours == 0 && time.minutes == 0 && time.seconds == 0);
+    feed("01:02:03", UINT32_MAX - 100U);
     app_clock_service(99U);
-    assert(app_clock_get_result() == APP_CLOCK_SYNCED && rtc_seconds == 3720);
+    assert(app_clock_get_result() == APP_CLOCK_SYNCED && rtc_seconds == 3723);
     oscillator_status = HAL_TIMEOUT;
     assert(watch_rtc_init() == HAL_TIMEOUT && watch_rtc_get_time(&time) == HAL_ERROR);
     assert(!watch_rtc_is_synced());
     oscillator_status = HAL_OK;
-    assert(watch_rtc_init() == HAL_OK && watch_rtc_is_synced() && rtc_seconds == 3720);
-    puts("PASS: LSE/RTC configuration, backup retention, shadow unlock, fragmented HH:MM, no-newline idle, ranges/noise/failures, midnight "
+    assert(watch_rtc_init() == HAL_OK && watch_rtc_is_synced() && rtc_seconds == 3723);
+    puts("PASS: LSE/RTC configuration, backup retention, shadow unlock, fragmented HH:MM:SS and legacy HH:MM, no-newline idle, ranges/noise/failures, midnight "
          "and tick wrap.");
+    if (argc > 1)
+    {
+        char frames[128];
+        app_weather_struct weather;
+        FILE *file = fopen(argv[1], "rb");
+        size_t length;
+        assert(file != NULL);
+        length = fread(frames, 1, sizeof(frames), file);
+        fclose(file);
+        app_clock_receive((const uint8_t *)frames, (uint16_t)length, 1000);
+        app_weather_receive((const uint8_t *)frames, (uint16_t)length, 1000);
+        app_weather_get_snapshot(&weather);
+        assert(rtc_seconds == 14U * 3600U + 35U * 60U + 47U && app_clock_get_result() == APP_CLOCK_SYNCED);
+        assert(weather.valid && weather.code == 3 && weather.temperature_x10 == -53 && weather.humidity_rh == 81);
+        puts("PASS: real Java-generated phone frames -> C clock/weather parsers -> RTC and weather snapshot.");
+    }
     return 0;
 }

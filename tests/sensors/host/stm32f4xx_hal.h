@@ -11,6 +11,7 @@ extern GPIO_TypeDef host_gpio_a, host_gpio_b;
 #define GPIOA                (&host_gpio_a)
 #define GPIOB                (&host_gpio_b)
 #define GPIO_PIN_0           (1U << 0)
+#define GPIO_PIN_1           (1U << 1)
 #define GPIO_PIN_3           (1U << 3)
 #define GPIO_PIN_4           (1U << 4)
 #define GPIO_PIN_5           (1U << 5)
@@ -64,6 +65,15 @@ typedef struct
 #define DMA2_Stream2_IRQn                            2
 #define __HAL_TIM_SET_AUTORELOAD(timer, value)       ((timer)->arr = (value))
 #define __HAL_TIM_SET_COMPARE(timer, channel, value) ((timer)->compare = (value))
+
+typedef struct
+{
+    uint32_t unused;
+} ADC_HandleTypeDef;
+HAL_StatusTypeDef HAL_ADC_Start(ADC_HandleTypeDef *adc);
+HAL_StatusTypeDef HAL_ADC_PollForConversion(ADC_HandleTypeDef *adc, uint32_t timeout_ms);
+uint32_t HAL_ADC_GetValue(ADC_HandleTypeDef *adc);
+HAL_StatusTypeDef HAL_ADC_Stop(ADC_HandleTypeDef *adc);
 
 uint32_t __get_PRIMASK(void);
 void __disable_irq(void);

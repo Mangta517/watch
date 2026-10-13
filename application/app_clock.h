@@ -12,7 +12,7 @@ typedef enum
     APP_CLOCK_RTC_ERROR
 } app_clock_result;
 
-/* 与蓝牙显示共用一个接收入口，仅在LVGL任务调用。支持H:M / HH:MM。
+/* 与蓝牙显示共用一个接收入口，仅在LVGL任务调用。支持H:M / HH:MM / HH:MM:SS；省略秒时置零。
  * CR/LF结束消息；无换行时以200ms接收空闲为结束，分段数据不会提前设置RTC。 */
 void app_clock_receive(const uint8_t *data, uint16_t size, uint32_t now_ms);
 void app_clock_service(uint32_t now_ms);

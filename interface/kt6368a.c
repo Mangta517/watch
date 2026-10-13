@@ -276,7 +276,7 @@ HAL_StatusTypeDef kt6368a_configure(const char *name)
     {
         return status;
     }
-    status = kt6368a_set_if_needed("AT+T5\r\n", "T5+", "01", "AT+B501\r\n", &changed);
+    status = kt6368a_set_if_needed("AT+T5\r\n", "T5+", "00", "AT+B500\r\n", &changed);
     if (status != HAL_OK)
     {
         return status;
@@ -314,7 +314,7 @@ HAL_StatusTypeDef kt6368a_configure(const char *name)
     {
         return status;
     }
-    return (strcmp(response, "T5+01") == 0) ? HAL_OK : HAL_ERROR;
+    return (strcmp(response, "T5+00") == 0) ? HAL_OK : HAL_ERROR;
 }
 
 HAL_StatusTypeDef kt6368a_init(void)

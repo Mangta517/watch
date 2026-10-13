@@ -15,6 +15,13 @@ sources = ["tests/sensors/sensor_harness.c", "interface/lsm303dlhc.c",
            "interface/bl24c02.c", "application/app_mag_store.c",
            "common/common_imu.c", "application/app_imu.c"]
 with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
+    battery_exe = str(Path(out) / "battery.exe")
+    subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                    "-Itests/sensors/host", "-ICore/Inc", "-Iapplication",
+                    "tests/sensors/battery_harness.c", "application/app_battery.c",
+                    "-o", battery_exe], cwd=root, check=True)
+    subprocess.run([battery_exe], cwd=root, check=True)
+    subprocess.run([battery_exe, "allocation_failed"], cwd=root, check=True)
     i2c_exe = str(Path(out) / "i2c.exe")
     subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-include", "tests/sensors/host/i2c_platform.h",

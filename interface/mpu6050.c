@@ -79,11 +79,11 @@ uint8_t my_mpu6050_init(void)
     uint16_t guard;
 
     /* 上电就绪门: MPU6050 POR 后 I2C 接口需要 ~100ms 才能应答。
-     * 本工程 init 在调度器启动前就被调用(复位后仅几 ms), 若不等就绪
-     * 首写 NACK 直接返回, 器件将停留在默认 SLEEP 态 → 输出寄存器全 0、
+     * 本工程 init 由sensor任务启动时调用；若器件还未就绪便首写，
+     * NACK 直接返回, 器件将停留在默认 SLEEP 态 → 输出寄存器全 0、
      * INT 永远不触发, 表现为"陀螺仪没有数据"。
      * 以 WHO_AM_I 是否获得 ACK 为准 (不比较数值, 兼容 0x68/0x98/0x69 克隆片);
-     * 调度器未启动, HAL_Delay 走 SysTick 1ms 可用。最多等 20×50ms = 1s。 */
+     * HAL_Delay由SysTick计时，等待可被高优先级UI任务抢占。重试等待约1s。 */
     retry = 0;
     for (;;)
     {

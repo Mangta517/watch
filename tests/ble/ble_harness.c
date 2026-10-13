@@ -12,7 +12,7 @@ static int fail_tx, fail_rx;
 static uint32_t uart_gpio_mode;
 static char saved_name[31] = "F411-Watch-SPP", current_name[31];
 static char saved_ble_name[31] = "KT6368A-BLE", current_ble_name[31];
-static char saved_ble[3] = "00", saved_spp[3] = "00";
+static char saved_ble[3] = "00", saved_spp[3] = "01";
 static char current_ble[3], current_spp[3];
 static char pending[256];
 static size_t pending_pos, pending_size;
@@ -202,16 +202,26 @@ int main(void)
     uint32_t errors;
 
     assert(kt6368a_get_init_status() == HAL_ERROR);
-    /* 开启BLE和SPP，设置只有重新上电才生效，SPP名称保持不变。 */
+    /* 从旧SPP开启配置迁移到仅BLE，重新上电后生效，SPP名称保持不变。 */
     assert(kt6368a_init() == HAL_OK);
     assert(kt6368a_get_init_status() == HAL_OK);
     assert(strcmp(current_ble_name, KT6368A_BLE_NAME) == 0);
     assert(strcmp(current_name, "F411-Watch-SPP") == 0);
-    assert(strcmp(current_spp, "01") == 0 && strcmp(current_ble, "01") == 0);
+    assert(strcmp(current_spp, "00") == 0 && strcmp(current_ble, "01") == 0);
     assert(boots == 2 && writes == 3 && !kt6368a_is_connected());
     before = writes;
     assert(kt6368a_init() == HAL_OK);
     assert(writes == before); /* 已保存的配置不重复写Flash */
+
+    /* 模块拒绝关闭SPP时必须报告失败，后续正常设置可恢复。 */
+    strcpy(saved_spp, "01");
+    strcpy(current_spp, "01");
+    reject_setting = 1;
+    assert(kt6368a_configure(KT6368A_BLE_NAME) == HAL_ERROR);
+    assert(strcmp(current_spp, "01") == 0);
+    reject_setting = 0;
+    assert(kt6368a_configure(KT6368A_BLE_NAME) == HAL_OK);
+    assert(strcmp(current_spp, "00") == 0 && strcmp(current_ble, "01") == 0);
 
     /* 实际ISR接收路径：字节顺序、环形回绕、满缓冲丢弃计数。 */
     for (i = 0; i < 900; ++i)

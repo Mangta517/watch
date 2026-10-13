@@ -3,10 +3,10 @@
   * @file    app_task.h
   * @brief   应用层-FreeRTOS 任务管理 (全工程唯一的任务创建 / 调度器启动入口)
   *          分层约束: app_ui / app_display 等业务模块不得再出现 xTaskCreate /
-  *          vTaskStartScheduler, 需要新任务时统一在 App_Task_Create() 里登记。
+  *          vTaskStartScheduler, 任务创建统一在 app_task.c 内安排。
   *
   *          当前任务清单:
-  *            lvgl     prio 3, 4KB 栈 — 驱动 LVGL 心跳, 承载屏幕/触摸测试 UI
+  *            lvgl     prio 3, 4KB 栈 — 首帧显示后初始化RTC/蓝牙，再创建sensor任务并服务UI
   *            sensor   prio 2, 2KB 栈 — SENSOR 总线 (MPU6050+SPL006+LSM303DLHC) owner:
   *                       IMU10ms、磁力计10ms轮询(器件75Hz)、气压250ms(器件1Hz); 数据经
   *                       App_IMU_GetSnapshot() / App_Baro_GetSnapshot() 供 UI 消费
@@ -22,7 +22,7 @@ extern "C"
 #endif
 
     /**
- * @brief 创建全部应用任务 (在启动调度器前、调度器未运行时调用一次)
+ * @brief 创建显示任务 (调度器启动前调用一次；首帧显示及RTC/蓝牙初始化后创建sensor任务)
  */
     void App_Task_Create(void);
 

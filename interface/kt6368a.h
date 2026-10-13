@@ -23,7 +23,7 @@ extern "C"
 #define KT6368A_AT_TIMEOUT_MS  500U
 
     /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。
- * 在调度器启动前调用：上电、启动接收、配置BLE名称/BLE开/SPP开并查询验证。
+ * 首帧显示后由LVGL任务调用，完成后再进入UI收发循环：上电、启动接收、配置BLE名称/BLE开/SPP关并查询验证。
  * 参数已匹配时不写配置；修改后重新上电。失败不阻止其他手表功能启动。
  * 本型号不配置CL/UT低功耗功能。返回HAL_OK/ERROR/TIMEOUT/BUSY。 */
     HAL_StatusTypeDef kt6368a_init(void);
@@ -31,7 +31,7 @@ extern "C"
 
     /* 电源切换/配置/收发接口须由同一个调用上下文串行使用，禁止在ISR调用。
  * power_on含HAL_Delay；power_off先将UART引脚置下拉输入，避免断电反向供电。
- * 上电不改参数；configure开启BLE/SPP并设置BLE名称，仅在手机未连接时调用；本板无法读取连接状态。
+ * 上电不改参数；configure开启BLE、关闭SPP并设置BLE名称，仅在手机未连接时调用；本板无法读取连接状态。
  * name为1~30字节且不含CR/LF。 */
     HAL_StatusTypeDef kt6368a_power_on(void);
     void kt6368a_power_off(void);

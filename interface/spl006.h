@@ -91,8 +91,8 @@ extern "C"
     /* 返回值约定：0=成功，非 0=失败 (总线 NACK / 就绪超时 / 系数未就绪)          */
 
     /* 初始化: 软复位→等就绪→读校准系数→配 16X 过采样/1Hz 背景模式
- * (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR); 内含 HAL_Delay, 只可在
- *  调度器启动前的上下文调用一次 —— 与 my_mpu6050_init 同位置) */
+ * (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR); 内含 HAL_Delay, 由
+ *  sensor任务启动时调用一次，不能在ISR或UI任务调用) */
     uint8_t spl006_init(void);
 
     /* 读原始压力/温度计数 (24bit 补码符号扩展): 0=成功, 1=数据未就绪, 2=总线失败 */

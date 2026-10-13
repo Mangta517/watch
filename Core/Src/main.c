@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "dma.h"
 #include "spi.h"
 #include "tim.h"
@@ -110,7 +111,16 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+    GPIO_InitTypeDef power_gpio = {0};
 
+    /* SW2短按先提供电源；立即拉高PA3保持TPS_EN，松手后继续完成初始化。 */
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    HAL_GPIO_WritePin(POWER_EN_GPIO_Port, POWER_EN_Pin, GPIO_PIN_SET);
+    power_gpio.Pin = POWER_EN_Pin;
+    power_gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    power_gpio.Pull = GPIO_PULLDOWN;
+    power_gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(POWER_EN_GPIO_Port, &power_gpio);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -133,6 +143,7 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM3_Init();
   MX_USART1_UART_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   /* main 只做 CubeMX 初始化; 任务归口 app_task, 背光/屏幕/触摸由应用层接管 */
   App_Task_Create();   /* 创建全部 FreeRTOS 任务 (含 lvgl 测试任务) */

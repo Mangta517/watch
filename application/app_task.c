@@ -18,6 +18,7 @@
 #include "app_baro.h"
 #include "app_heart.h"
 #include "app_aht21.h"
+#include "app_battery.h"
 #include "lvgl.h"
 #include "my_i2c.h"
 #include "mpu6050.h"
@@ -50,29 +51,7 @@ static void app_sensor_task(void *pvParameters);
  **********************/
 void App_Task_Create(void)
 {
-    /* LSE/RTC初始化失败只影响时钟，UI显示错误，不以系统tick代替RTC走时。 */
-    (void)watch_rtc_init();
-    /* 调度器前完成蓝牙上电/AT配置；串口ISR只缓存数据，不调用RTOS。
-     * 未接模块/配置失败不阻塞其他功能，状态由kt6368a_get_init_status查询。 */
-    (void)kt6368a_init();
-
-    /* 传感器总线 (PB14=SCL, PB13=SDA) + MPU6050 一次性初始化。
-     * 此处尚未启动调度器, 只做忙等待时序, 不调用任何阻塞 RTOS API。
-     * 初始化失败(器件未接/总线异常)不阻塞开机: 后续读接口的返回值携带故障。 */
-    my_i2c_init(MY_I2C_BUS_SENSOR);
-    (void)my_mpu6050_init();
-    (void)spl006_init();         /* 与 MPU6050 共用 SENSOR 总线, 同样调度器前一次性初始化;
-                              * 内含 HAL_Delay(20/50) 复位等待, 失败不阻塞开机 */
-    (void)lsm303dlhc_mag_init(); /* 仅磁力计；后续服务读失败时禁用磁参考 */
-    (void)em7028_init(); /* 心率先配置为待机；sensor 任务调用 start 后才开启采样和照明 */
-    /* 零偏校准 my_mpu6050_zero_offset() 内含 vTaskDelay, 不放这里,
-     * 已移到 sensor 任务体首跑时执行 (上电默认静置台架)。 */
-
     if (xTaskCreate(app_lvgl_task, "lvgl", APP_LVGL_TASK_STK, NULL, APP_LVGL_TASK_PRIO, NULL) != pdPASS)
-    {
-        Error_Handler(); /* FreeRTOS 堆不足 */
-    }
-    if (xTaskCreate(app_sensor_task, "sensor", APP_SENSOR_TASK_STK, NULL, APP_SENSOR_TASK_PRIO, NULL) != pdPASS)
     {
         Error_Handler(); /* FreeRTOS 堆不足 */
     }
@@ -96,6 +75,17 @@ static void app_lvgl_task(void *pvParameters)
 
     /* 硬件拉起 + LVGL 注册 + 建测试界面, 在本任务上下文一次性完成 */
     App_Display_Init();
+    lv_refr_now(NULL); /* 先提交首帧；DMA完成中断继续工作，不等待其他模块。 */
+
+    /* RTC、蓝牙由LVGL任务串行初始化，完成后才进入UI收发循环。
+     * LSE/AT失败仍继续开机；初始化期间界面停留在首帧。 */
+    (void)watch_rtc_init();
+    (void)kt6368a_init();
+
+    if (xTaskCreate(app_sensor_task, "sensor", APP_SENSOR_TASK_STK, NULL, APP_SENSOR_TASK_PRIO, NULL) != pdPASS)
+    {
+        Error_Handler(); /* FreeRTOS 堆不足 */
+    }
 
     for (;;)
     {
@@ -114,10 +104,19 @@ static void app_sensor_task(void *pvParameters)
 
     (void)pvParameters;
 
+    /* SENSOR总线从初始化到采样均由本任务独占；失败仍进入原有故障处理。 */
+    my_i2c_init(MY_I2C_BUS_SENSOR);
+    (void)my_mpu6050_init();
+    (void)spl006_init();
+    (void)lsm303dlhc_mag_init();
+    (void)em7028_init(); /* 配置为待机，原有服务负责启动采样及照明。 */
+
     /* 数据锁须在任务上下文创建 (调度器已运行, 见 app_display 同款注释) */
     App_IMU_Init();
     App_Baro_Init();
     app_heart_init();
+    app_battery_init();
+    app_battery_service(); /* 首次电池读数在零偏校准等待前发布。 */
 
     /* 上电零偏校准(第一级): 正常约2s，等待稳定最多3s；内部vTaskDelay让出CPU，
      * 只推迟首帧快照, 不影响 lvgl 任务。返回 1=超时放弃(校准时被搬动),
@@ -134,6 +133,7 @@ static void app_sensor_task(void *pvParameters)
         App_IMU_Service();
         app_heart_service();
         app_aht21_service();
+        app_battery_service();
         if (++baro_cnt >= APP_SENSOR_BARO_DIV) /* 每25拍轮询一次气压 */
         {
             App_Baro_Service();

@@ -16,15 +16,15 @@ static app_clock_parser_struct parser;
 
 static void app_clock_finish(void)
 {
-    uint8_t i, part = 0, digits = 0, value[2] = {0};
-    uint8_t valid = !parser.overflow && parser.length >= 3 && parser.length <= 5;
+    uint8_t i, part = 0, digits = 0, value[3] = {0};
+    uint8_t valid = !parser.overflow && parser.length >= 3 && parser.length <= 8;
     if (parser.has_colon)
     {
         for (i = 0; valid && i < parser.length; ++i)
         {
-            if (parser.frame[i] == ':' && part == 0 && digits != 0)
+            if (parser.frame[i] == ':' && part < 2 && digits != 0)
             {
-                part = 1;
+                ++part;
                 digits = 0;
             }
             else if (parser.frame[i] >= '0' && parser.frame[i] <= '9' && digits < 2)
@@ -37,14 +37,14 @@ static void app_clock_finish(void)
                 valid = 0;
             }
         }
-        valid = valid && part == 1 && digits != 0 && value[0] <= 23 && value[1] <= 59;
+        valid = valid && part >= 1 && digits != 0 && value[0] <= 23 && value[1] <= 59 && value[2] <= 59;
         if (!valid)
         {
             parser.result = APP_CLOCK_INVALID;
         }
         else
         {
-            parser.result = watch_rtc_set_time(value[0], value[1]) == HAL_OK ? APP_CLOCK_SYNCED : APP_CLOCK_RTC_ERROR;
+            parser.result = watch_rtc_set_time(value[0], value[1], value[2]) == HAL_OK ? APP_CLOCK_SYNCED : APP_CLOCK_RTC_ERROR;
         }
     }
     parser.length = 0;
