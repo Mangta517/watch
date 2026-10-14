@@ -54,6 +54,9 @@ GPIO_PinState HAL_GPIO_ReadPin(void *port, uint16_t pin);
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size);
 HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *uart);
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size, uint32_t timeout);
+HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size);
+HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef *uart);
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *uart);
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *uart);
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart);
 #endif

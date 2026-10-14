@@ -268,8 +268,7 @@ void LCD_Init(void)
     LCD_CS_Clr(); /* 单从机, CS 常拉低 (同 OV_Watch) */
 
     /* SPI1_TX DMA 完成中断优先级: 从 CubeMX 的 0 提到 12 (≥configMAX_SYSCALL
-     * 等效优先级 11 之下)。本回调链不触 FreeRTOS API, 原值也能工作, 提级后
-     * 与临界区共处更稳 (刷屏完成事件不会打断内核临界段)。 */
+     * 等效优先级 11 之下)，允许完成回调使用任务通知唤醒LVGL。 */
     HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 12, 0);
 
     LCD_RES_Clr(); /* 硬复位 */

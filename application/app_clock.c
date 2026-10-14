@@ -44,7 +44,14 @@ static void app_clock_finish(void)
         }
         else
         {
-            parser.result = watch_rtc_set_time(value[0], value[1], value[2]) == HAL_OK ? APP_CLOCK_SYNCED : APP_CLOCK_RTC_ERROR;
+            if (watch_rtc_set_time(value[0], value[1], value[2]) == HAL_OK)
+            {
+                parser.result = APP_CLOCK_SYNCED;
+            }
+            else
+            {
+                parser.result = APP_CLOCK_RTC_ERROR;
+            }
         }
     }
     parser.length = 0;

@@ -5,7 +5,8 @@ TabWidth: 4
 UseTab: Never
 BreakBeforeBraces: Allman
 IndentCaseLabels: false
-ColumnLimit: 140
+# 行宽约140字符作为人工参考，保留短调用和现有换行。
+ColumnLimit: 0
 SortIncludes: Never
 IncludeBlocks: Preserve
 AllowShortFunctionsOnASingleLine: None

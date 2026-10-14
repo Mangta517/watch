@@ -36,6 +36,8 @@ static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] = {
     {TP_SCL_GPIO_Port, TP_SCL_Pin, TP_SDA_GPIO_Port, TP_SDA_Pin},
     {EEPROM_SCL_GPIO_Port, EEPROM_SCL_Pin, EEPROM_SDA_GPIO_Port, EEPROM_SDA_Pin},
 };
+/* 各总线由原owner串行操作；0未知、1输出、2输入，仅省略同方向的重复配置。 */
+static uint8_t s_sda_direction[MY_I2C_BUS_COUNT];
 
 /* ================================================================ 私有工具 */
 /**
@@ -43,7 +45,15 @@ static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] = {
  */
 static void my_i2c_delay(my_i2c_bus_t bus)
 {
-    volatile uint32_t n = bus == MY_I2C_BUS_SENSOR ? MY_I2C_SENSOR_DELAY_LOOPS : MY_I2C_DELAY_LOOPS;
+    volatile uint32_t n;
+    if (bus == MY_I2C_BUS_SENSOR)
+    {
+        n = MY_I2C_SENSOR_DELAY_LOOPS;
+    }
+    else
+    {
+        n = MY_I2C_DELAY_LOOPS;
+    }
     while (n--)
     {
         __NOP();
@@ -72,7 +82,14 @@ static inline void sda_lo(my_i2c_bus_t bus)
 
 static inline uint8_t sda_read(my_i2c_bus_t bus)
 {
-    return (HAL_GPIO_ReadPin(my_i2c_pin[bus].sda_port, my_i2c_pin[bus].sda_pin) == GPIO_PIN_SET) ? 1 : 0;
+    if (HAL_GPIO_ReadPin(my_i2c_pin[bus].sda_port, my_i2c_pin[bus].sda_pin) == GPIO_PIN_SET)
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 /**
@@ -86,9 +103,21 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
 {
     GPIO_InitTypeDef gpio = {0};
     uint32_t primask = __get_PRIMASK();
+    uint8_t direction = as_input + 1U;
+    if (s_sda_direction[bus] == direction)
+    {
+        return;
+    }
 
     gpio.Pin = my_i2c_pin[bus].sda_pin;
-    gpio.Mode = as_input ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT_PP;
+    if (as_input != 0)
+    {
+        gpio.Mode = GPIO_MODE_INPUT;
+    }
+    else
+    {
+        gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    }
     if (!as_input && bus != MY_I2C_BUS_TP)
     {
         gpio.Mode = GPIO_MODE_OUTPUT_OD;
@@ -98,6 +127,7 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
 
     __disable_irq();
     HAL_GPIO_Init(my_i2c_pin[bus].sda_port, &gpio);
+    s_sda_direction[bus] = direction;
     __set_PRIMASK(primask);
 }
 
@@ -141,6 +171,7 @@ void my_i2c_init(my_i2c_bus_t bus)
     __set_PRIMASK(primask);
 
     scl_hi(bus);
+    s_sda_direction[bus] = 0; /* 重新初始化时强制恢复SDA硬件配置。 */
     my_i2c_sda_dir(bus, 0); /* SDA 配为输出 */
     sda_hi(bus);            /* 释放总线, 空闲高 */
     my_i2c_delay(bus);
@@ -377,7 +408,14 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr, 
     for (i = 0; i < len; i++)
     {
         /* 最后一个字节回 NACK，其余回 ACK */
-        dat[i] = my_i2c_read_byte(bus, (i == len - 1) ? 1 : 0);
+        if (i == len - 1)
+        {
+            dat[i] = my_i2c_read_byte(bus, 1);
+        }
+        else
+        {
+            dat[i] = my_i2c_read_byte(bus, 0);
+        }
     }
 
     my_i2c_stop(bus);

@@ -116,8 +116,52 @@ extern "C"
     /* 初始化 MPU6050 (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR)) */
     uint8_t my_mpu6050_init(void);
 
-    /* 零偏校准：要求静止水平，正常约2s；等待稳定最多3s，内部vTaskDelay。
- * 不在上电初始化时自动执行；返回 0=校准完成, 1=超时放弃(保留原偏移)       */
+    typedef enum
+    {
+        MPU6050_CAL_IDLE,
+        MPU6050_CAL_WAIT_STILL,
+        MPU6050_CAL_AVERAGING,
+        MPU6050_CAL_DONE,
+        MPU6050_CAL_FAILED,
+        MPU6050_CAL_RESTORED
+    } mpu6050_cal_state;
+
+    typedef struct
+    {
+        int16_t accel[3]; /* 原始LSB的零偏，Z轴不包含重力1g。 */
+        int16_t gyro[3];
+    } mpu6050_offset_struct;
+
+    /* 仅sensor任务使用；恢复后不启动静止校准，原读取路径继续减去这些偏移。 */
+    void my_mpu6050_get_offset(mpu6050_offset_struct *offset);
+    void my_mpu6050_restore_offset(const mpu6050_offset_struct *offset);
+
+    /* sensor任务用正常读取的同一帧逐步校准，不额外读I2C或等待。
+     * 保留连续100帧静止判断和100帧平均；等待静止3s、平均阶段2s真实时间超时。 */
+    void my_mpu6050_zero_offset_begin(uint32_t now_ms);
+    mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t valid, uint32_t now_ms);
+    mpu6050_cal_state my_mpu6050_zero_offset_state(void);
+    void my_mpu6050_zero_offset_progress(uint16_t *stable, uint16_t *average);
+    enum
+    {
+        MPU_CAL_DIAG_AX, MPU_CAL_DIAG_AY, MPU_CAL_DIAG_AZ,
+        MPU_CAL_DIAG_DX, MPU_CAL_DIAG_DY, MPU_CAL_DIAG_DZ,
+        MPU_CAL_DIAG_LEVEL_LIMIT, MPU_CAL_DIAG_STILL_LIMIT,
+        MPU_CAL_DIAG_REJECT, MPU_CAL_DIAG_REJECT_SEEN,
+        MPU_CAL_DIAG_ACCEPTED, MPU_CAL_DIAG_REJECTED,
+        MPU_CAL_DIAG_STABLE_PEAK, MPU_CAL_DIAG_INTERVAL_MS,
+        MPU_CAL_DIAG_CHECKED, MPU_CAL_DIAG_STATE,
+        MPU_CAL_DIAG_FIELD_COUNT
+    };
+    enum
+    {
+        MPU_CAL_REJECT_DX = 1U, MPU_CAL_REJECT_DY = 2U, MPU_CAL_REJECT_DZ = 4U,
+        MPU_CAL_REJECT_AX = 8U, MPU_CAL_REJECT_AY = 16U, MPU_CAL_REJECT_AZ = 32U,
+        MPU_CAL_REJECT_READ = 64U, MPU_CAL_REJECT_WAIT_TIMEOUT = 128U, MPU_CAL_REJECT_AVERAGE_TIMEOUT = 256U
+    };
+    /* 仅sensor任务读取；固定16字段用于诊断type=6，不增加采样或改变校准判定。 */
+    const uint32_t *my_mpu6050_zero_offset_diag(void);
+    /* 兼容旧调用方的阻塞入口，返回0成功/1失败；手表启动不用此接口。 */
     uint8_t my_mpu6050_zero_offset(void);
 
     /* 静止时增量微调陀螺仪零偏：把当前角速度读数当作残余零偏累加进 offset，

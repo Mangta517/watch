@@ -9,8 +9,23 @@
 #include "spl006.h"
 
 #include "my_i2c.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 #define SPL006_I2C_BUS MY_I2C_BUS_SENSOR
+
+static void spl006_delay_ms(uint32_t ms)
+{
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+    {
+        /* 多等一拍，避免tick边界缩短硬件最小等待；等待期间让出CPU。 */
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+    }
+    else
+    {
+        HAL_Delay(ms);
+    }
+}
 
 /* ---------------------------------------------------------- 出厂校准系数 */
 static int32_t spl006_c00;
@@ -66,12 +81,12 @@ uint8_t spl006_init(void)
     {
         return 1;
     }
-    HAL_Delay(20);
+    spl006_delay_ms(20);
     if ((spl006_read_reg(SPL06_MEAS_CFG, &status) != 0) || ((status & SPL06_SENSOR_RDY) == 0))
     {
         return 1;
     }
-    HAL_Delay(50);
+    spl006_delay_ms(50);
     if ((spl006_read_reg(SPL06_MEAS_CFG, &status) != 0) || ((status & SPL06_COEF_RDY) == 0))
     {
         return 1;
@@ -209,6 +224,46 @@ uint8_t spl006_read_temperature(int32_t *temperature_raw)
     {
         *temperature_raw |= (int32_t)0xFF000000;
     }
+    return 0;
+}
+
+uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw)
+{
+    uint8_t status, data[6];
+    uint16_t result = 0;
+    int32_t pressure, temperature;
+    if (spl006_read_reg(SPL06_MEAS_CFG, &status) != 0)
+    {
+        return 0x0202U;
+    }
+    if ((status & SPL06_PRS_RDY) == 0)
+    {
+        result |= 1U;
+    }
+    if ((status & SPL06_TMP_RDY) == 0)
+    {
+        result |= 0x0100U;
+    }
+    if (result != 0)
+    {
+        return result; /* 等整对数据就绪，不提前消耗单个就绪标志。 */
+    }
+    if (spl006_bus_read(SPL06_PRS_B2, data, sizeof(data)) != 0)
+    {
+        return 0x0202U;
+    }
+    pressure = ((int32_t)data[0] << 16) | ((int32_t)data[1] << 8) | data[2];
+    temperature = ((int32_t)data[3] << 16) | ((int32_t)data[4] << 8) | data[5];
+    if ((pressure & 0x800000) != 0)
+    {
+        pressure |= (int32_t)0xFF000000;
+    }
+    if ((temperature & 0x800000) != 0)
+    {
+        temperature |= (int32_t)0xFF000000;
+    }
+    *pressure_raw = pressure;
+    *temperature_raw = temperature;
     return 0;
 }
 

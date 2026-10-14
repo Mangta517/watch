@@ -11,6 +11,18 @@
 
 #define BL24C02_READY_TIMEOUT_MS 10U
 
+static bl24c02_error s_error;
+static uint16_t s_address;
+
+bl24c02_error bl24c02_get_error(uint16_t *address)
+{
+    if (address != NULL)
+    {
+        *address = s_address;
+    }
+    return s_error;
+}
+
 static uint8_t bl24c02_wait_ready(void)
 {
     TickType_t start = xTaskGetTickCount();
@@ -32,8 +44,11 @@ void bl24c02_init(void)
 
 uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
 {
+    s_error = BL24C02_ERROR_NONE;
+    s_address = address;
     if (address > BL24C02_CAPACITY_BYTES || length > BL24C02_CAPACITY_BYTES - address || (data == NULL && length != 0))
     {
+        s_error = BL24C02_ERROR_ARGUMENT;
         return 1;
     }
     if (length == 0)
@@ -42,20 +57,30 @@ uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
     }
     if (bl24c02_wait_ready() != 0)
     {
+        s_error = BL24C02_ERROR_READY_TIMEOUT;
         return 1;
     }
-    return my_i2c_read_bytes(MY_I2C_BUS_EEPROM, BL24C02_ADDR, (uint8_t)address, data, length);
+    if (my_i2c_read_bytes(MY_I2C_BUS_EEPROM, BL24C02_ADDR, (uint8_t)address, data, length) != 0)
+    {
+        s_error = BL24C02_ERROR_READ_NACK;
+        return 1;
+    }
+    return 0;
 }
 
 uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length)
 {
     uint16_t chunk;
+    s_error = BL24C02_ERROR_NONE;
+    s_address = address;
     if (address > BL24C02_CAPACITY_BYTES || length > BL24C02_CAPACITY_BYTES - address || (data == NULL && length != 0))
     {
+        s_error = BL24C02_ERROR_ARGUMENT;
         return 1;
     }
     if (length != 0 && bl24c02_wait_ready() != 0)
     {
+        s_error = BL24C02_ERROR_READY_TIMEOUT;
         return 1;
     }
     while (length != 0)
@@ -68,15 +93,21 @@ uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length)
         }
         if (my_i2c_write_bytes(MY_I2C_BUS_EEPROM, BL24C02_ADDR, (uint8_t)address, data, chunk) != 0)
         {
+            s_error = BL24C02_ERROR_WRITE_NACK;
             return 1;
         }
         if (bl24c02_wait_ready() != 0)
         {
+            s_error = BL24C02_ERROR_READY_TIMEOUT;
             return 1;
         }
         address += chunk;
         data += chunk;
         length -= chunk;
+        if (length != 0)
+        {
+            s_address = address;
+        }
     }
     return 0;
 }

@@ -5,14 +5,18 @@
 #include <string.h>
 
 UART_HandleTypeDef huart1 = {USART1, {115200}};
-static uint32_t tick, mask;
+static uint32_t tick, mask, delay_calls;
 static uint8_t *rx_target;
 static int rx_armed, powered, connected, boots, writes, silent, reject_setting;
 static int fail_tx, fail_rx;
+static uint8_t *tx_target;
+static uint16_t tx_size;
+static uint32_t tx_aborts;
+static HAL_StatusTypeDef async_start_result = HAL_OK;
 static uint32_t uart_gpio_mode;
 static char saved_name[31] = "F411-Watch-SPP", current_name[31];
 static char saved_ble_name[31] = "KT6368A-BLE", current_ble_name[31];
-static char saved_ble[3] = "00", saved_spp[3] = "01";
+static char saved_ble[3] = "00", saved_spp[3] = "00";
 static char current_ble[3], current_spp[3];
 static char pending[256];
 static size_t pending_pos, pending_size;
@@ -50,6 +54,7 @@ uint32_t HAL_GetTick(void)
 }
 void HAL_Delay(uint32_t ms)
 {
+    ++delay_calls;
     while (ms--)
     {
         advance();
@@ -121,6 +126,80 @@ HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *uart)
     rx_armed = 0;
     return HAL_OK;
 }
+HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size)
+{
+    assert(uart == &huart1 && powered && tx_target == NULL);
+    if (async_start_result != HAL_OK)
+    {
+        return async_start_result;
+    }
+    tx_target = data;
+    tx_size = size;
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef *uart)
+{
+    assert(uart == &huart1);
+    tx_target = NULL;
+    ++tx_aborts;
+    return HAL_OK;
+}
+
+static void async_tx_tests(void)
+{
+    uint8_t frame[] = "WDG1 test";
+    HAL_StatusTypeDef result;
+    uint32_t before = tick;
+    uint32_t aborts = tx_aborts;
+    assert(kt6368a_write_async(NULL, 1, 10) == HAL_ERROR);
+    assert(kt6368a_write_async(frame, 0, 10) == HAL_ERROR);
+    assert(kt6368a_write_async(frame, 513, 10) == HAL_ERROR);
+    assert(kt6368a_write_async(frame, sizeof(frame), 0) == HAL_ERROR);
+    assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_OK);
+    assert(tick - before < 5 && tx_target == frame && tx_size == sizeof(frame));
+    assert(kt6368a_tx_is_busy() && !kt6368a_take_tx_result(&result));
+    assert(kt6368a_write(frame, sizeof(frame), 10) == HAL_BUSY);
+    assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_BUSY);
+    inject(0xA5); /* TX期间原RX仍持续入队。 */
+    HAL_UART_ErrorCallback(&huart1);
+    assert(kt6368a_tx_is_busy() && rx_armed);
+    tx_target = NULL;
+    HAL_UART_TxCpltCallback(&huart1);
+    assert(kt6368a_tx_is_busy()); /* 完成结果归原发起者，不允许新异步写入抢占。 */
+    assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_BUSY);
+    assert(kt6368a_take_tx_result(&result) && result == HAL_OK);
+    assert(!kt6368a_tx_is_busy());
+    assert(!kt6368a_take_tx_result(&result));
+    for (unsigned i = HAL_BUSY; i <= HAL_TIMEOUT; ++i)
+    {
+        async_start_result = (HAL_StatusTypeDef)i;
+        assert(kt6368a_write_async(frame, sizeof(frame), 10) == (HAL_StatusTypeDef)i);
+        assert(!kt6368a_tx_is_busy() && !kt6368a_take_tx_result(&result));
+    }
+    async_start_result = HAL_ERROR;
+    assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_ERROR);
+    async_start_result = HAL_OK;
+    tick = UINT32_MAX - 5U;
+    assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_OK);
+    for (unsigned i = 0; i < 10; ++i)
+    {
+        advance();
+    }
+    assert(kt6368a_take_tx_result(&result) && result == HAL_TIMEOUT);
+    assert(tx_target == NULL && tx_aborts == aborts + 1U && rx_armed && mask == 0);
+    HAL_UART_TxCpltCallback(&huart1);
+    assert(!kt6368a_take_tx_result(&result));
+    assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_OK);
+    kt6368a_power_off();
+    assert(tx_target == NULL && !rx_armed && tx_aborts == aborts + 2U);
+    assert(kt6368a_take_tx_result(&result) && result == HAL_ERROR);
+    assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_BUSY);
+    assert(kt6368a_power_on() == HAL_OK);
+    kt6368a_flush_rx();
+    puts("PASS: async TX returns promptly, preserves RX, serializes writers, completes once, aborts on timeout/wrap and power off.");
+}
+
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size, uint32_t timeout)
 {
     char command[64], response[64];
@@ -194,6 +273,63 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data, uin
     return HAL_OK;
 }
 
+static HAL_StatusTypeDef run_staged_startup(void)
+{
+    uint32_t delays = delay_calls;
+    HAL_StatusTypeDef status = HAL_BUSY;
+    kt6368a_init_begin();
+    assert(kt6368a_init_is_pending() && kt6368a_get_init_status() == HAL_BUSY);
+    assert(kt6368a_write((const uint8_t *)"WDG1", 4, 10) == HAL_BUSY);
+    for (unsigned i = 0; i < 1200 && kt6368a_init_is_pending(); ++i)
+    {
+        uint32_t before = tick;
+        status = kt6368a_init_service();
+        assert((uint32_t)(tick - before) < 10U);
+        for (unsigned j = 0; j < 5; ++j)
+        {
+            advance();
+        }
+    }
+    assert(!kt6368a_init_is_pending() && delay_calls == delays);
+    assert(status == kt6368a_get_init_status());
+    return status;
+}
+static void staged_startup_tests(void)
+{
+    int old_writes, old_boots;
+    silent = fail_tx = fail_rx = reject_setting = connected = 0;
+    custom_reply = NULL;
+    strcpy(saved_ble_name, "KT6368A-BLE");
+    strcpy(saved_ble, "00");
+    strcpy(saved_spp, "00");
+    old_writes = writes;
+    old_boots = boots;
+    tick = UINT32_MAX - 500U;
+    assert(run_staged_startup() == HAL_OK);
+    assert(writes == old_writes + 3 && boots == old_boots + 2);
+    assert(strcmp(current_ble_name, KT6368A_BLE_NAME) == 0);
+    assert(strcmp(current_spp, "01") == 0 && strcmp(current_ble, "01") == 0);
+    old_writes = writes;
+    old_boots = boots;
+    assert(run_staged_startup() == HAL_OK);
+    assert(writes == old_writes && boots == old_boots + 1);
+    silent = 1;
+    assert(run_staged_startup() == HAL_TIMEOUT);
+    silent = 0;
+    fail_tx = 1;
+    assert(run_staged_startup() == HAL_ERROR);
+    fail_tx = 0;
+    fail_rx = 1;
+    assert(run_staged_startup() == HAL_ERROR);
+    fail_rx = 0;
+    reject_setting = 1;
+    strcpy(saved_spp, "00");
+    assert(run_staged_startup() == HAL_ERROR);
+    reject_setting = 0;
+    assert(run_staged_startup() == HAL_OK);
+    puts("PASS: staged Bluetooth boot/config/reboot, pending TX gate, wrap, no HAL_Delay, failures and recovery");
+}
+
 int main(void)
 {
     uint8_t buffer[1024];
@@ -202,26 +338,26 @@ int main(void)
     uint32_t errors;
 
     assert(kt6368a_get_init_status() == HAL_ERROR);
-    /* 从旧SPP开启配置迁移到仅BLE，重新上电后生效，SPP名称保持不变。 */
+    /* 从仅BLE配置迁移到BLE和SPP都开启，重新上电后生效，SPP名称保持不变。 */
     assert(kt6368a_init() == HAL_OK);
     assert(kt6368a_get_init_status() == HAL_OK);
     assert(strcmp(current_ble_name, KT6368A_BLE_NAME) == 0);
     assert(strcmp(current_name, "F411-Watch-SPP") == 0);
-    assert(strcmp(current_spp, "00") == 0 && strcmp(current_ble, "01") == 0);
+    assert(strcmp(current_spp, "01") == 0 && strcmp(current_ble, "01") == 0);
     assert(boots == 2 && writes == 3 && !kt6368a_is_connected());
     before = writes;
     assert(kt6368a_init() == HAL_OK);
     assert(writes == before); /* 已保存的配置不重复写Flash */
 
-    /* 模块拒绝关闭SPP时必须报告失败，后续正常设置可恢复。 */
-    strcpy(saved_spp, "01");
-    strcpy(current_spp, "01");
+    /* 模块拒绝开启SPP时必须报告失败，后续正常设置可恢复。 */
+    strcpy(saved_spp, "00");
+    strcpy(current_spp, "00");
     reject_setting = 1;
     assert(kt6368a_configure(KT6368A_BLE_NAME) == HAL_ERROR);
-    assert(strcmp(current_spp, "01") == 0);
+    assert(strcmp(current_spp, "00") == 0);
     reject_setting = 0;
     assert(kt6368a_configure(KT6368A_BLE_NAME) == HAL_OK);
-    assert(strcmp(current_spp, "00") == 0 && strcmp(current_ble, "01") == 0);
+    assert(strcmp(current_spp, "01") == 0 && strcmp(current_ble, "01") == 0);
 
     /* 实际ISR接收路径：字节顺序、环形回绕、满缓冲丢弃计数。 */
     for (i = 0; i < 900; ++i)
@@ -267,6 +403,7 @@ int main(void)
     connected = 0;
     /* 无状态脚时不按连接状态拦截，UART 成功不保证手机收到。 */
     assert(kt6368a_write(buffer, 1, 100) == HAL_OK);
+    async_tx_tests();
     assert(kt6368a_at_command("AT+TM", "TM+", response, sizeof(response), 100) == HAL_ERROR);
     assert(kt6368a_configure("bad\r\nname") == HAL_ERROR);
 
@@ -310,5 +447,6 @@ int main(void)
     assert(kt6368a_init() == HAL_TIMEOUT);
     assert(kt6368a_get_init_status() == HAL_TIMEOUT);
     puts("KT6368A: config persistence, RX wrap/overflow, UART error recovery, AT framing/timeouts, power gating and absence of status GPIO checks passed.");
+    staged_startup_tests();
     return 0;
 }

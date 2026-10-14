@@ -41,7 +41,14 @@ static uint32_t mag_store_crc(const uint8_t *data, uint16_t length)
         crc ^= data[i];
         for (bit = 0; bit < 8; ++bit)
         {
-            crc = (crc >> 1) ^ ((crc & 1U) ? 0xEDB88320U : 0U);
+            if (crc & 1U)
+            {
+                crc = (crc >> 1) ^ 0xEDB88320U;
+            }
+            else
+            {
+                crc = (crc >> 1) ^ 0U;
+            }
         }
     }
     return crc ^ 0xFFFFFFFFU;
@@ -139,7 +146,14 @@ app_mag_store_result app_mag_store_load(app_mag_calibration_struct *calibration)
     }
     if (!valid[0] && !valid[1])
     {
-        return read_error ? APP_MAG_STORE_ERROR : APP_MAG_STORE_EMPTY;
+        if (read_error)
+        {
+            return APP_MAG_STORE_ERROR;
+        }
+        else
+        {
+            return APP_MAG_STORE_EMPTY;
+        }
     }
     (void)mag_store_decode(record[mag_store_latest(record[0], record[1], valid)], calibration);
     return APP_MAG_STORE_OK;

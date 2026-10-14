@@ -4,10 +4,25 @@
  */
 #include "aht21.h"
 #include "my_i2c.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include <stddef.h>
 
 #define AHT21_STATUS_BUSY       0x80U
 #define AHT21_STATUS_CALIBRATED 0x08U
+
+static void aht21_delay_ms(uint32_t ms)
+{
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+    {
+        /* 多等一拍，避免tick边界缩短硬件最小等待；等待期间让出CPU。 */
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+    }
+    else
+    {
+        HAL_Delay(ms);
+    }
+}
 
 /* 0x71 是读地址字节，不是寄存器号；不能使用先写寄存器的 read_bytes。 */
 static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
@@ -22,7 +37,14 @@ static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
     }
     for (i = 0; i < size; ++i)
     {
-        data[i] = my_i2c_read_byte(MY_I2C_BUS_SENSOR, i == size - 1U ? 1U : 0U);
+        if (i == size - 1U)
+        {
+            data[i] = my_i2c_read_byte(MY_I2C_BUS_SENSOR, 1U);
+        }
+        else
+        {
+            data[i] = my_i2c_read_byte(MY_I2C_BUS_SENSOR, 0U);
+        }
     }
     my_i2c_stop(MY_I2C_BUS_SENSOR);
     return AHT21_OK;
@@ -54,7 +76,7 @@ aht21_result aht21_init(void)
 {
     static const uint8_t config[2] = {0x08U, 0x00U};
     uint8_t status;
-    HAL_Delay(40U);
+    aht21_delay_ms(40U);
     if (aht21_read_bytes(&status, 1) != AHT21_OK)
     {
         return AHT21_I2C_ERROR;
@@ -69,7 +91,7 @@ aht21_result aht21_init(void)
         {
             return AHT21_I2C_ERROR;
         }
-        HAL_Delay(10U);
+        aht21_delay_ms(10U);
         if (aht21_read_bytes(&status, 1) != AHT21_OK)
         {
             return AHT21_I2C_ERROR;

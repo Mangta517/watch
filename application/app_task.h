@@ -6,7 +6,7 @@
   *          vTaskStartScheduler, 任务创建统一在 app_task.c 内安排。
   *
   *          当前任务清单:
-  *            lvgl     prio 3, 4KB 栈 — 首帧显示后初始化RTC/蓝牙，再创建sensor任务并服务UI
+  *            lvgl     prio 3, 4KB 栈 — 首帧提交后创建sensor，UI循环分步推进RTC/蓝牙启动
   *            sensor   prio 2, 2KB 栈 — SENSOR 总线 (MPU6050+SPL006+LSM303DLHC) owner:
   *                       IMU10ms、磁力计10ms轮询(器件75Hz)、气压250ms(器件1Hz); 数据经
   *                       App_IMU_GetSnapshot() / App_Baro_GetSnapshot() 供 UI 消费
@@ -22,7 +22,7 @@ extern "C"
 #endif
 
     /**
- * @brief 创建显示任务 (调度器启动前调用一次；首帧显示及RTC/蓝牙初始化后创建sensor任务)
+ * @brief 创建显示任务 (调度器启动前调用一次；首帧提交后创建sensor，RTC/蓝牙等待不阻塞采集)
  */
     void App_Task_Create(void);
 

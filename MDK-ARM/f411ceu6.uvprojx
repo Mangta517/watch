@@ -1045,6 +1045,11 @@
               <FilePath>..\application\app_clock.h</FilePath>
             </File>
             <File>
+              <FileName>app_diag.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_diag.c</FilePath>
+            </File>
+            <File>
               <FileName>app_task.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\application\app_task.c</FilePath>
@@ -1088,6 +1093,11 @@
               <FileName>app_imu.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\application\app_imu.h</FilePath>
+            </File>
+            <File>
+              <FileName>app_imu_store.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_imu_store.c</FilePath>
             </File>
             <File>
               <FileName>app_mag_store.c</FileName>

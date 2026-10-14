@@ -52,6 +52,7 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
     uint8_t status, buf[6];
     lsm303dlhc_mag_struct sample;
     uint8_t i;
+    float sensitivity;
 
     if (!s_ready || mag == NULL || mag_read(MAG_STATUS, &status, 1) != 0)
     {
@@ -83,7 +84,15 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
         {
             return LSM303DLHC_MAG_ERROR;
         }
-        sample.field_uT[i] = sample.raw[i] * 100.0f / (i == 2 ? 980.0f : 1100.0f);
+        if (i == 2)
+        {
+            sensitivity = 980.0f;
+        }
+        else
+        {
+            sensitivity = 1100.0f;
+        }
+        sample.field_uT[i] = sample.raw[i] * 100.0f / sensitivity;
     }
     /* 只有整帧读取和转换成功才发布，失败时保留调用方的上一帧。 */
     *mag = sample;

@@ -7,5 +7,6 @@ uint32_t __get_PRIMASK(void);
 void __disable_irq(void);
 void __set_PRIMASK(uint32_t mask);
 void HAL_Delay(uint32_t ms);
+uint32_t HAL_GetTick(void);
 void Error_Handler(void);
 #endif

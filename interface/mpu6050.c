@@ -12,11 +12,25 @@
 #include "my_i2c.h"
 
 #include "FreeRTOS.h"
-#include "task.h"   /* vTaskDelay: 校准循环中的任务级延时 */
+#include "task.h"   /* 初始化重试与校准循环中的任务级延时 */
 #include <stdlib.h> /* abs */
+#include <string.h>
 
 /* MPU6050 挂在软件 I2C 的传感器总线上 */
 #define MPU6050_I2C_BUS MY_I2C_BUS_SENSOR
+
+static void mpu6050_delay_ms(uint32_t ms)
+{
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+    {
+        /* 多等一拍，避免tick边界缩短硬件最小等待；等待期间让出CPU。 */
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+    }
+    else
+    {
+        HAL_Delay(ms);
+    }
+}
 
 static volatile uint8_t mpu6050_int_flag;
 static volatile uint8_t mpu6050_int_status; /* sensor 任务读回的状态 */
@@ -83,7 +97,7 @@ uint8_t my_mpu6050_init(void)
      * NACK 直接返回, 器件将停留在默认 SLEEP 态 → 输出寄存器全 0、
      * INT 永远不触发, 表现为"陀螺仪没有数据"。
      * 以 WHO_AM_I 是否获得 ACK 为准 (不比较数值, 兼容 0x68/0x98/0x69 克隆片);
-     * HAL_Delay由SysTick计时，等待可被高优先级UI任务抢占。重试等待约1s。 */
+     * 调度器运行时重试等待让出CPU；重试次数和50ms等待保持不变，总等待约1s。 */
     retry = 0;
     for (;;)
     {
@@ -95,7 +109,7 @@ uint8_t my_mpu6050_init(void)
         {
             return 1; /* 1s 无应答: 未接/供电异常 */
         }
-        HAL_Delay(50);
+        mpu6050_delay_ms(50);
     }
 
     /* 重置 MPU6050：对电源管理寄存器 1 的 RESET 位置 1 */
@@ -145,109 +159,254 @@ uint8_t my_mpu6050_init(void)
      * 确保 INT 初始为低，之后每个数据就绪都产生干净的上升沿 */
     my_mpu6050_read_reg(MPU6050_INT_STATUS, &data);
 
-    /* 注意: 上电初始化不做零偏校准(校准阻塞且要求静止)，
-     * 改由应用任务在确认设备静止后调用 my_mpu6050_zero_offset() 触发 */
+    /* 注意: 上电初始化不做零偏校准；应用任务使用begin/step，
+     * 在正常采样中等待静止并累计校准帧。 */
     return 0;
 }
 
 /* ---------------------------------------------------------------- 零偏校准 */
-/**
- * @brief 静止水平状态下的零偏校准 (阻塞，须在任务上下文调用)
- *
- * 静止判定: 相邻帧加速度变化小于0.0183g，连续100帧；水平容差约±0.7°。
- * 门限按当前1g的LSB计算，量程变化不改变物理容差。
- * 等待稳定最多3s，之后按100Hz采集100帧平均约1s；失败保留原偏移。
- *
- * @return 0=校准完成, 1=超时放弃
- */
-uint8_t my_mpu6050_zero_offset(void)
+typedef struct
 {
-    Accel_struct current_accel = {0};
-    Accel_struct last_accel = {0};
-    uint8_t count = 0;
-    uint32_t attempts = 0;
-    const uint32_t CALIB_TIMEOUT = 3000U / MPU6050_SAMPLE_PERIOD_MS;
-    const int32_t still_lsb = (int32_t)(0.0183f * MPU6050_ACCEL_LSB_PER_G);
-    const int32_t level_lsb = (int32_t)(0.0122f * MPU6050_ACCEL_LSB_PER_G);
+    Accel_struct last_accel;
+    int32_t gravity_z_lsb; /* 首帧确定本次校准的正/负1g基准，采样期间不切换。 */
+    int32_t sum[6];
+    uint32_t phase_ms;
+    uint32_t last_sample_ms;
+    uint16_t stable_count;
+    uint16_t average_count;
+    uint8_t have_sample;
+    mpu6050_cal_state state;
+    uint32_t diag[MPU_CAL_DIAG_FIELD_COUNT];
+} mpu6050_cal_struct;
 
-    if (my_mpu6050_get_accel(&last_accel) != 0)
+static mpu6050_cal_struct s_cal;
+static const int32_t mpu_cal_still_lsb = (int32_t)(0.0183f * MPU6050_ACCEL_LSB_PER_G);
+/* 水平容差0.15g，给初始零偏及小幅安装误差留余量；静止变化门限保持原值。 */
+static const int32_t mpu_cal_level_lsb = (int32_t)(0.15f * MPU6050_ACCEL_LSB_PER_G);
+
+const uint32_t *my_mpu6050_zero_offset_diag(void)
+{
+    s_cal.diag[MPU_CAL_DIAG_LEVEL_LIMIT] = (uint32_t)mpu_cal_level_lsb;
+    s_cal.diag[MPU_CAL_DIAG_STILL_LIMIT] = (uint32_t)mpu_cal_still_lsb;
+    s_cal.diag[MPU_CAL_DIAG_STATE] = (uint32_t)s_cal.state;
+    return s_cal.diag;
+}
+
+void my_mpu6050_get_offset(mpu6050_offset_struct *offset)
+{
+    offset->accel[0] = offset_accel_x;
+    offset->accel[1] = offset_accel_y;
+    offset->accel[2] = offset_accel_z;
+    offset->gyro[0] = offset_gyro_x;
+    offset->gyro[1] = offset_gyro_y;
+    offset->gyro[2] = offset_gyro_z;
+}
+
+void my_mpu6050_restore_offset(const mpu6050_offset_struct *offset)
+{
+    offset_accel_x = offset->accel[0];
+    offset_accel_y = offset->accel[1];
+    offset_accel_z = offset->accel[2];
+    offset_gyro_x = offset->gyro[0];
+    offset_gyro_y = offset->gyro[1];
+    offset_gyro_z = offset->gyro[2];
+    memset(&s_cal, 0, sizeof(s_cal));
+    s_cal.state = MPU6050_CAL_RESTORED;
+}
+
+void my_mpu6050_zero_offset_begin(uint32_t now_ms)
+{
+    memset(&s_cal, 0, sizeof(s_cal));
+    s_cal.phase_ms = now_ms;
+    s_cal.state = MPU6050_CAL_WAIT_STILL;
+}
+
+static uint8_t mpu6050_cal_still(const Accel_struct *current)
+{
+    uint32_t reason = 0;
+    s_cal.diag[MPU_CAL_DIAG_AX] = (uint32_t)(int32_t)current->Accel_x;
+    s_cal.diag[MPU_CAL_DIAG_AY] = (uint32_t)(int32_t)current->Accel_y;
+    s_cal.diag[MPU_CAL_DIAG_AZ] = (uint32_t)(int32_t)current->Accel_z;
+    s_cal.diag[MPU_CAL_DIAG_DX] = (uint32_t)abs(current->Accel_x - s_cal.last_accel.Accel_x);
+    s_cal.diag[MPU_CAL_DIAG_DY] = (uint32_t)abs(current->Accel_y - s_cal.last_accel.Accel_y);
+    s_cal.diag[MPU_CAL_DIAG_DZ] = (uint32_t)abs(current->Accel_z - s_cal.last_accel.Accel_z);
+    if (s_cal.diag[MPU_CAL_DIAG_DX] >= (uint32_t)mpu_cal_still_lsb)
     {
-        return 1;
+        reason |= MPU_CAL_REJECT_DX;
     }
-    while (count < 100)
+    if (s_cal.diag[MPU_CAL_DIAG_DY] >= (uint32_t)mpu_cal_still_lsb)
     {
-        vTaskDelay(pdMS_TO_TICKS(MPU6050_SAMPLE_PERIOD_MS));
-        if (my_mpu6050_get_accel(&current_accel) != 0)
+        reason |= MPU_CAL_REJECT_DY;
+    }
+    if (s_cal.diag[MPU_CAL_DIAG_DZ] >= (uint32_t)mpu_cal_still_lsb)
+    {
+        reason |= MPU_CAL_REJECT_DZ;
+    }
+    if (abs(current->Accel_x) >= mpu_cal_level_lsb)
+    {
+        reason |= MPU_CAL_REJECT_AX;
+    }
+    if (abs(current->Accel_y) >= mpu_cal_level_lsb)
+    {
+        reason |= MPU_CAL_REJECT_AY;
+    }
+    if (abs(current->Accel_z - s_cal.gravity_z_lsb) >= mpu_cal_level_lsb)
+    {
+        reason |= MPU_CAL_REJECT_AZ;
+    }
+    s_cal.diag[MPU_CAL_DIAG_REJECT] = reason;
+    s_cal.diag[MPU_CAL_DIAG_REJECT_SEEN] |= reason;
+    ++s_cal.diag[MPU_CAL_DIAG_CHECKED];
+    if (reason == 0)
+    {
+        ++s_cal.diag[MPU_CAL_DIAG_ACCEPTED];
+    }
+    else
+    {
+        ++s_cal.diag[MPU_CAL_DIAG_REJECTED];
+    }
+    return reason == 0;
+}
+
+mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t valid, uint32_t now_ms)
+{
+    uint32_t timeout_ms;
+    uint8_t still;
+    if (s_cal.state != MPU6050_CAL_WAIT_STILL && s_cal.state != MPU6050_CAL_AVERAGING)
+    {
+        return s_cal.state;
+    }
+    timeout_ms = 3000U;
+    if (s_cal.state == MPU6050_CAL_AVERAGING)
+    {
+        timeout_ms = 2000U;
+    }
+    if (valid == 0 || raw == NULL || (uint32_t)(now_ms - s_cal.phase_ms) >= timeout_ms)
+    {
+        if (valid == 0 || raw == NULL)
         {
-            return 1;
+            s_cal.diag[MPU_CAL_DIAG_REJECT] = MPU_CAL_REJECT_READ;
         }
-        /* 如果误差判断的值过小，则无法进行零偏校准 */
-        if (abs(current_accel.Accel_x - last_accel.Accel_x) < still_lsb && abs(current_accel.Accel_y - last_accel.Accel_y) < still_lsb &&
-            abs(current_accel.Accel_z - last_accel.Accel_z) < still_lsb && abs(current_accel.Accel_x) < level_lsb &&
-            abs(current_accel.Accel_y) < level_lsb && abs(current_accel.Accel_z - MPU6050_ACCEL_LSB_PER_G) < level_lsb)
+        else if (s_cal.state == MPU6050_CAL_WAIT_STILL)
         {
-            count++;
+            s_cal.diag[MPU_CAL_DIAG_REJECT] = MPU_CAL_REJECT_WAIT_TIMEOUT;
         }
         else
         {
-            count = 0;
+            s_cal.diag[MPU_CAL_DIAG_REJECT] = MPU_CAL_REJECT_AVERAGE_TIMEOUT;
         }
-        last_accel = current_accel;
-        if (++attempts >= CALIB_TIMEOUT)
-        {
-            /* TODO: 旧工程此处 debug_printf("MPU6050校准失败: 请将设备放平保持静止...")，
-             *       当前工程串口调试模块未移植，失败状态由返回值携带 */
-            return 1; /* 放弃本次校准，偏移量保持原值 */
-        }
+        s_cal.diag[MPU_CAL_DIAG_REJECT_SEEN] |= s_cal.diag[MPU_CAL_DIAG_REJECT];
+        s_cal.state = MPU6050_CAL_FAILED;
+        return s_cal.state;
     }
-
+    if (s_cal.have_sample == 0)
     {
-        Accel_Gyro_struct accel_gyro_data = {0};
-        int32_t offset_sum_x = 0;
-        int32_t offset_sum_y = 0;
-        int32_t offset_sum_z = 0;
-        int32_t offset_sum_x_g = 0;
-        int32_t offset_sum_y_g = 0;
-        int32_t offset_sum_z_g = 0;
+        s_cal.gravity_z_lsb = MPU6050_ACCEL_LSB_PER_G;
+        if (raw->Accel.Accel_z < 0)
+        {
+            s_cal.gravity_z_lsb = -MPU6050_ACCEL_LSB_PER_G;
+        }
+        s_cal.diag[MPU_CAL_DIAG_AX] = (uint32_t)(int32_t)raw->Accel.Accel_x;
+        s_cal.diag[MPU_CAL_DIAG_AY] = (uint32_t)(int32_t)raw->Accel.Accel_y;
+        s_cal.diag[MPU_CAL_DIAG_AZ] = (uint32_t)(int32_t)raw->Accel.Accel_z;
+        s_cal.last_accel = raw->Accel;
+        s_cal.last_sample_ms = now_ms;
+        s_cal.have_sample = 1;
+        return s_cal.state;
+    }
+    if ((uint32_t)(now_ms - s_cal.last_sample_ms) < MPU6050_SAMPLE_PERIOD_MS)
+    {
+        return s_cal.state;
+    }
+    s_cal.diag[MPU_CAL_DIAG_INTERVAL_MS] = now_ms - s_cal.last_sample_ms;
+    s_cal.last_sample_ms = now_ms;
+    still = mpu6050_cal_still(&raw->Accel);
+    s_cal.last_accel = raw->Accel;
+    if (s_cal.state == MPU6050_CAL_WAIT_STILL)
+    {
+        if (still != 0)
+        {
+            ++s_cal.stable_count;
+            if (s_cal.stable_count > s_cal.diag[MPU_CAL_DIAG_STABLE_PEAK])
+            {
+                s_cal.diag[MPU_CAL_DIAG_STABLE_PEAK] = s_cal.stable_count;
+            }
+        }
+        else
+        {
+            s_cal.stable_count = 0;
+        }
+        if (s_cal.stable_count >= 100U)
+        {
+            s_cal.phase_ms = now_ms;
+            s_cal.state = MPU6050_CAL_AVERAGING;
+        }
+        return s_cal.state;
+    }
+    if (still == 0)
+    {
+        s_cal.state = MPU6050_CAL_FAILED;
+        return s_cal.state;
+    }
+    s_cal.sum[0] += raw->Accel.Accel_x;
+    s_cal.sum[1] += raw->Accel.Accel_y;
+    s_cal.sum[2] += raw->Accel.Accel_z - s_cal.gravity_z_lsb;
+    s_cal.sum[3] += raw->Gyro.Gyro_x;
+    s_cal.sum[4] += raw->Gyro.Gyro_y;
+    s_cal.sum[5] += raw->Gyro.Gyro_z;
+    if (++s_cal.average_count >= 100U)
+    {
+        /* 仍以旧偏移下的残差平均增量更新；只有整窗成功才一次提交。 */
+        offset_accel_x += (int16_t)(s_cal.sum[0] / 100);
+        offset_accel_y += (int16_t)(s_cal.sum[1] / 100);
+        offset_accel_z += (int16_t)(s_cal.sum[2] / 100);
+        offset_gyro_x += (int16_t)(s_cal.sum[3] / 100);
+        offset_gyro_y += (int16_t)(s_cal.sum[4] / 100);
+        offset_gyro_z += (int16_t)(s_cal.sum[5] / 100);
+        raw->Accel.Accel_x -= (int16_t)(s_cal.sum[0] / 100);
+        raw->Accel.Accel_y -= (int16_t)(s_cal.sum[1] / 100);
+        raw->Accel.Accel_z -= (int16_t)(s_cal.sum[2] / 100);
+        raw->Gyro.Gyro_x -= (int16_t)(s_cal.sum[3] / 100);
+        raw->Gyro.Gyro_y -= (int16_t)(s_cal.sum[4] / 100);
+        raw->Gyro.Gyro_z -= (int16_t)(s_cal.sum[5] / 100);
+        s_cal.state = MPU6050_CAL_DONE;
+    }
+    return s_cal.state;
+}
 
-        for (uint8_t i = 0; i < 100; i++)
+mpu6050_cal_state my_mpu6050_zero_offset_state(void)
+{
+    return s_cal.state;
+}
+
+void my_mpu6050_zero_offset_progress(uint16_t *stable, uint16_t *average)
+{
+    *stable = s_cal.stable_count;
+    *average = s_cal.average_count;
+}
+
+/* 兼容旧调用方；手表启动只使用 begin/step，不调用此阻塞接口。 */
+uint8_t my_mpu6050_zero_offset(void)
+{
+    Accel_Gyro_struct raw;
+    uint8_t valid;
+    mpu6050_cal_state state;
+    my_mpu6050_zero_offset_begin(HAL_GetTick());
+    do
+    {
+        valid = my_mpu6050_get_data(&raw) == 0;
+        state = my_mpu6050_zero_offset_step(&raw, valid, HAL_GetTick());
+        if (state == MPU6050_CAL_WAIT_STILL || state == MPU6050_CAL_AVERAGING)
         {
             vTaskDelay(pdMS_TO_TICKS(MPU6050_SAMPLE_PERIOD_MS));
-            /* 一帧同时取加速度和陀螺仪，避免100Hz输出下反复平均同一帧。 */
-            if (my_mpu6050_get_data(&accel_gyro_data) != 0)
-            {
-                return 1;
-            }
-            /* 平均阶段也保持静止水平；运动时放弃，不能把动作写成零偏。 */
-            current_accel = accel_gyro_data.Accel;
-            if (abs(current_accel.Accel_x - last_accel.Accel_x) >= still_lsb ||
-                abs(current_accel.Accel_y - last_accel.Accel_y) >= still_lsb ||
-                abs(current_accel.Accel_z - last_accel.Accel_z) >= still_lsb || abs(current_accel.Accel_x) >= level_lsb ||
-                abs(current_accel.Accel_y) >= level_lsb || abs(current_accel.Accel_z - MPU6050_ACCEL_LSB_PER_G) >= level_lsb)
-            {
-                return 1;
-            }
-            last_accel = current_accel;
-            offset_sum_x += accel_gyro_data.Accel.Accel_x;
-            offset_sum_y += accel_gyro_data.Accel.Accel_y;
-            /* Z轴保留1g，只有其残差计入零偏。 */
-            offset_sum_z += (accel_gyro_data.Accel.Accel_z - MPU6050_ACCEL_LSB_PER_G);
-            offset_sum_x_g += accel_gyro_data.Gyro.Gyro_x;
-            offset_sum_y_g += accel_gyro_data.Gyro.Gyro_y;
-            offset_sum_z_g += accel_gyro_data.Gyro.Gyro_z;
         }
-
-        /* get_data已减去旧零偏；平均值是残差，重校准时应累加而非覆盖。 */
-        offset_accel_x += (int16_t)(offset_sum_x / 100);
-        offset_accel_y += (int16_t)(offset_sum_y / 100);
-        offset_accel_z += (int16_t)(offset_sum_z / 100);
-
-        offset_gyro_x += (int16_t)(offset_sum_x_g / 100);
-        offset_gyro_y += (int16_t)(offset_sum_y_g / 100);
-        offset_gyro_z += (int16_t)(offset_sum_z_g / 100);
     }
-
-    return 0;
+    while (state == MPU6050_CAL_WAIT_STILL || state == MPU6050_CAL_AVERAGING);
+    if (state == MPU6050_CAL_DONE)
+    {
+        return 0;
+    }
+    return 1;
 }
 
 /**

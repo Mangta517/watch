@@ -8,6 +8,7 @@
   ******************************************************************************
 ***/
 #include "app_baro.h"
+#include "app_diag.h"
 
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -80,14 +81,25 @@ void App_Baro_Service(void)
     int32_t ppa = 0;
     float alt;
     uint8_t pr, tr;
+    uint16_t result;
+    uint32_t read_started = app_diag_clock_count();
 
-    pr = spl006_read_pressure(&praw);
-    tr = spl006_read_temperature(&traw);
+    result = spl006_read_sample(&praw, &traw);
+    pr = (uint8_t)result;
+    tr = (uint8_t)(result >> 8);
 
     if ((pr == 0) && (tr == 0) && (spl006_process_pressure(praw, traw, &ppa) == 0))
     {
+        app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_OK, 0, read_started);
         /* 气压→高度: 除法前先判 ppa>0, 防异常帧导致 powf 域错误 */
-        alt = (ppa > 0) ? APP_BARO_ALT_SCALE * (1.0f - powf((float)ppa / APP_BARO_SEA_LEVEL_PA, APP_BARO_ALT_POW)) : 0.0f;
+        if (ppa > 0)
+        {
+            alt = APP_BARO_ALT_SCALE * (1.0f - powf((float)ppa / APP_BARO_SEA_LEVEL_PA, APP_BARO_ALT_POW));
+        }
+        else
+        {
+            alt = 0.0f;
+        }
         s_err_streak = 0;
         baro_lock();
         s_baro_data.pressure_pa = ppa;
@@ -99,6 +111,7 @@ void App_Baro_Service(void)
     }
     else if ((pr == 2) || (tr == 2))
     {
+        app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_ERROR, pr | ((uint32_t)tr << 8), read_started);
         /* 仅总线失败计入离线; 返回1=数据未就绪 —— 1Hz背景模式对250ms轮询
          * 两次有效采样之间可能多次返回未就绪，快照与在线状态保持不变 */
         if (++s_err_streak >= APP_BARO_OFFLINE_STREAK)
@@ -110,6 +123,14 @@ void App_Baro_Service(void)
     }
     else
     {
+        if (pr == 1 || tr == 1)
+        {
+            app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_NOT_READY, pr | ((uint32_t)tr << 8), read_started);
+        }
+        else
+        {
+            app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_ERROR, 0x10000U, read_started);
+        }
         s_err_streak = 0;
     }
 }

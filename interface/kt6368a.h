@@ -23,15 +23,20 @@ extern "C"
 #define KT6368A_AT_TIMEOUT_MS  500U
 
     /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。
- * 首帧显示后由LVGL任务调用，完成后再进入UI收发循环：上电、启动接收、配置BLE名称/BLE开/SPP关并查询验证。
+ * 兼容旧调用方的阻塞入口；手表启动使用下方begin/service。上电、启动接收、配置BLE名称/BLE开/SPP开并查询验证。
  * 参数已匹配时不写配置；修改后重新上电。失败不阻止其他手表功能启动。
  * 本型号不配置CL/UT低功耗功能。返回HAL_OK/ERROR/TIMEOUT/BUSY。 */
     HAL_StatusTypeDef kt6368a_init(void);
+    /* LVGL循环分步启动：20ms放电/1200ms上电/AT查询/参数保存均不长时间等待。
+     * pending期间由本状态机独占UART RX，业务write返回BUSY。 */
+    void kt6368a_init_begin(void);
+    HAL_StatusTypeDef kt6368a_init_service(void);
+    uint8_t kt6368a_init_is_pending(void);
     HAL_StatusTypeDef kt6368a_get_init_status(void);
 
     /* 电源切换/配置/收发接口须由同一个调用上下文串行使用，禁止在ISR调用。
  * power_on含HAL_Delay；power_off先将UART引脚置下拉输入，避免断电反向供电。
- * 上电不改参数；configure开启BLE、关闭SPP并设置BLE名称，仅在手机未连接时调用；本板无法读取连接状态。
+ * 上电不改参数；configure开启BLE和SPP并设置BLE名称，仅在手机未连接时调用；本板无法读取连接状态。
  * name为1~30字节且不含CR/LF。 */
     HAL_StatusTypeDef kt6368a_power_on(void);
     void kt6368a_power_off(void);
@@ -44,6 +49,12 @@ extern "C"
  * 单次最多512字节；大数据需应用层安排发送节奏，不能无限连续灌满模块缓存。
  * read为非阻塞字节流，业务消息的分包/拼包由应用层处理。 */
     HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t timeout_ms);
+    /* 异步入口不复制数据；调用方保持缓冲不变直到take_tx_result取得完成/失败结果。
+     * HAL_OK只表示启动成功；同一上下文轮询结果，超时中止TX且不影响RX。 */
+    HAL_StatusTypeDef kt6368a_write_async(const uint8_t *data, uint16_t size, uint32_t timeout_ms);
+    /* 发送中或结果待原发起者收取时为1。 */
+    uint8_t kt6368a_tx_is_busy(void);
+    uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result);
     uint16_t kt6368a_read(uint8_t *data, uint16_t size);
     void kt6368a_flush_rx(void);
     uint32_t kt6368a_get_rx_dropped(void);

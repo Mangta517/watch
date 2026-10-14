@@ -6,6 +6,44 @@
 
 static RTC_HandleTypeDef watch_rtc;
 static uint8_t rtc_ready;
+static uint32_t rtc_start_ms;
+static uint8_t rtc_start_pending;
+static HAL_StatusTypeDef rtc_start_status = HAL_ERROR;
+
+void watch_rtc_init_begin(void)
+{
+    rtc_ready = 0;
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWR_EnableBkUpAccess();
+    __HAL_RCC_LSE_CONFIG(RCC_LSE_ON);
+    rtc_start_ms = HAL_GetTick();
+    rtc_start_pending = 1;
+    rtc_start_status = HAL_BUSY;
+}
+
+HAL_StatusTypeDef watch_rtc_init_service(void)
+{
+    if (rtc_start_pending == 0)
+    {
+        return rtc_start_status;
+    }
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) != 0)
+    {
+        rtc_start_status = watch_rtc_init();
+        rtc_start_pending = 0;
+    }
+    else if ((uint32_t)(HAL_GetTick() - rtc_start_ms) >= LSE_STARTUP_TIMEOUT)
+    {
+        rtc_start_status = HAL_TIMEOUT;
+        rtc_start_pending = 0;
+    }
+    return rtc_start_status;
+}
+
+uint8_t watch_rtc_init_is_pending(void)
+{
+    return rtc_start_pending;
+}
 
 HAL_StatusTypeDef watch_rtc_init(void)
 {

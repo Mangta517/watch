@@ -98,6 +98,8 @@ extern "C"
     /* 读原始压力/温度计数 (24bit 补码符号扩展): 0=成功, 1=数据未就绪, 2=总线失败 */
     uint8_t spl006_read_pressure(int32_t *pressure_raw);
     uint8_t spl006_read_temperature(int32_t *temperature_raw);
+    /* 一次状态读+六字节连续读；压力/温度结果分别放低/高8位，沿用0/1/2语义。 */
+    uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw);
 
     /* 用出厂系数把原始计数补偿为气压 (Pa)。0=成功, 1=spl006_init 未完成(系数无效)
  * 公式: P = c00 + psc*(c10 + psc*(c20 + psc*c30)) + tsc*c01 + tsc*psc*(c11 + psc*c21)

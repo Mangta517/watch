@@ -8,6 +8,8 @@
   ******************************************************************************
 ***/
 #include "app_task.h"
+#include "app_diag.h"
+#include "app_imu_store.h"
 
 #include "main.h" /* Error_Handler() 声明 */
 #include "FreeRTOS.h"
@@ -71,25 +73,53 @@ void App_Task_Start(void)
 /* LVGL 测试任务: 屏幕+触摸测试 UI 全部跑在本任务栈上 */
 static void app_lvgl_task(void *pvParameters)
 {
+    HAL_StatusTypeDef status;
+    uint8_t rtc_finished = 0;
+    uint8_t bt_finished = 0;
     (void)pvParameters;
 
     /* 硬件拉起 + LVGL 注册 + 建测试界面, 在本任务上下文一次性完成 */
     App_Display_Init();
     lv_refr_now(NULL); /* 先提交首帧；DMA完成中断继续工作，不等待其他模块。 */
-
-    /* RTC、蓝牙由LVGL任务串行初始化，完成后才进入UI收发循环。
-     * LSE/AT失败仍继续开机；初始化期间界面停留在首帧。 */
-    (void)watch_rtc_init();
-    (void)kt6368a_init();
+    app_diag_boot_set(APP_BOOT_FIRST_FRAME_MS, HAL_GetTick());
 
     if (xTaskCreate(app_sensor_task, "sensor", APP_SENSOR_TASK_STK, NULL, APP_SENSOR_TASK_PRIO, NULL) != pdPASS)
     {
         Error_Handler(); /* FreeRTOS 堆不足 */
     }
 
+    /* 两种启动等待由本任务分阶段推进，sensor可在等待期间独立初始化/采集。 */
+    app_diag_boot_set(APP_BOOT_RTC_BEGIN_MS, HAL_GetTick());
+    watch_rtc_init_begin();
+    app_diag_boot_set(APP_BOOT_BT_BEGIN_MS, HAL_GetTick());
+    kt6368a_init_begin();
+
     for (;;)
     {
+        app_diag_task_begin(APP_DIAG_LVGL);
+        if (rtc_finished == 0)
+        {
+            status = watch_rtc_init_service();
+            if (watch_rtc_init_is_pending() == 0)
+            {
+                rtc_finished = 1;
+                app_diag_boot_set(APP_BOOT_RTC_END_MS, HAL_GetTick());
+                app_diag_boot_set(APP_BOOT_RTC_RESULT, (uint32_t)status);
+            }
+        }
+        if (bt_finished == 0)
+        {
+            status = kt6368a_init_service();
+            if (kt6368a_init_is_pending() == 0)
+            {
+                bt_finished = 1;
+                app_diag_boot_set(APP_BOOT_BT_END_MS, HAL_GetTick());
+                app_diag_boot_set(APP_BOOT_BT_RESULT, (uint32_t)status);
+            }
+        }
         App_Display_Service(); /* 锁 → lv_timer_handler → 解锁 */
+        app_diag_service();
+        app_diag_task_end(APP_DIAG_LVGL, APP_LVGL_TASK_PERIOD);
         vTaskDelay(pdMS_TO_TICKS(APP_LVGL_TASK_PERIOD));
     }
 }
@@ -101,36 +131,94 @@ static void app_lvgl_task(void *pvParameters)
 static void app_sensor_task(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
+    mpu6050_cal_state cal_state;
+    mpu6050_offset_struct offset;
+    app_imu_store_result store_result;
+    uint16_t cal_stable, cal_frames;
+    uint8_t cal_finished = 0;
 
     (void)pvParameters;
+    app_diag_boot_set(APP_BOOT_SENSOR_BEGIN_MS, HAL_GetTick());
 
     /* SENSOR总线从初始化到采样均由本任务独占；失败仍进入原有故障处理。 */
     my_i2c_init(MY_I2C_BUS_SENSOR);
-    (void)my_mpu6050_init();
-    (void)spl006_init();
-    (void)lsm303dlhc_mag_init();
-    (void)em7028_init(); /* 配置为待机，原有服务负责启动采样及照明。 */
+    app_diag_sensor_init(APP_DIAG_MPU, my_mpu6050_init());
+    app_diag_sensor_init(APP_DIAG_BARO, spl006_init());
+    app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_init());
+    app_diag_sensor_init(APP_DIAG_HEART, em7028_init()); /* 配置为待机，原有服务负责启动采样及照明。 */
 
     /* 数据锁须在任务上下文创建 (调度器已运行, 见 app_display 同款注释) */
     App_IMU_Init();
+    store_result = app_imu_store_load(&offset);
     App_Baro_Init();
     app_heart_init();
     app_battery_init();
     app_battery_service(); /* 首次电池读数在零偏校准等待前发布。 */
 
-    /* 上电零偏校准(第一级): 正常约2s，等待稳定最多3s；内部vTaskDelay让出CPU，
-     * 只推迟首帧快照, 不影响 lvgl 任务。返回 1=超时放弃(校准时被搬动),
-     * 保留原零点继续采样。第二级温漂抑制(静止微调)在 App_IMU_Service 内,
-     * 策略同 flight 端 gyro_trim: 检测到静止才逐轮吃掉残余零偏。 */
-    (void)my_mpu6050_zero_offset();
-    app_aht21_init(); /* 仅启动阶段等待上电/初始化；周期测量由下方非阻塞服务处理。 */
-    xLastWakeTime = xTaskGetTickCount(); /* 校准耗时不形成 vTaskDelayUntil 补跑 */
+    app_aht21_init();
+    app_diag_boot_set(APP_BOOT_SENSOR_READY_MS, HAL_GetTick());
+    app_diag_boot_set(APP_BOOT_CAL_BEGIN_MS, HAL_GetTick());
+    if (store_result == APP_IMU_STORE_OK)
+    {
+        my_mpu6050_restore_offset(&offset);
+        cal_finished = 1;
+        app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_RESTORED);
+        app_diag_boot_set(APP_BOOT_CAL_END_MS, HAL_GetTick());
+        app_diag_boot_set(APP_BOOT_CAL_RESULT, 0);
+    }
+    else
+    {
+        /* EEPROM空白/无有效记录时才使用原校准，失败不写入。 */
+        my_mpu6050_zero_offset_begin(HAL_GetTick());
+        app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_WAIT_STILL);
+    }
+    xLastWakeTime = xTaskGetTickCount();
+    app_diag_boot_set(APP_BOOT_SAMPLING_BEGIN_MS, HAL_GetTick());
 
     for (;;)
     {
         static uint8_t baro_cnt = 0;
 
+        app_diag_task_begin(APP_DIAG_SENSOR_TASK);
+        if (app_diag_take_imu_calibration() != 0)
+        {
+            cal_finished = 0;
+            app_diag_imu_save_record(APP_IMU_SAVE_NONE, 0, UINT32_MAX, UINT32_MAX);
+            my_mpu6050_zero_offset_begin(HAL_GetTick());
+            app_diag_boot_set(APP_BOOT_CAL_BEGIN_MS, HAL_GetTick());
+            app_diag_boot_set(APP_BOOT_CAL_END_MS, UINT32_MAX);
+            app_diag_boot_set(APP_BOOT_CAL_RESULT, UINT32_MAX);
+        }
         App_IMU_Service();
+        if (cal_finished == 0)
+        {
+            cal_state = my_mpu6050_zero_offset_state();
+            my_mpu6050_zero_offset_progress(&cal_stable, &cal_frames);
+            app_diag_boot_set(APP_BOOT_CAL_STATE, (uint32_t)cal_state);
+            app_diag_boot_set(APP_BOOT_CAL_FRAMES, cal_frames);
+            app_diag_boot_set(APP_BOOT_CAL_STABLE_FRAMES, cal_stable);
+            if (cal_state == MPU6050_CAL_DONE || cal_state == MPU6050_CAL_FAILED)
+            {
+                cal_finished = 1;
+                app_diag_boot_set(APP_BOOT_CAL_END_MS, HAL_GetTick());
+                if (cal_state == MPU6050_CAL_DONE)
+                {
+                    my_mpu6050_get_offset(&offset);
+                    if (app_imu_store_save(&offset) == APP_IMU_STORE_OK)
+                    {
+                        app_diag_boot_set(APP_BOOT_CAL_RESULT, 0);
+                    }
+                    else
+                    {
+                        app_diag_boot_set(APP_BOOT_CAL_RESULT, 2); /* RAM校准成功，掉电保存失败。 */
+                    }
+                }
+                else
+                {
+                    app_diag_boot_set(APP_BOOT_CAL_RESULT, 1);
+                }
+            }
+        }
         app_heart_service();
         app_aht21_service();
         app_battery_service();
@@ -139,6 +227,7 @@ static void app_sensor_task(void *pvParameters)
             App_Baro_Service();
             baro_cnt = 0;
         }
+        app_diag_task_end(APP_DIAG_SENSOR_TASK, APP_SENSOR_TASK_PERIOD);
         /* 校准保存会等待EEPROM写周期；错过周期后重新计时，避免连续补跑旧帧。 */
         if ((TickType_t)(xTaskGetTickCount() - xLastWakeTime) > pdMS_TO_TICKS(APP_SENSOR_TASK_PERIOD))
         {

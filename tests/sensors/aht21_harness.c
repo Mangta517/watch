@@ -3,6 +3,7 @@
 #include "app_aht21.h"
 #include "my_i2c.h"
 #include "semphr.h"
+#include "task.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -21,6 +22,8 @@ static expected_transfer transfers[64];
 static unsigned transfer_count, transfer_pos, read_pos, phase, delay_calls;
 static uint32_t now_ms;
 static uint8_t locked;
+static int scheduler_state = taskSCHEDULER_NOT_STARTED;
+static unsigned task_delay_calls;
 
 static void expect_read(const uint8_t *data, uint8_t size, uint8_t nack)
 {
@@ -83,9 +86,21 @@ uint32_t HAL_GetTick(void)
 
 void HAL_Delay(uint32_t ms)
 {
-    assert(phase == 0 && locked == 0);
+    assert(phase == 0 && locked == 0 && scheduler_state != taskSCHEDULER_RUNNING);
     now_ms += ms;
     ++delay_calls;
+}
+
+int xTaskGetSchedulerState(void)
+{
+    return scheduler_state;
+}
+
+void vTaskDelay(TickType_t ticks)
+{
+    assert(phase == 0 && locked == 0 && scheduler_state == taskSCHEDULER_RUNNING && ticks > 0);
+    now_ms += ticks;
+    ++task_delay_calls;
 }
 
 void Error_Handler(void)
@@ -178,6 +193,35 @@ static void check_init(void)
     expect_status(0x00, 0);
     expect_command(0xBE, 0x08, 1);
     assert(aht21_init() == AHT21_I2C_ERROR);
+}
+
+static void check_init_delays(void)
+{
+    const int states[] = {taskSCHEDULER_NOT_STARTED, taskSCHEDULER_RUNNING, taskSCHEDULER_SUSPENDED};
+    unsigned i, hal_before, task_before;
+    uint32_t started;
+
+    for (i = 0; i < sizeof(states) / sizeof(states[0]); ++i)
+    {
+        scheduler_state = states[i];
+        hal_before = delay_calls;
+        task_before = task_delay_calls;
+        started = now_ms;
+        expect_status(0x00, 0);
+        expect_command(0xBE, 0x08, 0);
+        expect_status(0x08, 0);
+        assert(aht21_init() == AHT21_OK && now_ms - started >= 50U);
+        if (scheduler_state == taskSCHEDULER_RUNNING)
+        {
+            assert(task_delay_calls - task_before == 2U && delay_calls == hal_before);
+        }
+        else
+        {
+            assert(delay_calls - hal_before == 2U && task_delay_calls == task_before);
+        }
+    }
+    scheduler_state = taskSCHEDULER_NOT_STARTED;
+    puts("PASS: AHT21 initialization preserves minimum waits and yields only with a running scheduler");
 }
 
 static void check_frames(void)
@@ -294,6 +338,7 @@ static void check_tick_wrap(void)
 int main(void)
 {
     check_init();
+    check_init_delays();
     check_frames();
     check_service();
     check_tick_wrap();

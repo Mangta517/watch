@@ -26,7 +26,8 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
         gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
         "-Itests/startup/host", "-Itests/sensors/host", "-ICore/Inc",
         "-Iapplication", "-Iinterface", "-Icommon",
-        "tests/startup/startup_harness.c", "-o", exe,
+        "tests/startup/startup_harness.c", "tests/diagnostics/diag_stub.c", "-o", exe,
     ], cwd=root, check=True)
-    for mode in ["ok", "devices_failed", "display_alloc_failed", "sensor_alloc_failed"]:
+    for mode in ["ok", "devices_failed", "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
+                 "cal_success", "cal_failed", "save_error", "manual_cal"]:
         subprocess.run([exe, mode], cwd=root, check=True)

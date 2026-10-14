@@ -56,6 +56,13 @@ typedef struct
 #define RTC_STOREOPERATION_RESET   0U
 #define RTC_FORMAT_BIN             0U
 #define RTC_BKP_DR0                0U
+#define RCC_FLAG_LSERDY 2U
+#define LSE_STARTUP_TIMEOUT 5000U
+#define __HAL_RCC_LSE_CONFIG(value) mock_lse_config(value)
+#define __HAL_RCC_GET_FLAG(flag) mock_lse_flag(flag)
+void mock_lse_config(uint32_t value);
+uint32_t mock_lse_flag(uint32_t flag);
+uint32_t HAL_GetTick(void);
 #define __HAL_RCC_PWR_CLK_ENABLE() mock_power_enable()
 #define __HAL_RCC_RTC_ENABLE()     mock_rtc_enable()
 void mock_power_enable(void);

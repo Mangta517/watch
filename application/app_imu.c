@@ -11,6 +11,7 @@
   ******************************************************************************
 ***/
 #include "app_imu.h"
+#include "app_diag.h"
 
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -206,7 +207,9 @@ static uint8_t mag_service(TickType_t now, float body_uT[3])
     if ((TickType_t)(now - s_mag_poll_tick) >= pdMS_TO_TICKS(APP_MAG_POLL_MS))
     {
         s_mag_poll_tick = now;
+        uint32_t read_started = app_diag_clock_count();
         result = lsm303dlhc_mag_read(&s_mag);
+        app_diag_sensor_record(APP_DIAG_MAG, (uint8_t)result, (uint32_t)result, read_started);
         if (result == LSM303DLHC_MAG_OK)
         {
             s_mag_sample_tick = xTaskGetTickCount();
@@ -285,7 +288,14 @@ void App_IMU_Init(void)
     }
     else
     {
-        s_mag_persist_state = result == APP_MAG_STORE_ERROR ? APP_MAG_PERSIST_LOAD_FAILED : APP_MAG_PERSIST_NONE;
+        if (result == APP_MAG_STORE_ERROR)
+        {
+            s_mag_persist_state = APP_MAG_PERSIST_LOAD_FAILED;
+        }
+        else
+        {
+            s_mag_persist_state = APP_MAG_PERSIST_NONE;
+        }
     }
 }
 
@@ -299,6 +309,9 @@ void App_IMU_Service(void)
     const float *mag_reference = NULL;
     uint8_t mag_online, mag_fused = 0;
     uint8_t axis;
+    uint8_t read_result;
+    mpu6050_cal_state cal_before, cal_after;
+    uint32_t read_started;
     app_mag_fusion_state mag_fusion_state = APP_MAG_FUSION_IMU_NO_DATA;
 
     /* dt = 距上次服务的真实间隔 (flight 端同款约定: 实测+限幅, 不硬编码) */
@@ -325,10 +338,30 @@ void App_IMU_Service(void)
     mag_online = mag_service(now, mag_body);
     field_squared = mag_body[0] * mag_body[0] + mag_body[1] * mag_body[1] + mag_body[2] * mag_body[2];
     /* 15 字节突发读同时释放 MPU INT 锁存，无 ISR 总线竞争。 */
-    if (my_mpu6050_get_data(&raw) == 0)
+    read_started = app_diag_clock_count();
+    read_result = my_mpu6050_get_data(&raw);
+    if (read_result == 0)
     {
+        app_diag_sensor_record(APP_DIAG_MPU, APP_DIAG_OK, read_result, read_started);
+    }
+    else
+    {
+        app_diag_sensor_record(APP_DIAG_MPU, APP_DIAG_ERROR, read_result, read_started);
+    }
+    cal_before = my_mpu6050_zero_offset_state();
+    cal_after = my_mpu6050_zero_offset_step(&raw, read_result == 0, HAL_GetTick());
+    app_diag_mpu_cal_record(my_mpu6050_zero_offset_diag());
+    if (read_result == 0)
+    {
+        if (cal_after == MPU6050_CAL_DONE && cal_before == MPU6050_CAL_AVERAGING)
+        {
+            Common_IMU_Reset();
+        }
         /* 2. 处理：静止零偏微调，再做四元数融合；25～10000为5～100μT的平方。 */
-        imu_still_gyro_trim(&raw);
+        if (cal_before != MPU6050_CAL_WAIT_STILL && cal_before != MPU6050_CAL_AVERAGING)
+        {
+            imu_still_gyro_trim(&raw);
+        }
         if (!mag_online)
         {
             mag_fusion_state = APP_MAG_FUSION_NO_DATA;
@@ -348,7 +381,14 @@ void App_IMU_Service(void)
         mag_fused = Common_IMU_GetEulerAngleWithMag(&raw, mag_reference, &s_euler, dt);
         if (mag_reference != NULL)
         {
-            mag_fusion_state = mag_fused ? APP_MAG_FUSION_ACTIVE : APP_MAG_FUSION_HORIZONTAL_WEAK;
+            if (mag_fused)
+            {
+                mag_fusion_state = APP_MAG_FUSION_ACTIVE;
+            }
+            else
+            {
+                mag_fusion_state = APP_MAG_FUSION_HORIZONTAL_WEAK;
+            }
         }
 
         s_err_streak = 0;
@@ -382,7 +422,14 @@ void App_IMU_Service(void)
     s_imu_data.mag_persist_state = s_mag_persist_state;
     for (axis = 0; axis < 3; ++axis)
     {
-        s_imu_data.mag_cal_span_uT[axis] = s_mag_cal_samples ? s_mag_max[axis] - s_mag_min[axis] : 0.0f;
+        if (s_mag_cal_samples)
+        {
+            s_imu_data.mag_cal_span_uT[axis] = s_mag_max[axis] - s_mag_min[axis];
+        }
+        else
+        {
+            s_imu_data.mag_cal_span_uT[axis] = 0.0f;
+        }
     }
     imu_unlock();
 
@@ -398,7 +445,14 @@ void App_IMU_Service(void)
             calibration.scale[axis] = s_mag_scale[axis];
         }
         result = app_mag_store_save(&calibration);
-        s_mag_persist_state = result == APP_MAG_STORE_OK ? APP_MAG_PERSIST_SAVED : APP_MAG_PERSIST_SAVE_FAILED;
+        if (result == APP_MAG_STORE_OK)
+        {
+            s_mag_persist_state = APP_MAG_PERSIST_SAVED;
+        }
+        else
+        {
+            s_mag_persist_state = APP_MAG_PERSIST_SAVE_FAILED;
+        }
         imu_lock();
         s_imu_data.mag_persist_state = s_mag_persist_state;
         imu_unlock();
@@ -434,6 +488,13 @@ void App_IMU_MagCalibrate(uint8_t start)
         return;
     }
     imu_lock();
-    s_mag_cal_request = start ? APP_MAG_CMD_START : APP_MAG_CMD_FINISH;
+    if (start)
+    {
+        s_mag_cal_request = APP_MAG_CMD_START;
+    }
+    else
+    {
+        s_mag_cal_request = APP_MAG_CMD_FINISH;
+    }
     imu_unlock();
 }

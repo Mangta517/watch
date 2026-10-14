@@ -26,7 +26,14 @@ static uint8_t parse_number(const char **cursor, int32_t *value)
         magnitude = magnitude * 10 + **cursor - '0';
         ++*cursor;
     }
-    *value = negative ? -magnitude : magnitude;
+    if (negative)
+    {
+        *value = -magnitude;
+    }
+    else
+    {
+        *value = magnitude;
+    }
     return digits != 0;
 }
 
@@ -106,7 +113,14 @@ const char *app_weather_description(uint8_t code)
     }
     if (code <= 3)
     {
-        return code == 3 ? "OVERCAST" : "PARTLY CLOUDY";
+        if (code == 3)
+        {
+            return "OVERCAST";
+        }
+        else
+        {
+            return "PARTLY CLOUDY";
+        }
     }
     if (code == 45 || code == 48)
     {

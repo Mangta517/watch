@@ -6,6 +6,20 @@
 #include <string.h>
 
 static uint32_t rtc_seconds, backup;
+static uint32_t tick, lse_ready;
+uint32_t HAL_GetTick(void)
+{
+    return tick;
+}
+void mock_lse_config(uint32_t value)
+{
+    assert(value == RCC_LSE_ON);
+}
+uint32_t mock_lse_flag(uint32_t flag)
+{
+    assert(flag == RCC_FLAG_LSERDY);
+    return lse_ready;
+}
 static uint8_t power_enabled, backup_enabled, rtc_enabled, shadow_locked;
 static uint32_t set_calls, date_calls;
 static HAL_StatusTypeDef oscillator_status = HAL_OK;
@@ -182,6 +196,26 @@ int main(int argc, char **argv)
     assert(watch_rtc_init() == HAL_OK && watch_rtc_is_synced() && rtc_seconds == 3723);
     puts("PASS: LSE/RTC configuration, backup retention, shadow unlock, fragmented HH:MM:SS and legacy HH:MM, no-newline idle, ranges/noise/failures, midnight "
          "and tick wrap.");
+    calls = set_calls;
+    tick = UINT32_MAX - 1000U;
+    watch_rtc_init_begin();
+    assert(watch_rtc_init_is_pending());
+    tick += 4999U;
+    assert(watch_rtc_init_service() == HAL_BUSY && watch_rtc_init_is_pending());
+    ++tick;
+    assert(watch_rtc_init_service() == HAL_TIMEOUT && !watch_rtc_init_is_pending());
+    assert(set_calls == calls);
+    lse_ready = 1;
+    watch_rtc_init_begin();
+    assert(watch_rtc_init_service() == HAL_OK && !watch_rtc_init_is_pending());
+    assert(watch_rtc_is_synced() && rtc_seconds == 3723 && set_calls == calls);
+    oscillator_status = HAL_ERROR;
+    watch_rtc_init_begin();
+    assert(watch_rtc_init_service() == HAL_ERROR && !watch_rtc_init_is_pending());
+    oscillator_status = HAL_OK;
+    watch_rtc_init_begin();
+    assert(watch_rtc_init_service() == HAL_OK);
+    puts("PASS: staged LSE wait, timeout/tick wrap, retained time and final initialization failures.");
     if (argc > 1)
     {
         char frames[128];

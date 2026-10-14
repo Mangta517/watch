@@ -3,6 +3,7 @@
  * @brief 每秒进行一次 PA1/ADC1_IN1 单次转换，不在 UI 中等待 ADC。
  */
 #include "app_battery.h"
+#include "app_diag.h"
 #include "adc.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -26,6 +27,7 @@ void app_battery_init(void)
     memset(&s_battery_data, 0, sizeof(s_battery_data));
     xSemaphoreGive(s_battery_mux);
     s_attempt_ms = HAL_GetTick() - APP_BATTERY_PERIOD_MS;
+    app_diag_sensor_init(APP_DIAG_BATTERY, 0);
 }
 
 void app_battery_service(void)
@@ -34,11 +36,13 @@ void app_battery_service(void)
     HAL_StatusTypeDef stop_result;
     uint32_t now = HAL_GetTick();
     uint32_t raw = 0;
+    uint32_t read_started;
     if (s_battery_mux == NULL || now - s_attempt_ms < APP_BATTERY_PERIOD_MS)
     {
         return;
     }
     s_attempt_ms = now;
+    read_started = app_diag_clock_count();
     sample.result = HAL_ADC_Start(&hadc1);
     if (sample.result == HAL_OK)
     {
@@ -59,6 +63,14 @@ void app_battery_service(void)
         sample.adc_raw = (uint16_t)raw;
         sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2U + 2047U) / 4095U;
         sample.valid = 1;
+    }
+    if (sample.result == HAL_OK)
+    {
+        app_diag_sensor_record(APP_DIAG_BATTERY, APP_DIAG_OK, (uint32_t)sample.result, read_started);
+    }
+    else
+    {
+        app_diag_sensor_record(APP_DIAG_BATTERY, APP_DIAG_ERROR, (uint32_t)sample.result, read_started);
     }
     xSemaphoreTake(s_battery_mux, portMAX_DELAY);
     s_battery_data = sample;

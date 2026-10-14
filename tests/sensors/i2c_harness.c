@@ -12,6 +12,7 @@ static uint8_t input_bits[11];
 static unsigned input_pos, read_edges, response_edges;
 static uint8_t read_data, slave_low, check_stop, nack_pending;
 static uint8_t expected_ack;
+static unsigned sda_init_calls, redundant_sda_inits;
 
 void host_i2c_nop(void)
 {
@@ -44,6 +45,11 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
     if (config->Pin == SENSOR_SDA_Pin)
     {
         assert(config->Mode == GPIO_MODE_INPUT || config->Mode == GPIO_MODE_OUTPUT_OD);
+        if (sda_init_calls != 0 && sda_mode == config->Mode)
+        {
+            ++redundant_sda_inits;
+        }
+        ++sda_init_calls;
         /* 读地址 ACK 后，从机已在 SCL 低期间准备第一位，主机必须释放 SDA。 */
         assert(!(config->Mode == GPIO_MODE_OUTPUT_PP && slave_low != 0 && sda_latch == GPIO_PIN_SET));
         sda_mode = config->Mode;
@@ -176,6 +182,7 @@ int main(int argc, char **argv)
         read_pid(0x00, 1);
         read_pid(0xFF, 1);
         read_pid(0x36, 0);
+        assert(redundant_sda_inits == 0);
         puts("PASS: software I2C releases NACK, presets ACK low without contention, preserves PID bits and read clocks.");
     }
     return 0;

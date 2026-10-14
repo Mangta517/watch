@@ -1,3 +1,5 @@
+> 当前版本（2026-10-14）：BLE 与 SPP 都已开启，手机调试器为 1.95-wave.7，新增 FreeRTOS / 传感器诊断。当前使用方法见 [diagnostics.md](diagnostics.md)；下文 BLE-only 和旧版本段落保留为历史说明。
+
 # KT6368A 蓝牙驱动（仅BLE，SPP关闭）
 
 驱动位于 `interface/kt6368a.c/.h`，由 LVGL 任务在首帧显示后初始化，完成后才开始 UI 的串口收发。

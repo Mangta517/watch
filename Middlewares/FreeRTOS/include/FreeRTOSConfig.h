@@ -49,7 +49,12 @@
 #define configMINIMAL_STACK_SIZE	( ( unsigned short ) 128 )
 #define configTOTAL_HEAP_SIZE		( ( size_t ) ( 16 * 1024 ) )	/* 10K 偏紧: lvgl任务4K栈+idle+mutex≈6.5K, 留余量防建任务失败 */
 #define configMAX_TASK_NAME_LEN		( 16 )
-#define configUSE_TRACE_FACILITY	0
+#define configUSE_TRACE_FACILITY	1
+
+#include "app_diag.h"
+#define configGENERATE_RUN_TIME_STATS 1
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() app_diag_clock_init()
+#define portGET_RUN_TIME_COUNTER_VALUE() app_diag_clock_count()
 #define configUSE_16_BIT_TICKS		0
 #define configIDLE_SHOULD_YIELD		1
 

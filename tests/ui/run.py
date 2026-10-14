@@ -29,8 +29,17 @@ if not library.exists() or max(p.stat().st_mtime for p in dependencies) > librar
     print("Building the project's LVGL renderer...", flush=True)
     subprocess.run([gcc, "@" + str(response)], cwd=ROOT, check=True)
 print("Building and testing the watch UI...", flush=True)
-subprocess.run([gcc] + args + ["-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
+dma_exe = OUT / "dma_harness.exe"
+subprocess.run([gcc, "-Itests/sensors/host"] + args + ["-Iinterface", "-Wall", "-Wextra", "-Werror",
+               "tests/ui/dma_harness.c", str(library), "-lm", "-o", str(dma_exe)], cwd=ROOT, check=True)
+subprocess.run([str(dma_exe)], cwd=ROOT, check=True)
+subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + ["-DAPP_DEBUG_TELEMETRY=1", "-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
+quiet_exe = OUT / "ui_quiet.exe"
+subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + ["-DAPP_DEBUG_TELEMETRY=0", "-Wall", "-Wextra", "-Werror",
+               "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c",
+               str(library), "-lm", "-o", str(quiet_exe)], cwd=ROOT, check=True)
+subprocess.run([str(quiet_exe)], cwd=ROOT, check=True)
 from PIL import Image, ImageDraw, ImageFont
 
 try:
@@ -42,7 +51,7 @@ def make_preview(names, titles, columns, filename):
     rows = (len(names) + columns - 1) // columns
     montage = Image.new("RGB", (30 + columns * 266, 66 + rows * 340), "#041426")
     draw = ImageDraw.Draw(montage)
-    draw.text((28, 18), "SYDNEY / 240 x 280 / ACTUAL LVGL RENDER", fill="#f4faff", font=font)
+    draw.text((28, 18), "ANALOG WATCH / 240 x 280 / ACTUAL LVGL RENDER", fill="#f4faff", font=font)
     for index, (name, title) in enumerate(zip(names, titles)):
         frame = Image.open(OUT / (name + ".ppm"))
         frame.save(OUT / (name + ".png"))
@@ -55,7 +64,7 @@ def make_preview(names, titles, columns, filename):
     montage.save(OUT / filename)
 
 
-make_preview(["sydney", "settings", "settings_scrolled"], ["SYDNEY / HOME", "APPS / TOP", "APPS / SCROLLED"],
+make_preview(["watch", "settings", "settings_scrolled"], ["WATCH / HOME", "APPS / TOP", "APPS / SCROLLED"],
              3, "watch-ui-preview.png")
 make_preview(["heart", "motion", "environment", "aht21", "phone_weather", "bluetooth", "display"],
              ["HEART RATE", "MOTION", "BAROMETER", "CLIMATE", "PHONE WEATHER", "BLUETOOTH", "DISPLAY"],

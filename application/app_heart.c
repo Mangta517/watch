@@ -3,6 +3,7 @@
  * @brief 去背景、低通、多门限峰谷检测及RR方差选优；有效范围40～200BPM。
  */
 #include "app_heart.h"
+#include "app_diag.h"
 #include "em7028.h"
 #include "main.h"
 #include "FreeRTOS.h"
@@ -155,7 +156,14 @@ static void heart_track_peak(heart_peak_struct *peak, float factor, uint32_t now
         peak->swing = 0.0f;
         return;
     }
-    peak->swing = peak->swing == 0.0f ? swing : peak->swing * 0.75f + swing * 0.25f;
+    if (peak->swing == 0.0f)
+    {
+        peak->swing = swing;
+    }
+    else
+    {
+        peak->swing = peak->swing * 0.75f + swing * 0.25f;
+    }
     interval = (uint32_t)(peak->peak_tick - peak->beat_tick);
     candidate_interval = (uint32_t)(peak->peak_tick - peak->candidate_tick);
     peak->candidate_tick = peak->peak_tick;
@@ -175,7 +183,14 @@ static void heart_track_peak(heart_peak_struct *peak, float factor, uint32_t now
         return;
     }
     peak->beat_tick = peak->peak_tick;
-    peak->last_interval_ms = interval > UINT16_MAX ? UINT16_MAX : (uint16_t)interval;
+    if (interval > UINT16_MAX)
+    {
+        peak->last_interval_ms = UINT16_MAX;
+    }
+    else
+    {
+        peak->last_interval_ms = (uint16_t)interval;
+    }
     /* 允许一帧采样量化误差，最终输出仍必须在40～200BPM内。 */
     if (interval + APP_HEART_POLL_MS < APP_HEART_MIN_BEAT_MS || interval > APP_HEART_MAX_BEAT_MS + APP_HEART_POLL_MS)
     {
@@ -212,7 +227,14 @@ static void heart_process(uint16_t raw, uint32_t now, uint32_t elapsed, app_hear
     uint8_t active = 0;
     data->raw = raw;
     data->sample_ms = now;
-    raw_difference = raw > detector.previous_raw ? raw - detector.previous_raw : detector.previous_raw - raw;
+    if (raw > detector.previous_raw)
+    {
+        raw_difference = raw - detector.previous_raw;
+    }
+    else
+    {
+        raw_difference = detector.previous_raw - raw;
+    }
     jump_limit = detector.previous_raw / 4U;
     if (jump_limit < APP_HEART_JUMP_COUNTS)
     {
@@ -240,7 +262,14 @@ static void heart_process(uint16_t raw, uint32_t now, uint32_t elapsed, app_hear
         data->signal_x10 = 0;
         data->interval_ms = 0;
         data->bpm = 0;
-        data->state = raw == 0 || raw == UINT16_MAX ? APP_HEART_NO_SIGNAL : APP_HEART_MEASURING;
+        if (raw == 0 || raw == UINT16_MAX)
+        {
+            data->state = APP_HEART_NO_SIGNAL;
+        }
+        else
+        {
+            data->state = APP_HEART_MEASURING;
+        }
         return;
     }
     detector.dc += (float)elapsed / (1500.0f + (float)elapsed) * ((float)raw - detector.dc);
@@ -296,8 +325,14 @@ static void heart_process(uint16_t raw, uint32_t now, uint32_t elapsed, app_hear
     }
     data->bpm = 0;
     data->interval_ms = detector.peaks[2].last_interval_ms; /* 未选优时保留原30%门限的周期诊断 */
-    data->state =
-        active != 0 || (uint32_t)(now - detector.warmup_tick) <= APP_HEART_BEAT_TIMEOUT ? APP_HEART_MEASURING : APP_HEART_NO_SIGNAL;
+    if (active != 0 || (uint32_t)(now - detector.warmup_tick) <= APP_HEART_BEAT_TIMEOUT)
+    {
+        data->state = APP_HEART_MEASURING;
+    }
+    else
+    {
+        data->state = APP_HEART_NO_SIGNAL;
+    }
 }
 
 void app_heart_init(void)
@@ -376,6 +411,7 @@ void app_heart_service(void)
     uint32_t now = HAL_GetTick();
     uint32_t elapsed;
     uint8_t enabled;
+    uint32_t read_started;
     if (heart_mutex == NULL)
     {
         return;
@@ -391,7 +427,14 @@ void app_heart_service(void)
             result = em7028_stop();
             running = 0;
             data.bpm = 0;
-            data.state = result == EM7028_OK ? APP_HEART_OFF : APP_HEART_ERROR;
+            if (result == EM7028_OK)
+            {
+                data.state = APP_HEART_OFF;
+            }
+            else
+            {
+                data.state = APP_HEART_ERROR;
+            }
             if (result != EM7028_OK)
             {
                 em7028_get_fault(&data.fault);
@@ -402,7 +445,9 @@ void app_heart_service(void)
     }
     if (running == 0)
     {
-        if (em7028_start() != EM7028_OK)
+        result = em7028_start();
+        app_diag_sensor_init(APP_DIAG_HEART, (uint32_t)result);
+        if (result != EM7028_OK)
         {
             heart_fail(&data);
             return;
@@ -429,7 +474,9 @@ void app_heart_service(void)
         data.bpm = 0;
         data.state = APP_HEART_MEASURING;
     }
+    read_started = app_diag_clock_count();
     result = em7028_read_raw(&raw);
+    app_diag_sensor_record(APP_DIAG_HEART, (uint8_t)result, (uint32_t)result, read_started);
     /* 短暂 NACK/跨更新只丢弃本帧；连续 250ms 无有效读数才关闭测量。 */
     if (result != EM7028_OK && (uint32_t)(now - good_tick) > APP_HEART_STALE_MS)
     {
@@ -461,6 +508,7 @@ void app_heart_service(void)
         {
             if (sample_count == APP_HEART_SAMPLE_COUNT)
             {
+                app_diag_heart_queue(1);
                 sample_head = (uint16_t)((sample_head + 1U) % APP_HEART_SAMPLE_COUNT);
                 --sample_count;
             }

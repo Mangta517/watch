@@ -3,6 +3,7 @@
  * @brief 复用现有 sensor 任务；80ms 后读结果，忙状态最多等到 200ms。
  */
 #include "app_aht21.h"
+#include "app_diag.h"
 #include "main.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -25,6 +26,7 @@ void app_aht21_init(void)
         return;
     }
     result = aht21_init();
+    app_diag_sensor_init(APP_DIAG_AHT, (uint32_t)result);
     xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
     memset(&s_aht21_data, 0, sizeof(s_aht21_data));
     s_aht21_data.result = result;
@@ -39,6 +41,7 @@ void app_aht21_service(void)
     aht21_result result;
     uint32_t now = HAL_GetTick();
     uint32_t elapsed = now - s_attempt_ms;
+    uint32_t read_started;
     if (s_aht21_mux == NULL)
     {
         return;
@@ -49,14 +52,24 @@ void app_aht21_service(void)
         {
             return;
         }
+        read_started = app_diag_clock_count();
         result = aht21_read(&sample);
         if (result == AHT21_BUSY && elapsed < APP_AHT21_TIMEOUT_MS)
         {
+            app_diag_sensor_record(APP_DIAG_AHT, APP_DIAG_NOT_READY, (uint32_t)result, read_started);
             return;
         }
         if (result == AHT21_BUSY)
         {
             result = AHT21_TIMEOUT;
+        }
+        if (result == AHT21_OK)
+        {
+            app_diag_sensor_record(APP_DIAG_AHT, APP_DIAG_OK, (uint32_t)result, read_started);
+        }
+        else
+        {
+            app_diag_sensor_record(APP_DIAG_AHT, APP_DIAG_ERROR, (uint32_t)result, read_started);
         }
         s_pending = 0;
         xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
@@ -73,7 +86,12 @@ void app_aht21_service(void)
     }
     else if (elapsed >= APP_AHT21_PERIOD_MS)
     {
+        read_started = app_diag_clock_count();
         result = aht21_trigger();
+        if (result != AHT21_OK)
+        {
+            app_diag_sensor_record(APP_DIAG_AHT, APP_DIAG_ERROR, (uint32_t)result, read_started);
+        }
         s_attempt_ms = HAL_GetTick();
         s_pending = result == AHT21_OK;
         xSemaphoreTake(s_aht21_mux, portMAX_DELAY);

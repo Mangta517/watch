@@ -160,7 +160,14 @@ static uint8_t iic_write_byte(uint8_t dat)
     tp_sda_in(); /* 释放总线, 读从机 ACK */
     TP_SCL_1();
     tp_delay();
-    nack = TP_SDA_RD() ? 1 : 0;
+    if (TP_SDA_RD())
+    {
+        nack = 1;
+    }
+    else
+    {
+        nack = 0;
+    }
     TP_SCL_0();
     tp_delay();
     tp_sda_out();
@@ -177,7 +184,14 @@ static uint8_t iic_read_byte(uint8_t ack)
     {
         TP_SCL_1();
         tp_delay();
-        dat = (uint8_t)((dat << 1) | (TP_SDA_RD() ? 1 : 0));
+        if (TP_SDA_RD())
+        {
+            dat = (uint8_t)((dat << 1) | 1);
+        }
+        else
+        {
+            dat = (uint8_t)((dat << 1) | 0);
+        }
         TP_SCL_0();
         tp_delay();
     }
@@ -225,7 +239,14 @@ static uint8_t tp_read_regs_at(uint8_t addr8, uint8_t reg, uint8_t *buf, uint16_
     }
     for (i = 0; i < len; i++)
     {
-        buf[i] = iic_read_byte((i + 1 < len) ? 1 : 0);
+        if (i + 1 < len)
+        {
+            buf[i] = iic_read_byte(1);
+        }
+        else
+        {
+            buf[i] = iic_read_byte(0);
+        }
     }
     iic_stop();
     return 1;
