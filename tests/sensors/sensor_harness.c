@@ -40,6 +40,8 @@ static int fail_dev = -1, fail_reg = -1;
 static unsigned reads, mag_frames, mag_config_writes;
 static int spl_fail_read_at = -1, spl_fail_write_at = -1;
 static unsigned spl_reads, spl_writes;
+static unsigned mpu_reads, mpu_writes;
+static int mpu_fail_read_at = -1, mpu_fail_write_at = -1;
 static uint8_t spl_reset_status = SPL06_SENSOR_RDY | SPL06_COEF_RDY;
 static TickType_t motion_at_tick;
 static uint8_t eeprom[BL24C02_CAPACITY_BYTES];
@@ -140,6 +142,10 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, uint8_t *d
     bus_enter(bus);
     ++reads;
     error = (fail_dev == dev && (fail_reg < 0 || fail_reg == reg));
+    if (dev == MPU6050_ADDR)
+    {
+        error |= (int)mpu_reads++ == mpu_fail_read_at;
+    }
     if (dev == SPL006_ADDR)
     {
         error |= (int)spl_reads++ == spl_fail_read_at;
@@ -186,6 +192,10 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, const uin
     uint8_t error;
     bus_enter(bus);
     error = (fail_dev == dev && (fail_reg < 0 || fail_reg == reg));
+    if (dev == MPU6050_ADDR)
+    {
+        error |= (int)mpu_writes++ == mpu_fail_write_at;
+    }
     if (dev == SPL006_ADDR)
     {
         error |= (int)spl_writes++ == spl_fail_write_at;
@@ -1233,6 +1243,39 @@ static void baro_service_tests(void)
     puts("PASS: real barometer service preserves compensation, partial-readiness snapshots, three-error offline threshold and recovery.");
 }
 
+static void mpu_init_error_tests(void)
+{
+    Accel_Gyro_struct raw, before;
+    unsigned writes, read_count;
+    int failure;
+    mpu_reads = mpu_writes = 0;
+    assert(my_mpu6050_init() == 0);
+    writes = mpu_writes;
+    read_count = mpu_reads;
+    assert(writes == 11 && read_count == 3);
+    memset(&raw, 0x5A, sizeof(raw));
+    before = raw;
+    for (failure = 0; failure < (int)writes; ++failure)
+    {
+        mpu_writes = 0;
+        mpu_fail_write_at = failure;
+        assert(my_mpu6050_init() == 1);
+        mpu_fail_write_at = -1;
+        assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &before, sizeof(raw)) == 0);
+        assert(my_mpu6050_init() == 0);
+    }
+    for (failure = 1; failure < (int)read_count; ++failure)
+    {
+        mpu_reads = 0;
+        mpu_fail_read_at = failure;
+        assert(my_mpu6050_init() == 1);
+        mpu_fail_read_at = -1;
+        assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &before, sizeof(raw)) == 0);
+        assert(my_mpu6050_init() == 0);
+    }
+    puts("PASS: every MPU config write and final status read reports failure; incomplete reinit cannot publish an ACK-only frame.");
+}
+
 static void init_delay_tests(void)
 {
     const int states[] = {taskSCHEDULER_NOT_STARTED, taskSCHEDULER_RUNNING, taskSCHEDULER_SUSPENDED};
@@ -1276,6 +1319,7 @@ int main(int argc, char **argv)
     spl006_init_tests();
     spl006_sample_tests();
     baro_service_tests();
+    mpu_init_error_tests();
     init_delay_tests();
     eeprom_tests();
     imu_eeprom_tests();

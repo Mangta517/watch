@@ -35,6 +35,7 @@ static void mpu6050_delay_ms(uint32_t ms)
 static volatile uint8_t mpu6050_int_flag;
 static volatile uint8_t mpu6050_int_status; /* sensor 任务读回的状态 */
 static volatile uint16_t mpu6050_int_edges;
+static uint8_t mpu6050_ready;
 
 Gyro_struct gyro_data = {0};
 Accel_struct accel_data = {0};
@@ -82,7 +83,7 @@ uint8_t my_mpu6050_read_reg(uint8_t reg, uint8_t *data)
 /* ---------------------------------------------------------------- 初始化 */
 /**
  * @brief 初始化 MPU6050：复位 -> 唤醒 -> 量程/采样率/DLPF 配置
- * @return 0=成功, 1=复位等待超时或总线无应答
+ * @return 0=成功, 1=复位等待超时或任一配置读写失败
  * @note  调用前需先执行 my_i2c_init(MY_I2C_BUS_SENSOR)
  */
 uint8_t my_mpu6050_init(void)
@@ -91,6 +92,8 @@ uint8_t my_mpu6050_init(void)
     uint8_t id = 0;
     uint8_t retry;
     uint16_t guard;
+
+    mpu6050_ready = 0;
 
     /* 上电就绪门: MPU6050 POR 后 I2C 接口需要 ~100ms 才能应答。
      * 本工程 init 由sensor任务启动时调用；若器件还未就绪便首写，
@@ -136,28 +139,62 @@ uint8_t my_mpu6050_init(void)
     }
 
     /* 唤醒 MPU6050 */
-    my_mpu6050_write_reg(MPU6050_REG_PWR_MGMT_1, 0x00);
+    if (my_mpu6050_write_reg(MPU6050_REG_PWR_MGMT_1, 0x00) != 0)
+    {
+        return 1;
+    }
     /* 量程同时供公共层换算、1g判断和零偏校准引用。 */
-    my_mpu6050_write_reg(MPU6050_GYRO_CONFIG, MPU6050_GYRO_RANGE);
-    my_mpu6050_write_reg(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE);
+    if (my_mpu6050_write_reg(MPU6050_GYRO_CONFIG, MPU6050_GYRO_RANGE) != 0)
+    {
+        return 1;
+    }
+    if (my_mpu6050_write_reg(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE) != 0)
+    {
+        return 1;
+    }
     /* 中断引脚配置 (0x37) = 0x20: INT 高有效、推挽输出、中断锁存,
      * 仅读 INT_STATUS(0x3A) 后清除锁存释放 INT —— 配合 PB12 上升沿 EXTI */
-    my_mpu6050_write_reg(MPU6050_INT_PIN_CFG, 0x20);
+    if (my_mpu6050_write_reg(MPU6050_INT_PIN_CFG, 0x20) != 0)
+    {
+        return 1;
+    }
     /* 使能数据就绪中断 (0x38 bit0 DATA_RDY): 采样数据更新时 INT 拉高 */
-    my_mpu6050_write_reg(MPU6050_INT_ENABLE, 0x01);
+    if (my_mpu6050_write_reg(MPU6050_INT_ENABLE, 0x01) != 0)
+    {
+        return 1;
+    }
     /* 用户控制寄存器：不用 FIFO 和外设 I2C 主机 */
-    my_mpu6050_write_reg(MPU6050_USER_CTRL, 0x00);
+    if (my_mpu6050_write_reg(MPU6050_USER_CTRL, 0x00) != 0)
+    {
+        return 1;
+    }
     /* 100Hz输出与sensor任务同步；42/44Hz低通保留转腕响应并抑制高频噪声。 */
-    my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, MPU6050_SAMPLE_PERIOD_MS - 1U);
-    my_mpu6050_write_reg(MPU6050_CONFIG, MPU6050_DLPF_CFG);
+    if (my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, MPU6050_SAMPLE_PERIOD_MS - 1U) != 0)
+    {
+        return 1;
+    }
+    if (my_mpu6050_write_reg(MPU6050_CONFIG, MPU6050_DLPF_CFG) != 0)
+    {
+        return 1;
+    }
     /* 时钟源选内部 X 轴陀螺仪 */
-    my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x01);
+    if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x01) != 0)
+    {
+        return 1;
+    }
     /* 使能加速度计和陀螺仪 (PWR_MGMT_2 全部轴不关断) */
-    my_mpu6050_write_reg(MPU6050_PWR_MGMT_2, 0x00);
+    if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_2, 0x00) != 0)
+    {
+        return 1;
+    }
 
     /* 配置过程中可能已产生锁存的 DATA_RDY: 读一次 0x3A 清除锁存，
      * 确保 INT 初始为低，之后每个数据就绪都产生干净的上升沿 */
-    my_mpu6050_read_reg(MPU6050_INT_STATUS, &data);
+    if (my_mpu6050_read_reg(MPU6050_INT_STATUS, &data) != 0)
+    {
+        return 1;
+    }
+    mpu6050_ready = 1;
 
     /* 注意: 上电初始化不做零偏校准；应用任务使用begin/step，
      * 在正常采样中等待静止并累计校准帧。 */
@@ -479,7 +516,8 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
     uint8_t packet[15];
     const uint8_t *buf = packet + 1;
 
-    if (data == NULL)
+    /* 初始化失败时，地址仍ACK也不能把配置不完整的输出发布为有效帧。 */
+    if (data == NULL || mpu6050_ready == 0)
     {
         return 1;
     }

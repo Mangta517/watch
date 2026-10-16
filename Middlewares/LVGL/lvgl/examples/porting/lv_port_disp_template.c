@@ -34,8 +34,9 @@ static lv_color_t buf_1[LVGL_BUF_PX];
 static lv_color_t buf_2[LVGL_BUF_PX];
 
 /* 本次在途 flush 的驱动指针: LVGL 保证 flush_ready 前不会再进 flush_cb, 单飞安全 */
-static volatile lv_disp_drv_t *s_flush_drv = NULL;
+static lv_disp_drv_t * volatile s_flush_drv = NULL;
 static TaskHandle_t s_flush_task;
+static uint8_t s_redraw_pending;
 
 /**********************
  *   GLOBAL FUNCTIONS
@@ -86,14 +87,18 @@ static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_
 static void disp_wait(lv_disp_drv_t *disp_drv)
 {
     (void)disp_drv;
+    if (LCD_Flush_Service() != 0)
+    {
+        s_redraw_pending = 1;
+        return;
+    }
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
         (void)ulTaskNotifyTake(pdTRUE, 1U);
     }
 }
 
-/* lcd.c 的 HAL_SPI_TxCpltCallback 在 DMA2_Stream2 中断上下文调用此处。
- * LCD_Init已将DMA2_Stream2设为优先级12，满足本工程FreeRTOS的ISR API限制。 */
+/* 正常完成来自优先级12的DMA中断；异常收尾/阻塞回退来自显示任务。 */
 static void lcd_flush_ready_cb(void)
 {
     lv_disp_drv_t *drv = (lv_disp_drv_t *)s_flush_drv;
@@ -102,10 +107,23 @@ static void lcd_flush_ready_cb(void)
     {
         s_flush_drv = NULL;
         lv_disp_flush_ready(drv);
-        if (s_flush_task != NULL)
+        if (s_flush_task != NULL && __get_IPSR() != 0U)
         {
             vTaskNotifyGiveFromISR(s_flush_task, &woken);
             portYIELD_FROM_ISR(woken);
         }
+    }
+}
+
+void lv_port_disp_service(void)
+{
+    if (LCD_Flush_Service() != 0)
+    {
+        s_redraw_pending = 1;
+    }
+    if (s_redraw_pending != 0)
+    {
+        s_redraw_pending = 0;
+        lv_obj_invalidate(lv_scr_act());
     }
 }
