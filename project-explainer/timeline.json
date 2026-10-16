@@ -1,0 +1,5266 @@
+[
+  {
+    "title": "先建立工程的性能模型",
+    "chapter": "01 · 所有权与性能模型",
+    "kind": "watch",
+    "nodes": [
+      "数据年龄",
+      "执行占用",
+      "所有权转移",
+      "证据闭环"
+    ],
+    "formula": "关注端到端延迟、长尾与一致性，而不只看平均 CPU",
+    "source": "application/app_task.c|void App_Task_Create",
+    "lines": [
+      "这次直接从你现有工程的约束展开：两个应用任务、共享处理器、软件总线、异步刷屏，以及跨任务的数据发布。",
+      "我们追踪三个问题：界面看到的数据有多旧，哪个等待拖慢了采样，以及并发保护到底覆盖了哪一次读改写。",
+      "重点不是给模块贴优化标签，而是把每项改动映射到具体成本：减少总线事务、缩短持锁时间，或者把忙等变成可调度等待。",
+      "所有波形与时间轴都是机制示意。现有实现、可推导的上限和必须上板测量的结果，会明确分开，避免把推算当性能成绩。"
+    ],
+    "audio": "voice/neural-scene-01.wav",
+    "seconds": 28.156958333333332,
+    "beats": [
+      0.35,
+      6.938,
+      12.725,
+      20.315
+    ],
+    "captions": [
+      {
+        "text": "先抓住这个工程的约束：两个任务，共用",
+        "startMs": 420,
+        "endMs": 3133,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一个处理器；",
+        "startMs": 3084,
+        "endMs": 3802,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "采样走软件总线，刷屏则交给 DMA。",
+        "startMs": 4038,
+        "endMs": 6818,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "接下来围绕三个问题看代码：数据有多旧，",
+        "startMs": 7008,
+        "endMs": 9875,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "采样在哪里被拖慢，临界区又保护了什么。",
+        "startMs": 10045,
+        "endMs": 12605,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "每个优化都对应一笔成本。",
+        "startMs": 12795,
+        "endMs": 14730,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "它可能减少总线事务，也可能缩短持锁时间，",
+        "startMs": 15168,
+        "endMs": 18452,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "或者让等待不再占着处理器。",
+        "startMs": 18622,
+        "endMs": 20195,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "图里的波形和时序用来解释机制。",
+        "startMs": 20385,
+        "endMs": 22923,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "哪些结论能从代码推导，哪些还得上板测，",
+        "startMs": 23351,
+        "endMs": 26338,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "我们会逐项说明。",
+        "startMs": 26574,
+        "endMs": 27687,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 1,
+    "evidence": {
+      "scene": 1,
+      "file": "application/app_task.c",
+      "line": 54,
+      "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+      "excerpt": "void App_Task_Create(void)\n{\n    if (xTaskCreate(app_lvgl_task, \"lvgl\", APP_LVGL_TASK_STK, NULL, APP_LVGL_TASK_PRIO, NULL) != pdPASS)\n    {\n        Error_Handler(); /* FreeRTOS 堆不足 */\n    }"
+    },
+    "frames": 845,
+    "startFrame": 0,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "先划清执行权与数据所有权",
+    "chapter": "01 · 所有权与性能模型",
+    "kind": "pipeline",
+    "nodes": [
+      "sensor 独占器件",
+      "LVGL 独占界面",
+      "ISR 只完成交接",
+      "快照 / 命令跨任务"
+    ],
+    "formula": "所有权图，比模块目录更能解释并发行为",
+    "source": "application/app_display.c|void App_Display_Init",
+    "lines": [
+      "这里真正有约束力的分层是执行上下文。sensor 独占传感器事务和融合状态，LVGL 任务负责界面与蓝牙业务推进。",
+      "中断承担接收字节、传输完成通知或事件记录。它不替代业务任务完成一次复杂的设备操作，避免同一资源出现第二个操作者。",
+      "跨任务边界传递的是快照或请求，不是让消费者直接进入生产者的驱动。例如校准请求先被取走，再由 sensor 执行。",
+      "分析新增功能时，先标出状态的写入者、读取者和清除者。这样才能判断需要互斥、短临界区，还是沿用单一所有者就足够。"
+    ],
+    "audio": "voice/neural-scene-02.wav",
+    "seconds": 30.809166666666666,
+    "beats": [
+      0.35,
+      8.083,
+      15.903,
+      23.329
+    ],
+    "captions": [
+      {
+        "text": "先按执行上下文划分职责。",
+        "startMs": 420,
+        "endMs": 2794,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "sensor 管器件和融合状态，界面",
+        "startMs": 3221,
+        "endMs": 5759,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "任务负责显示，以及蓝牙业务的推进。",
+        "startMs": 5710,
+        "endMs": 7963,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "中断只做字节接收、完成通知和事件记录。",
+        "startMs": 8153,
+        "endMs": 11601,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "复杂操作留给任务，同一个资源就不会多",
+        "startMs": 12039,
+        "endMs": 15005,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "出一个操作者。",
+        "startMs": 14945,
+        "endMs": 15783,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "跨任务传的是快照或者请求。",
+        "startMs": 15973,
+        "endMs": 18380,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "比如重新校准，界面先提交请求，再由 ",
+        "startMs": 18807,
+        "endMs": 21915,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "sensor 真正执行。",
+        "startMs": 21877,
+        "endMs": 23209,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "加功能前先问清楚：谁写状态，谁读状态，",
+        "startMs": 23399,
+        "endMs": 26968,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "谁把它清掉。",
+        "startMs": 27105,
+        "endMs": 27977,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "保护方式由这个关系决定。",
+        "startMs": 28404,
+        "endMs": 30339,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 2,
+    "evidence": {
+      "scene": 2,
+      "file": "application/app_display.c",
+      "line": 28,
+      "sha256": "8b5155f560ef2dda9dd700070c8a08e333315382282ea7ac3c859fa76eaf8eab",
+      "excerpt": "void App_Display_Init(void)\n{\n    /* mutex 在任务上下文创建: 此时调度器已运行, 临界区计数才真正归零工作\n     * (CM4F port 的 uxCriticalNesting 以 0xaaaaaaaa 哨兵初值, 调度器前的\n     *  enter/exit 不解除 BASEPRI, 属设计行为, 见 SVC 启动时统一清零) */\n    s_lvgl_mux = xSemaphoreCreateMutex();"
+    },
+    "frames": 925,
+    "startFrame": 845,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "独立总线仍共享调度资源",
+    "chapter": "01 · 所有权与性能模型",
+    "kind": "ownership",
+    "nodes": [
+      "SENSOR / sensor",
+      "TOUCH / lvgl",
+      "EEPROM / sensor",
+      "GPIOB / CPU 共享"
+    ],
+    "formula": "物理隔离 → 事务隔离；不等于 CPU 与寄存器隔离",
+    "source": "common/my_i2c.c|static const my_i2c_pin_t",
+    "lines": [
+      "三条软件总线把触摸、传感器和存储器分开，避免界面读触摸时直接插入惯性器件的同一条事务。",
+      "但它们仍共享 CPU。高优先级界面任务执行软件触摸事务时，传感器任务会延后，独立引脚不会自动提供并行执行能力。",
+      "存储器虽然位于另一条总线，却同样归 sensor 使用。因此校准保存的等待会影响这个任务后面的心率和电池服务。",
+      "另外，PB4 与 PB13 共享 GPIOB 配置寄存器。工程上的独立性必须分别检查电气总线、执行上下文和寄存器访问三个层面。"
+    ],
+    "audio": "voice/neural-scene-03.wav",
+    "seconds": 30.935916666666667,
+    "beats": [
+      0.35,
+      8.883,
+      16.221,
+      23.176
+    ],
+    "captions": [
+      {
+        "text": "三条软件总线把触摸、传感器和存储器分开",
+        "startMs": 420,
+        "endMs": 4340,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "了。",
+        "startMs": 4280,
+        "endMs": 4482,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "界面读触摸时，不会直接打断同一条传感器",
+        "startMs": 4909,
+        "endMs": 8434,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "事务。",
+        "startMs": 8385,
+        "endMs": 8763,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "但 CPU 还是同一个。",
+        "startMs": 8953,
+        "endMs": 10724,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "高优先级界面在模拟触摸总线时，sensor ",
+        "startMs": 11151,
+        "endMs": 14468,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "仍然得等它让出处理器。",
+        "startMs": 14495,
+        "endMs": 16101,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "EEPROM 也由 sensor 操作。",
+        "startMs": 16291,
+        "endMs": 17952,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "所以保存校准的等待，会推迟同一个任务",
+        "startMs": 18391,
+        "endMs": 21411,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "后面的心率和电池服务。",
+        "startMs": 21362,
+        "endMs": 23056,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "还有 GPIOB：PB4 和 PB13 ",
+        "startMs": 23246,
+        "endMs": 26091,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "虽然不是同一根线，方向配置却共享寄存器，",
+        "startMs": 26053,
+        "endMs": 29194,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "这就是另一层竞争。",
+        "startMs": 29353,
+        "endMs": 30466,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 3,
+    "evidence": {
+      "scene": 3,
+      "file": "common/my_i2c.c",
+      "line": 32,
+      "sha256": "f48dcc597a2daa2eee9fbd8cdb388b00cdf66277eacbff491bff6abb4f0b99cb",
+      "excerpt": "static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] = {\n    /* SENSOR 总线: MPU6050 等 */\n    {SENSOR_SCL_GPIO_Port, SENSOR_SCL_Pin, SENSOR_SDA_GPIO_Port, SENSOR_SDA_Pin},\n    /* TP 总线: 触摸屏 (touch.c 用自己的位翻实现, 本表项为其保留) */\n    {TP_SCL_GPIO_Port, TP_SCL_Pin, TP_SDA_GPIO_Port, TP_SDA_Pin},\n    {EEPROM_SCL_GPIO_Port, EEPROM_SCL_Pin, EEPROM_SDA_GPIO_Port, EEPROM_SDA_Pin},"
+    },
+    "frames": 929,
+    "startFrame": 1770,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "启动优化看关键路径",
+    "chapter": "02 · 调度与等待成本",
+    "kind": "timeline",
+    "nodes": [
+      "PA3 保持供电",
+      "首帧提交",
+      "sensor 初始化",
+      "正常采样开始"
+    ],
+    "formula": "优化首帧、首样本、可交互时间，是三个不同目标",
+    "source": "application/app_task.c|app_diag_boot_set(APP_BOOT_FIRST_FRAME_MS",
+    "lines": [
+      "启动链路先维持电源，再准备外设。对于这个项目，首帧提交、传感器初始化完成和正常采样开始，是三个应该单独记录的事件。",
+      "当前显示初始化包含阻塞路径，所以把任务提前创建并不自动等于传感器已经开始工作，要沿实际调用顺序找第一个让出点。",
+      "MPU 初始化也存在器件应答重试和复位状态轮询。前者通过延时让出 CPU，后者在循环中连续进行寄存器事务，成本性质不同。",
+      "有效的优化是缩短关键路径或把独立等待重叠，而不是只移动函数位置。启动诊断应比较这些事件的时间差，并保留失败结果。"
+    ],
+    "audio": "voice/neural-scene-04.wav",
+    "seconds": 33.34204166666667,
+    "beats": [
+      0.35,
+      8.204,
+      16.485,
+      24.875
+    ],
+    "captions": [
+      {
+        "text": "启动先分三个时间点：首帧提交，传感器",
+        "startMs": 420,
+        "endMs": 3846,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "初始化完成，还有正常采样开始。",
+        "startMs": 3808,
+        "endMs": 6171,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "三个指标要分别看。",
+        "startMs": 6609,
+        "endMs": 8083,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "显示初始化里还有同步等待。",
+        "startMs": 8274,
+        "endMs": 10636,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "所以任务创建得早，不等于采样就开始得",
+        "startMs": 11074,
+        "endMs": 13963,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "早，还要找它何时真正获得执行。",
+        "startMs": 13914,
+        "endMs": 16365,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "MPU 初始化里，应答重试会延时让出 ",
+        "startMs": 16555,
+        "endMs": 19630,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "CPU；",
+        "startMs": 19658,
+        "endMs": 20233,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "复位状态轮询却连续访问寄存器。",
+        "startMs": 20491,
+        "endMs": 22897,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "两种等待成本不同。",
+        "startMs": 23336,
+        "endMs": 24755,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "优化启动，要缩短关键路径，或者重叠独立",
+        "startMs": 24945,
+        "endMs": 28525,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "等待。",
+        "startMs": 28476,
+        "endMs": 28898,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "只移动函数位置，未必改变首个有效样本",
+        "startMs": 29336,
+        "endMs": 32401,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "的时间。",
+        "startMs": 32341,
+        "endMs": 32872,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 4,
+    "evidence": {
+      "scene": 4,
+      "file": "application/app_task.c",
+      "line": 84,
+      "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+      "excerpt": "    app_diag_boot_set(APP_BOOT_FIRST_FRAME_MS, HAL_GetTick());\n\n    if (xTaskCreate(app_sensor_task, \"sensor\", APP_SENSOR_TASK_STK, NULL, APP_SENSOR_TASK_PRIO, NULL) != pdPASS)\n    {\n        Error_Handler(); /* FreeRTOS 堆不足 */\n    }"
+    },
+    "frames": 1001,
+    "startFrame": 2699,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "配置最终值比生成值更重要",
+    "chapter": "02 · 调度与等待成本",
+    "kind": "priority",
+    "nodes": [
+      "APB2 / SPI1",
+      "APB1 / TIM2",
+      "DMA IRQ：0 → 12",
+      "USART1 IRQ：0"
+    ],
+    "formula": "时钟推导与中断约束，必须沿初始化顺序追到最后一次写入",
+    "source": "interface/lcd.c|HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 12, 0);",
+    "lines": [
+      "SPI1 的配置可以推导五十兆赫串行时钟，TIM2 则需要考虑 APB 分频后的定时器倍频关系。直接拿总线频率代入可能算错计数尺度。",
+      "另一个典型例子是 DMA 中断。生成文件把优先级设为零，但液晶初始化随后改成十二，这才是显示完成通知使用的运行配置。",
+      "当前 DMA 回调链调用内核的中断通知接口，因此必须满足系统调用优先级约束。不能只检查生成文件就判定配置对错。",
+      "USART1 仍使用优先级零，其回调只处理驱动状态与字节缓冲。以后若在这里加入内核中断接口，必须重新审视优先级边界。"
+    ],
+    "audio": "voice/neural-scene-05.wav",
+    "seconds": 31.172333333333334,
+    "beats": [
+      0.35,
+      7.837,
+      16.008,
+      23.122
+    ],
+    "captions": [
+      {
+        "text": "SPI1 可推导出五十兆赫时钟；",
+        "startMs": 420,
+        "endMs": 2739,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "TIM2 则要考虑 APB 分频后的",
+        "startMs": 3030,
+        "endMs": 5370,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "定时器倍频，不能直接套总线频率。",
+        "startMs": 5332,
+        "endMs": 7717,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "DMA 优先级也要追到最终值。",
+        "startMs": 7907,
+        "endMs": 10335,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "生成文件里是零，液晶初始化又改成十二，",
+        "startMs": 10751,
+        "endMs": 14156,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "运行时采用后面的配置。",
+        "startMs": 14293,
+        "endMs": 15888,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "因为完成回调会调用内核通知接口，DMA ",
+        "startMs": 16078,
+        "endMs": 19208,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "中断必须满足系统调用的优先级要求，不能",
+        "startMs": 19159,
+        "endMs": 22114,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "只看生成文件。",
+        "startMs": 22065,
+        "endMs": 23002,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "USART1 目前仍是零，但回调没有",
+        "startMs": 23192,
+        "endMs": 25774,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "调用内核中断接口。",
+        "startMs": 25725,
+        "endMs": 27013,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "以后加了通知或者队列，这个边界就要重查。",
+        "startMs": 27452,
+        "endMs": 30702,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 5,
+    "evidence": {
+      "scene": 5,
+      "file": "interface/lcd.c",
+      "line": 272,
+      "sha256": "4afbcd58c5761b97548152852c39b63f3b83102c74cf73617e9655efa7c66544",
+      "excerpt": "    HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 12, 0);\n\n    LCD_RES_Clr(); /* 硬复位 */\n    lcd_delay_ms(100);\n    LCD_RES_Set();\n    lcd_delay_ms(100);"
+    },
+    "frames": 936,
+    "startFrame": 3700,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "状态机优化的是等待占用",
+    "chapter": "02 · 调度与等待成本",
+    "kind": "timeline",
+    "nodes": [
+      "begin 发起",
+      "service 推进",
+      "pending 保留",
+      "ready / timeout 收敛"
+    ],
+    "formula": "长等待拆阶段；每次 service 的最坏耗时仍要检查",
+    "source": "application/app_task.c|watch_rtc_init_begin();",
+    "lines": [
+      "RTC 晶振与蓝牙上电等待现在由 begin 和 service 共同完成。界面任务每轮推进有限阶段，传感器能够在等待期间独立运行。",
+      "这项优化消除的是整段同步等待对业务循环的占用，不意味着每个 service 内部都只有常数级执行时间。",
+      "需要继续查看一次调用里会发多少串口字节，做多少寄存器访问，以及失败路径会不会立即重试。状态枚举本身不是非阻塞的证明。",
+      "验收时同时比较首样本时间、界面循环最大间隔和初始化结果。只看到开机更快，可能遗漏某个阶段超时后被提前放弃的情况。"
+    ],
+    "audio": "voice/neural-scene-06.wav",
+    "seconds": 33.254333333333335,
+    "beats": [
+      0.35,
+      8.083,
+      16.583,
+      24.207
+    ],
+    "captions": [
+      {
+        "text": "RTC 和蓝牙把启动拆成开始与推进两",
+        "startMs": 420,
+        "endMs": 3265,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "个阶段。",
+        "startMs": 3205,
+        "endMs": 3682,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "等待硬件时，界面循环还能继续，sensor ",
+        "startMs": 4120,
+        "endMs": 7316,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "也能工作。",
+        "startMs": 7344,
+        "endMs": 7963,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "不过，写成状态机不等于每次调用都很短。",
+        "startMs": 8153,
+        "endMs": 11513,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一次推进里发多少字节、读多少寄存器，",
+        "startMs": 11941,
+        "endMs": 15235,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "仍然要检查。",
+        "startMs": 15482,
+        "endMs": 16463,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "尤其看失败路径：会不会立刻重试，会不会",
+        "startMs": 16653,
+        "endMs": 19838,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一次等待很久。",
+        "startMs": 19800,
+        "endMs": 20704,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "枚举状态再多，也不能证明没有阻塞。",
+        "startMs": 21143,
+        "endMs": 24087,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "验收一起看首样本、界面最大间隔和初始化",
+        "startMs": 24277,
+        "endMs": 28240,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "结果。",
+        "startMs": 28191,
+        "endMs": 28558,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "不能把某个模块超时退出，误当成启动优化",
+        "startMs": 28996,
+        "endMs": 32390,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "成功。",
+        "startMs": 32341,
+        "endMs": 32784,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 6,
+    "evidence": {
+      "scene": 6,
+      "file": "application/app_task.c",
+      "line": 93,
+      "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+      "excerpt": "    watch_rtc_init_begin();\n    app_diag_boot_set(APP_BOOT_BT_BEGIN_MS, HAL_GetTick());\n    kt6368a_init_begin();\n\n    for (;;)\n    {"
+    },
+    "frames": 998,
+    "startFrame": 4636,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "周期预算与真实截止时间",
+    "chapter": "02 · 调度与等待成本",
+    "kind": "timeline",
+    "nodes": [
+      "lvgl：处理 + 5 ms",
+      "sensor：10 ms 基准",
+      "抢占 / 内部等待",
+      "超期后重置基准"
+    ],
+    "formula": "Tloop = 业务 + 抢占 + 内部等待 + 周期等待",
+    "source": "application/app_task.c|#define APP_LVGL_TASK_PRIO",
+    "lines": [
+      "界面结束后再延时五毫秒，因此它的循环间隔不等于五毫秒。sensor 使用十毫秒周期基准，但同样可能被界面抢占或被内部操作拖长。",
+      "诊断的处理耗时从循环开始量到业务结束，包含抢占和内部等待。它不是纯 CPU 运算时间，也不能直接拿来估算算法指令成本。",
+      "EEPROM 保存可能让 sensor 错过周期。当前代码重置周期基准，避免连续补跑旧拍；这选择了恢复实时节奏，而不是补偿所有历史调用。",
+      "所以应一起看处理预算、循环间隔和成功样本间隔。平均周期正常而最大成功间隔很大，仍可能让心率或积分路径遭遇断采样。"
+    ],
+    "audio": "voice/neural-scene-07.wav",
+    "seconds": 30.343833333333333,
+    "beats": [
+      0.35,
+      7.699,
+      14.813,
+      22.228
+    ],
+    "captions": [
+      {
+        "text": "界面是处理完再延时五毫秒；",
+        "startMs": 420,
+        "endMs": 2574,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "sensor 是十毫秒周期基准。",
+        "startMs": 2832,
+        "endMs": 4855,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "它们对处理耗时的敏感程度不同。",
+        "startMs": 5282,
+        "endMs": 7579,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "诊断测的是从循环开始到业务结束的墙钟",
+        "startMs": 7769,
+        "endMs": 10877,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "时间，里面包含抢占和内部等待，并不只是",
+        "startMs": 10828,
+        "endMs": 14079,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "算法计算。",
+        "startMs": 14041,
+        "endMs": 14693,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "校准保存可能错过周期。",
+        "startMs": 14883,
+        "endMs": 16840,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "代码会重新设定基准，避免立刻补跑旧拍，",
+        "startMs": 17278,
+        "endMs": 20452,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "优先恢复正常节奏。",
+        "startMs": 20666,
+        "endMs": 22108,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "所以周期、处理耗时、成功读取间隔必须",
+        "startMs": 22298,
+        "endMs": 26086,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一起看。",
+        "startMs": 26037,
+        "endMs": 26525,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "平均正常，也可能夹着一次很长的断采样。",
+        "startMs": 26941,
+        "endMs": 29874,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 7,
+    "evidence": {
+      "scene": 7,
+      "file": "application/app_task.c",
+      "line": 36,
+      "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+      "excerpt": "#define APP_LVGL_TASK_PRIO   3    /* configMAX_PRIORITIES=5 */\n#define APP_LVGL_TASK_STK    1024 /* 字 = 4KB (Watch 工程实测足够跑 UI+刷新) */\n#define APP_LVGL_TASK_PERIOD 5    /* 保留原LVGL服务周期(ms) */\n\n#define APP_SENSOR_TASK_PRIO   2                        /* 低于 lvgl: UI 响应优先, 采样是后台生产 */\n#define APP_SENSOR_TASK_STK    512                      /* 字 = 2KB (IMU 读 + 零偏校准 + 气压读路径) */"
+    },
+    "frames": 911,
+    "startFrame": 5634,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "忙等、阻塞与优先级反转",
+    "chapter": "02 · 调度与等待成本",
+    "kind": "cost",
+    "nodes": [
+      "位延时占用 CPU",
+      "vTaskDelay 进入阻塞",
+      "互斥锁可等待",
+      "PRIMASK 不可调度"
+    ],
+    "formula": "同样等 2 ms，对系统的影响可能完全不同",
+    "source": "common/my_i2c.c|static void my_i2c_delay",
+    "lines": [
+      "软件总线的位延时是忙等，执行期间占用 CPU；任务延时和通知等待则允许调度其他就绪任务，二者不能都笼统称为阻塞函数。",
+      "如果高优先级界面等低优先级 sensor 持有的互斥锁，内核可以通过优先级继承缓解中间优先级干扰，但持锁代码本身仍必须尽快完成。",
+      "关闭中断的临界区更严格：它影响中断响应，并可能推迟调度。因此不能把毫秒级总线事务或串口发送包进这种保护区。",
+      "判断优化价值时，分别标出 CPU 占用、任务阻塞和关中断时长。只有这样，降低一个函数耗时才能对应到真正改善的系统指标。"
+    ],
+    "audio": "voice/neural-scene-08.wav",
+    "seconds": 32.3175,
+    "beats": [
+      0.35,
+      8.269,
+      15.493,
+      23.434
+    ],
+    "captions": [
+      {
+        "text": "同样等两毫秒，影响可能完全不同。",
+        "startMs": 420,
+        "endMs": 3068,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "软件总线的位延时占着 CPU，任务延时",
+        "startMs": 3506,
+        "endMs": 6844,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "则让其他任务运行。",
+        "startMs": 6872,
+        "endMs": 8149,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "高优先级界面等 sensor 的互斥",
+        "startMs": 8339,
+        "endMs": 10450,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "锁时，优先级继承可以缓解干扰，但持锁",
+        "startMs": 10401,
+        "endMs": 13761,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "工作还是要尽快完成。",
+        "startMs": 13701,
+        "endMs": 15373,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "关中断比互斥更严格，它会影响中断响应",
+        "startMs": 15563,
+        "endMs": 18945,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "和调度。",
+        "startMs": 18907,
+        "endMs": 19461,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "因此不能把整次总线事务或串口发送包进去。",
+        "startMs": 19899,
+        "endMs": 23314,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "分析耗时，先拆出 CPU 执行、任务",
+        "startMs": 23504,
+        "endMs": 26678,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "等待和关中断时间。",
+        "startMs": 26629,
+        "endMs": 28235,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "知道省掉哪部分，才能判断系统实际收益。",
+        "startMs": 28673,
+        "endMs": 31847,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 8,
+    "evidence": {
+      "scene": 8,
+      "file": "common/my_i2c.c",
+      "line": 46,
+      "sha256": "f48dcc597a2daa2eee9fbd8cdb388b00cdf66277eacbff491bff6abb4f0b99cb",
+      "excerpt": "static void my_i2c_delay(my_i2c_bus_t bus)\n{\n    volatile uint32_t n;\n    if (bus == MY_I2C_BUS_SENSOR)\n    {\n        n = MY_I2C_SENSOR_DELAY_LOOPS;"
+    },
+    "frames": 970,
+    "startFrame": 6545,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "内存预算决定刷新策略",
+    "chapter": "03 · 数据一致性与临界区",
+    "kind": "memory",
+    "nodes": [
+      "RTOS 堆 16 KiB",
+      "LVGL 池 44 KiB",
+      "双缓冲 26,880 B",
+      "链接占用 / 运行峰值"
+    ],
+    "formula": "全屏 134,400 B > SRAM 131,072 B；局部缓冲不是装饰",
+    "source": "Middlewares/FreeRTOS/include/FreeRTOSConfig.h|#define configTOTAL_HEAP_SIZE",
+    "lines": [
+      "全屏十六位像素需要十三万四千四百字节，已经超过这颗芯片的一百二十八千字节 SRAM，完整帧缓冲在当前约束下就不成立。",
+      "工程选择两块十分之一屏缓冲，占二万六千八百八十字节。它们是静态区，不属于十六千字节的内核堆，也不属于 LVGL 内存池。",
+      "增加缓冲可以减少分块开销，但会挤压对象池、栈和其他静态状态。只盯着一个堆的空闲值，很容易错误判断还有多少可用空间。",
+      "正确证据来自链接映射与运行峰值的组合。栈水位是历史扫描估计，LVGL 快照峰值可能漏掉短暂峰值，两者都需要覆盖复杂页面切换。"
+    ],
+    "audio": "voice/neural-scene-09.wav",
+    "seconds": 32.196875,
+    "beats": [
+      0.35,
+      7.398,
+      15.329,
+      23.489
+    ],
+    "captions": [
+      {
+        "text": "全屏十六位像素要十三万四千四百字节，",
+        "startMs": 420,
+        "endMs": 3616,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "已经超过这颗芯片的 SRAM，所以必须",
+        "startMs": 3874,
+        "endMs": 6258,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "采用局部刷新。",
+        "startMs": 6209,
+        "endMs": 7278,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "两块十分之一屏缓冲，共占二万六千八百八十",
+        "startMs": 7468,
+        "endMs": 10982,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "字节。",
+        "startMs": 10933,
+        "endMs": 11355,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "它们在静态区，不属于内核堆或 LVGL ",
+        "startMs": 11793,
+        "endMs": 14858,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "池。",
+        "startMs": 14798,
+        "endMs": 15208,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "增大缓冲能减少分块，却会挤压对象池、",
+        "startMs": 15398,
+        "endMs": 18847,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "栈和其他状态。",
+        "startMs": 18962,
+        "endMs": 20294,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "只盯着一个堆的剩余量，判断不完整。",
+        "startMs": 20732,
+        "endMs": 23369,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "内存要结合链接结果和运行峰值看。",
+        "startMs": 23559,
+        "endMs": 26240,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "栈水位是估计，快照也可能漏掉瞬时峰值，",
+        "startMs": 26667,
+        "endMs": 30082,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "复杂切页必须覆盖。",
+        "startMs": 30329,
+        "endMs": 31727,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 9,
+    "evidence": {
+      "scene": 9,
+      "file": "Middlewares/FreeRTOS/include/FreeRTOSConfig.h",
+      "line": 50,
+      "sha256": "56004b000b912130a2d0738bc91d3b78bcb277488e3e3e7e244b853b5202af87",
+      "excerpt": "#define configTOTAL_HEAP_SIZE\t\t( ( size_t ) ( 16 * 1024 ) )\t/* 10K 偏紧: lvgl任务4K栈+idle+mutex≈6.5K, 留余量防建任务失败 */\n#define configMAX_TASK_NAME_LEN\t\t( 16 )\n#define configUSE_TRACE_FACILITY\t1\n\n#include \"app_diag.h\"\n#define configGENERATE_RUN_TIME_STATS 1"
+    },
+    "frames": 966,
+    "startFrame": 7515,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "快照一致，不等于同时采样",
+    "chapter": "03 · 数据一致性与临界区",
+    "kind": "ownership",
+    "nodes": [
+      "事务与计算在锁外",
+      "整组状态锁内发布",
+      "消费者锁内复制",
+      "格式化与发送在锁外"
+    ],
+    "formula": "一致性解决“半更新”；时间戳解决“有多旧”",
+    "source": "application/app_imu.c|uint8_t App_IMU_GetSnapshot",
+    "lines": [
+      "IMU 在锁外读取和融合，最后把原始值、姿态与磁状态放进同一个保护区发布，消费者再锁内复制整组快照。",
+      "这保证消费者不会读到结构体更新到一半的状态，但不会让磁力计和 MPU 在同一时刻完成内部转换，它们仍存在采样时间差。",
+      "同样，诊断逐个复制不同传感器状态，只能保证每份快照内部一致，不能把这一组记录解释成整个系统同时采样的瞬间。",
+      "数据链路需要同时携带有效性和年龄。扩大锁范围去追求表面上的同时性，通常只会增加等待，并不能让外部器件的转换真正同步。"
+    ],
+    "audio": "voice/neural-scene-10.wav",
+    "seconds": 30.267083333333332,
+    "beats": [
+      0.35,
+      8.028,
+      15.86,
+      22.414
+    ],
+    "captions": [
+      {
+        "text": "IMU 在锁外读取和融合，再锁内发布",
+        "startMs": 420,
+        "endMs": 3441,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "整组数据。",
+        "startMs": 3402,
+        "endMs": 4076,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "消费者也锁内复制，避免读到只更新一半",
+        "startMs": 4515,
+        "endMs": 7393,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "的结构体。",
+        "startMs": 7333,
+        "endMs": 7908,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "但快照一致，不代表器件同时采样。",
+        "startMs": 8098,
+        "endMs": 11031,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "磁力计和 MPU 的内部转换仍有时间差，",
+        "startMs": 11469,
+        "endMs": 14226,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "加锁改变不了这一点。",
+        "startMs": 14408,
+        "endMs": 15740,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "诊断逐个复制传感器状态，也是每份内部",
+        "startMs": 15930,
+        "endMs": 18895,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一致，不能解释成整组数据在同一瞬间产生。",
+        "startMs": 18846,
+        "endMs": 22294,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "所以还要携带有效性和年龄。",
+        "startMs": 22484,
+        "endMs": 25012,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "扩大锁范围，只会延长等待，并不能让外部",
+        "startMs": 25450,
+        "endMs": 28723,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "器件真正同步。",
+        "startMs": 28673,
+        "endMs": 29797,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 10,
+    "evidence": {
+      "scene": 10,
+      "file": "application/app_imu.c",
+      "line": 462,
+      "sha256": "54e15580588e8ee0bc5e1f824416c93730e7bd6e24b4302446880b6939094fc6",
+      "excerpt": "uint8_t App_IMU_GetSnapshot(app_imu_struct *imu)\n{\n    uint8_t online;\n\n    if (imu == NULL)\n    {"
+    },
+    "frames": 909,
+    "startFrame": 8481,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "软件总线的成本怎么拆",
+    "chapter": "03 · 数据一致性与临界区",
+    "kind": "cost",
+    "nodes": [
+      "地址 / 寄存器开销",
+      "数据位与 ACK",
+      "GPIO 方向切换",
+      "任务抢占拉长事务"
+    ],
+    "formula": "Ttransaction = Twire + Tgpio + Tsoftware + Tpreemption",
+    "source": "common/my_i2c.c|#define MY_I2C_SENSOR_DELAY_LOOPS",
+    "lines": [
+      "软件总线的耗时不仅取决于有效数据字节，还包含地址阶段、重复起始、应答、方向切换和每一位的延时循环。",
+      "当前 SENSOR 位延时循环是其他总线的两倍。它增加线路稳定余量，也直接增加 CPU 忙等成本，不能同时把它宣传为吞吐优化。",
+      "方向缓存省掉同方向重复配置，减少的是 GPIO 初始化开销；短临界区保护读改写，减少的是竞争风险，二者目标不同。",
+      "性能测量应区分连续事务线时和驱动墙钟耗时。后者包含抢占；只用理想频率乘字节数，会低估真实任务占用与读取间隔。"
+    ],
+    "audio": "voice/neural-scene-11.wav",
+    "seconds": 30.666541666666667,
+    "beats": [
+      0.35,
+      8.576,
+      15.333,
+      23.022
+    ],
+    "captions": [
+      {
+        "text": "软件总线的成本，不止有效字节。",
+        "startMs": 420,
+        "endMs": 2991,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "地址、应答、重复起始、方向切换和位延时，",
+        "startMs": 3429,
+        "endMs": 7415,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "全要算进去。",
+        "startMs": 7519,
+        "endMs": 8456,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "SENSOR 的位延时循环是其他总线",
+        "startMs": 8646,
+        "endMs": 10812,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "的两倍。",
+        "startMs": 10752,
+        "endMs": 11261,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "它留了线路稳定余量，同时也增加 CPU ",
+        "startMs": 11688,
+        "endMs": 14566,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "忙等成本。",
+        "startMs": 14517,
+        "endMs": 15213,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "方向缓存省的是重复 GPIO 配置；",
+        "startMs": 15403,
+        "endMs": 17974,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "短临界区防的是读改写竞争。",
+        "startMs": 18221,
+        "endMs": 20365,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "两项措施解决的不是同一个问题。",
+        "startMs": 20803,
+        "endMs": 22902,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "测量还要区分线上的时间和驱动墙钟时间。",
+        "startMs": 23092,
+        "endMs": 26003,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "后者包含抢占，用理想频率乘字节数会低估",
+        "startMs": 26441,
+        "endMs": 29955,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "它。",
+        "startMs": 29895,
+        "endMs": 30197,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 11,
+    "evidence": {
+      "scene": 11,
+      "file": "common/my_i2c.c",
+      "line": 21,
+      "sha256": "f48dcc597a2daa2eee9fbd8cdb388b00cdf66277eacbff491bff6abb4f0b99cb",
+      "excerpt": "#define MY_I2C_SENSOR_DELAY_LOOPS 160U\n\n/* ================================================================ 总线表 */\ntypedef struct\n{\n    GPIO_TypeDef *scl_port;"
+    },
+    "frames": 920,
+    "startFrame": 9390,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "合并事务的收益与边界",
+    "chapter": "03 · 数据一致性与临界区",
+    "kind": "pipeline",
+    "nodes": [
+      "减少重复寻址",
+      "保留器件协议",
+      "同次读取成组",
+      "不虚构采样原子性"
+    ],
+    "formula": "事务合并减少固定开销；数据一致性仍由器件语义决定",
+    "source": "interface/spl006.c|uint16_t spl006_read_sample",
+    "lines": [
+      "MPU 的十五字节突发读取，把状态、加速度、温度和角速度合成一次事务，减少重复寻址，也顺带释放中断锁存。",
+      "SPL006 则先确认压力和温度都就绪，再连续读取六个原始数据字节，不提前消耗其中一路的就绪状态。",
+      "这种优化必须遵守器件的自动递增、状态清除和数据锁存规则。EM7028 当前采用高低高读取校验，不能仅为了少一次事务就直接删掉。",
+      "验收不仅比较耗时，还要故障注入未就绪、读取中数据变化和中途失败，确认优化后仍然只发布完整且语义有效的一组结果。"
+    ],
+    "audio": "voice/neural-scene-12.wav",
+    "seconds": 30.031916666666667,
+    "beats": [
+      0.35,
+      7.826,
+      14.161,
+      21.73
+    ],
+    "captions": [
+      {
+        "text": "MPU 把状态和六轴数据放进一次十五",
+        "startMs": 420,
+        "endMs": 3364,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "字节读取，既减少寻址，也在同次事务里",
+        "startMs": 3315,
+        "endMs": 6467,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "释放中断锁存。",
+        "startMs": 6506,
+        "endMs": 7706,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "气压则等压力和温度都就绪，再连续读六",
+        "startMs": 7896,
+        "endMs": 11059,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "字节，避免提前消耗其中一路的就绪标志。",
+        "startMs": 10999,
+        "endMs": 14041,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "合并之前必须确认自动递增和锁存规则。",
+        "startMs": 14231,
+        "endMs": 17405,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "心率的高低高校验，就不能为了少一次读取",
+        "startMs": 17844,
+        "endMs": 20733,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "随意删除。",
+        "startMs": 20771,
+        "endMs": 21610,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "验证时既比耗时，也注入未就绪和中途失败。",
+        "startMs": 21800,
+        "endMs": 25533,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "减少事务以后，完整结果和错误语义都要",
+        "startMs": 25971,
+        "endMs": 29222,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "保住。",
+        "startMs": 29173,
+        "endMs": 29562,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 12,
+    "evidence": {
+      "scene": 12,
+      "file": "interface/spl006.c",
+      "line": 230,
+      "sha256": "ba75199b3888dde08e10615e18391c1d3716dfe2f3d55afa9c487a1cddc2d632",
+      "excerpt": "uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw)\n{\n    uint8_t status, data[6];\n    uint16_t result = 0;\n    int32_t pressure, temperature;\n    if (spl006_read_reg(SPL06_MEAS_CFG, &status) != 0)"
+    },
+    "frames": 901,
+    "startFrame": 10310,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "临界区要包住真正的竞争",
+    "chapter": "03 · 数据一致性与临界区",
+    "kind": "critical",
+    "nodes": [
+      "读取 MODER 旧值",
+      "另一任务改 PB13",
+      "旧值覆盖新配置",
+      "保存 / 恢复 PRIMASK"
+    ],
+    "formula": "保护 GPIO 配置 RMW；不保护整段 I²C 事务",
+    "source": "common/my_i2c.c|uint32_t primask = __get_PRIMASK();",
+    "lines": [
+      "GPIOB 的方向配置是读改写。触摸修改 PB4 期间被抢占，sensor 修改 PB13，然后触摸把旧副本写回，就可能覆盖刚完成的 PB13 配置。",
+      "这与两条总线有没有共用 SDA 无关，竞争发生在同一个端口配置寄存器。只给每条总线加自己的锁，也没有保护这个共享点。",
+      "当前实现保存 PRIMASK，关闭中断完成短配置，再恢复原值。恢复而不是无条件开中断，才能保留调用者原先的屏蔽状态。",
+      "边界必须足够小：只围住 GPIO 配置和方向缓存更新。把整个寄存器读写事务都关中断，会把微小共享点放大成系统延迟源。"
+    ],
+    "audio": "voice/neural-scene-13.wav",
+    "seconds": 32.12629166666667,
+    "beats": [
+      0.35,
+      8.528,
+      16.721,
+      23.769
+    ],
+    "captions": [
+      {
+        "text": "看这个竞争顺序：触摸读出 GPIOB ",
+        "startMs": 420,
+        "endMs": 3199,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "旧值，中途被抢占，sensor 改了 ",
+        "startMs": 3139,
+        "endMs": 5853,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "PB13，触摸回来又写入旧值。",
+        "startMs": 5880,
+        "endMs": 8408,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "结果是 PB13 的新配置被覆盖了。",
+        "startMs": 8598,
+        "endMs": 11443,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "竞争点在端口寄存器，即使给两条总线分别",
+        "startMs": 11870,
+        "endMs": 15132,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "加锁，也保护不到这里。",
+        "startMs": 15083,
+        "endMs": 16601,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "现在的做法是保存 PRIMASK，关中",
+        "startMs": 16791,
+        "endMs": 19691,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "断完成短配置，再恢复原值，保留调用者",
+        "startMs": 19642,
+        "endMs": 22586,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "原先的屏蔽状态。",
+        "startMs": 22548,
+        "endMs": 23649,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "临界区只包住配置读改写和方向缓存更新。",
+        "startMs": 23839,
+        "endMs": 27397,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "别把整次通信也塞进去，否则小竞争会变成",
+        "startMs": 27835,
+        "endMs": 30998,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "长延迟。",
+        "startMs": 30949,
+        "endMs": 31656,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 13,
+    "evidence": {
+      "scene": 13,
+      "file": "common/my_i2c.c",
+      "line": 105,
+      "sha256": "f48dcc597a2daa2eee9fbd8cdb388b00cdf66277eacbff491bff6abb4f0b99cb",
+      "excerpt": "    uint32_t primask = __get_PRIMASK();\n    uint8_t direction = as_input + 1U;\n    if (s_sda_direction[bus] == direction)\n    {\n        return;\n    }"
+    },
+    "frames": 964,
+    "startFrame": 11211,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "读成功不一定是新样本",
+    "chapter": "04 · 采样时间与融合约束",
+    "kind": "register",
+    "nodes": [
+      "INT_STATUS 同次读回",
+      "锁存释放",
+      "总线成功返回 0",
+      "DATA_RDY 未作为返回门控"
+    ],
+    "formula": "读取成功率、数据更新率与中断边沿计数不能互相替代",
+    "source": "interface/mpu6050.c|mpu6050_int_status = packet[0];",
+    "lines": [
+      "当前 MPU 读取函数把中断状态保存下来，但只要十五字节总线事务成功，就返回成功，没有用 DATA READY 位再限制这个返回值。",
+      "因此诊断里的读取成功，首先证明总线事务完成，不自动证明拿到了新的内部转换结果。一百赫兹服务也不等于严格对齐一百赫兹采样。",
+      "中断采用锁存，直到任务读取状态才释放。边沿计数反映这条锁存与释放链路，不能直接当作所有内部转换次数。",
+      "评估数据新鲜度时，应联合看状态位、读取间隔和任务时序。动画展示的是现有语义，不会把轮询架构包装成精确的数据就绪驱动采集。"
+    ],
+    "audio": "voice/neural-scene-14.wav",
+    "seconds": 33.200833333333335,
+    "beats": [
+      0.35,
+      7.782,
+      16.261,
+      24.958
+    ],
+    "captions": [
+      {
+        "text": "MPU 会保存读回的中断状态，但只要",
+        "startMs": 420,
+        "endMs": 3188,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "十五字节事务成功就返回成功，没有再用",
+        "startMs": 3150,
+        "endMs": 6094,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "数据就绪位限制返回。",
+        "startMs": 6056,
+        "endMs": 7662,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "所以读取成功先证明通信完成，不保证每次",
+        "startMs": 7852,
+        "endMs": 11541,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "拿到新转换。",
+        "startMs": 11492,
+        "endMs": 12364,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一百赫兹服务，也不等于与器件输出精确",
+        "startMs": 12791,
+        "endMs": 15713,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "对齐。",
+        "startMs": 15664,
+        "endMs": 16140,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "数据就绪采用锁存，任务读状态后才释放。",
+        "startMs": 16330,
+        "endMs": 19833,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "因此中断边沿数，也不能直接当成所有内部",
+        "startMs": 20261,
+        "endMs": 24158,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "转换次数。",
+        "startMs": 24120,
+        "endMs": 24838,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "要判断新鲜度，就把状态位、读取间隔和",
+        "startMs": 25028,
+        "endMs": 28454,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "任务时序放在一起看，别把周期轮询当成",
+        "startMs": 28405,
+        "endMs": 31766,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "精确触发采样。",
+        "startMs": 31728,
+        "endMs": 32731,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 14,
+    "evidence": {
+      "scene": 14,
+      "file": "interface/mpu6050.c",
+      "line": 493,
+      "sha256": "818321a2793bdc80d2ec4bc527545ea910477e36d8b471c0d88754a4c2a3d836",
+      "excerpt": "    mpu6050_int_status = packet[0];\n    data->Accel.Accel_x = (int16_t)(((buf[0] << 8) | buf[1]) - offset_accel_x);\n    data->Accel.Accel_y = (int16_t)(((buf[2] << 8) | buf[3]) - offset_accel_y);\n    data->Accel.Accel_z = (int16_t)(((buf[4] << 8) | buf[5]) - offset_accel_z);\n    data->Gyro.Gyro_x = (int16_t)(((buf[8] << 8) | buf[9]) - offset_gyro_x);\n    data->Gyro.Gyro_y = (int16_t)(((buf[10] << 8) | buf[11]) - offset_gyro_y);"
+    },
+    "frames": 997,
+    "startFrame": 12175,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "dt 的语义会进入姿态误差",
+    "chapter": "04 · 采样时间与融合约束",
+    "kind": "age",
+    "nodes": [
+      "服务入口取 now",
+      "读取前更新 s_last",
+      "成功才执行融合",
+      "dt 限幅 2–50 ms"
+    ],
+    "formula": "服务间隔 ≠ 成功样本间隔 ≠ 器件转换间隔",
+    "source": "application/app_imu.c|s_last = now;",
+    "lines": [
+      "当前 dt 在服务入口根据任务节拍计算，并且在读取之前更新上次时间。只有本轮 MPU 读取成功，才执行后面的融合。",
+      "这意味着发生连续读取失败后，下一次成功融合使用的是最近服务间隔，而不是自动累计整个成功样本间隔，这一点可以直接从更新顺序确认。",
+      "另外，二到五十毫秒的限幅能限制异常大步长，却也意味着超出上限的真实时间不会完整进入本次积分，稳定性与时间保真存在取舍。",
+      "这里不据此修改算法或宣判故障，而是建立验证问题：在已知转动与缺采样条件下，比较角度误差、失败间隔与 dt，才能评估影响。"
+    ],
+    "audio": "voice/neural-scene-15.wav",
+    "seconds": 29.538541666666667,
+    "beats": [
+      0.35,
+      7.48,
+      14.353,
+      20.809
+    ],
+    "captions": [
+      {
+        "text": "dt 在服务入口计算，上次时间也在读取",
+        "startMs": 420,
+        "endMs": 3528,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "前更新。",
+        "startMs": 3468,
+        "endMs": 4044,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "而融合只在本轮读取成功之后执行。",
+        "startMs": 4482,
+        "endMs": 7360,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "于是连续读失败后，下次成功融合用的还是",
+        "startMs": 7550,
+        "endMs": 10877,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "最近服务间隔，并不会自动累计整个断采样",
+        "startMs": 10828,
+        "endMs": 13816,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "时间。",
+        "startMs": 13767,
+        "endMs": 14233,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "二到五十毫秒限幅能控制异常步长，但超过",
+        "startMs": 14423,
+        "endMs": 17871,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "上限的真实时间，也不会完整进入这次积分。",
+        "startMs": 17822,
+        "endMs": 20689,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "这不直接等于算法有问题。",
+        "startMs": 20879,
+        "endMs": 22814,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "要用已知转动和缺采样实验，比较角度误差、",
+        "startMs": 23241,
+        "endMs": 26755,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "失败间隔与 dt 才能判断。",
+        "startMs": 26936,
+        "endMs": 29069,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 15,
+    "evidence": {
+      "scene": 15,
+      "file": "application/app_imu.c",
+      "line": 335,
+      "sha256": "54e15580588e8ee0bc5e1f824416c93730e7bd6e24b4302446880b6939094fc6",
+      "excerpt": "    s_last = now;\n\n    /* 1. 采样：同一sensor任务先取磁参考，再取MPU帧，避免总线竞争。 */\n    mag_online = mag_service(now, mag_body);\n    field_squared = mag_body[0] * mag_body[0] + mag_body[1] * mag_body[1] + mag_body[2] * mag_body[2];\n    /* 15 字节突发读同时释放 MPU INT 锁存，无 ISR 总线竞争。 */"
+    },
+    "frames": 887,
+    "startFrame": 13172,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "校准判定必须可解释",
+    "chapter": "04 · 采样时间与融合约束",
+    "kind": "register",
+    "nodes": [
+      "Δa < 0.0183 g",
+      "水平容差 0.15 g",
+      "100 稳定 + 100 平均",
+      "阶段超时 / 拒绝位图"
+    ],
+    "formula": "“校准失败”应拆成读失败、姿态不符、变化过大或超时",
+    "source": "interface/mpu6050.c|static uint8_t mpu6050_cal_still",
+    "lines": [
+      "当前校准静止判定检查三轴加速度变化，以及水平放置时相对重力基准的偏差。变化门限约零点零一八三倍重力，水平容差零点一五倍。",
+      "诊断保存每个轴的变化、拒绝原因位图、累计拒绝和最大连续稳定帧数，因此可以区分放置不平、振动和读取失败。",
+      "状态机用真实时间限制等待与平均阶段，不允许通过极快重复调用凑足帧数。成功前只积累候选，完成后才提交完整偏移。",
+      "这比反复猜测延时参数更有价值。先看是哪一条判据持续拒绝，再核对量程、安装方向与噪声，不把所有失败都归因于任务没跑够快。"
+    ],
+    "audio": "voice/neural-scene-16.wav",
+    "seconds": 31.156541666666666,
+    "beats": [
+      0.35,
+      6.894,
+      14.83,
+      23.199
+    ],
+    "captions": [
+      {
+        "text": "校准检查加速度变化和水平偏差，门限分别",
+        "startMs": 420,
+        "endMs": 3934,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "约零点零一八三倍重力，以及零点一五倍",
+        "startMs": 3885,
+        "endMs": 6445,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "重力。",
+        "startMs": 6396,
+        "endMs": 6774,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "诊断还记录每轴变化、拒绝位图和最大连续",
+        "startMs": 6964,
+        "endMs": 11158,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "稳定帧，因此能区分放不平、振动和读失败。",
+        "startMs": 11109,
+        "endMs": 14710,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "阶段超时按真实时间算，不能快速重复调用",
+        "startMs": 14900,
+        "endMs": 18798,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "凑帧。",
+        "startMs": 18749,
+        "endMs": 19204,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "成功前积累候选，完成后才提交完整偏移。",
+        "startMs": 19642,
+        "endMs": 23079,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "遇到失败，先查哪条判据持续拒绝，再核对",
+        "startMs": 23269,
+        "endMs": 26926,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "量程、方向和噪声，比反复猜延时参数有效。",
+        "startMs": 26887,
+        "endMs": 30687,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 16,
+    "evidence": {
+      "scene": 16,
+      "file": "interface/mpu6050.c",
+      "line": 224,
+      "sha256": "818321a2793bdc80d2ec4bc527545ea910477e36d8b471c0d88754a4c2a3d836",
+      "excerpt": "static uint8_t mpu6050_cal_still(const Accel_struct *current)\n{\n    uint32_t reason = 0;\n    s_cal.diag[MPU_CAL_DIAG_AX] = (uint32_t)(int32_t)current->Accel_x;\n    s_cal.diag[MPU_CAL_DIAG_AY] = (uint32_t)(int32_t)current->Accel_y;\n    s_cal.diag[MPU_CAL_DIAG_AZ] = (uint32_t)(int32_t)current->Accel_z;"
+    },
+    "frames": 935,
+    "startFrame": 14059,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "融合门控与反馈状态",
+    "chapter": "04 · 采样时间与融合约束",
+    "kind": "quaternion",
+    "nodes": [
+      "0.75–1.25 g 门控",
+      "比例 0.8 / 积分 0.03",
+      "修正角速度再积分",
+      "归一化与 asin 限幅"
+    ],
+    "formula": "门控当前误差，不等于清除已累计的积分反馈",
+    "source": "common/common_imu.c|uint8_t Common_IMU_GetEulerAngleWithMag",
+    "lines": [
+      "加速度模长只有在零点七五到一点二五倍重力之间才参与方向纠偏，用于排除明显线性加速度，但这不是对所有运动干扰的完整分类。",
+      "门控关闭时，本轮加速度误差为零，之前积累的积分反馈仍然存在。理解这个状态延续，才能解释冲击结束后姿态恢复的过程。",
+      "代码把比例、积分和磁航向反馈加入角速度，再统一递推四元数，最后归一化。欧拉角输出还对反正弦输入做范围限制。",
+      "分析收敛应分别观察门控占空比、积分状态与输出误差。单纯提高反馈增益，可能只是把动态误差更快灌进姿态，而非提高估计质量。"
+    ],
+    "audio": "voice/neural-scene-17.wav",
+    "seconds": 31.813041666666667,
+    "beats": [
+      0.35,
+      7.464,
+      14.616,
+      23.763
+    ],
+    "captions": [
+      {
+        "text": "加速度模长落在零点七五到一点二五倍重力",
+        "startMs": 420,
+        "endMs": 3177,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "之间才纠偏，这能排除明显冲击，但不能",
+        "startMs": 3128,
+        "endMs": 6193,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "识别所有运动干扰。",
+        "startMs": 6144,
+        "endMs": 7344,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "门控关闭，本轮误差变成零，之前累计的",
+        "startMs": 7534,
+        "endMs": 10883,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "积分反馈却还在。",
+        "startMs": 10834,
+        "endMs": 11892,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "它会影响冲击之后的恢复过程。",
+        "startMs": 12320,
+        "endMs": 14496,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "比例、积分和磁反馈先加入角速度，再统一",
+        "startMs": 14686,
+        "endMs": 18627,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "递推四元数。",
+        "startMs": 18578,
+        "endMs": 19461,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "之后归一化，输出角度时再限制反正弦输入。",
+        "startMs": 19899,
+        "endMs": 23643,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "看收敛，应该同时看门控、积分状态和角度",
+        "startMs": 23833,
+        "endMs": 27446,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "误差。",
+        "startMs": 27397,
+        "endMs": 27851,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "提高增益，也可能只是更快把动态干扰灌",
+        "startMs": 28290,
+        "endMs": 31047,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "进去。",
+        "startMs": 30987,
+        "endMs": 31343,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 17,
+    "evidence": {
+      "scene": 17,
+      "file": "common/common_imu.c",
+      "line": 24,
+      "sha256": "a34bc264c2fd69f9fb7ab4783acd3813634d4d1f56011951415d4b35d495ddda",
+      "excerpt": "uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const float mag_uT[3], Euler_struct *euler, float dt)\n{\n    /* 三轴数组统一按机体X/Y/Z排列；四元数q0为标量，q1/q2/q3为向量。 */\n    float q0 = s_q.q0, q1 = s_q.q1, q2 = s_q.q2, q3 = s_q.q3;\n    float gravity[3];     /* 四元数预测的单位重力向量 */\n    float accel[3];       /* 加速度，先为LSB，再归一化 */"
+    },
+    "frames": 955,
+    "startFrame": 14994,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "磁参考是带年龄的约束",
+    "chapter": "04 · 采样时间与融合约束",
+    "kind": "quaternion",
+    "nodes": [
+      "75 Hz 输出 / 10 ms 轮询",
+      "50 ms 最大年龄",
+      "5–100 μT 总场门控",
+      "水平场 > 5 μT"
+    ],
+    "formula": "mₕ = m − (m · ĝ)ĝ；只沿重力轴施加航向反馈",
+    "source": "common/common_imu.c|horizontal[i] = mag_uT[i] - dot * gravity[i];",
+    "lines": [
+      "磁力计输出七十五赫兹，任务每十毫秒轮询，两者不整齐同步。未就绪可以保留最近有效数据，但年龄超过五十毫秒就停止使用。",
+      "总场模长还要通过五到一百微特斯拉门控，校准期间同样暂停磁融合。进入公共算法后，水平投影还要大于五微特斯拉。",
+      "航向误差用正弦与余弦计算最短角差，再沿重力轴修正角速度，因此不会直接把完整磁倾角当作俯仰和横滚误差。",
+      "调试时要区分无数据、过期、磁场越界和水平分量不足。只显示一个磁力计在线标志，无法说明航向当前到底有没有受到约束。"
+    ],
+    "audio": "voice/neural-scene-18.wav",
+    "seconds": 30.234166666666667,
+    "beats": [
+      0.35,
+      8.05,
+      14.346,
+      21.559
+    ],
+    "captions": [
+      {
+        "text": "磁力计七十五赫兹输出，十毫秒轮询，两",
+        "startMs": 420,
+        "endMs": 3813,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "者并不同步。",
+        "startMs": 3753,
+        "endMs": 4526,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "旧有效数据可以暂用，超过五十毫秒就停用。",
+        "startMs": 4964,
+        "endMs": 7930,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "总场还要通过五到一百微特斯拉门控。",
+        "startMs": 8120,
+        "endMs": 10592,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "进入融合后，水平分量必须大于五微特斯拉。",
+        "startMs": 11020,
+        "endMs": 14226,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "航向用最短角差修正，并且只沿重力轴施加",
+        "startMs": 14416,
+        "endMs": 17569,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "反馈，避免把完整磁倾角直接拉进俯仰和",
+        "startMs": 17519,
+        "endMs": 21011,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "横滚。",
+        "startMs": 20962,
+        "endMs": 21439,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "调试时分清无数据、过期、越界和水平场",
+        "startMs": 21629,
+        "endMs": 25329,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "过弱。",
+        "startMs": 25280,
+        "endMs": 25691,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一个在线标志，说不清当前航向到底有没有",
+        "startMs": 26119,
+        "endMs": 29238,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "磁约束。",
+        "startMs": 29200,
+        "endMs": 29764,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 18,
+    "evidence": {
+      "scene": 18,
+      "file": "common/common_imu.c",
+      "line": 83,
+      "sha256": "a34bc264c2fd69f9fb7ab4783acd3813634d4d1f56011951415d4b35d495ddda",
+      "excerpt": "            horizontal[i] = mag_uT[i] - dot * gravity[i];\n        }\n        norm = sqrtf(horizontal[0] * horizontal[0] + horizontal[1] * horizontal[1] + horizontal[2] * horizontal[2]);\n        if (norm > 5.0f) /* 水平磁场大于5μT时才修正航向 */\n        {\n            for (i = 0; i < 3; ++i)"
+    },
+    "frames": 908,
+    "startFrame": 15949,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "校准模型决定可修正的误差",
+    "chapter": "04 · 采样时间与融合约束",
+    "kind": "quaternion",
+    "nodes": [
+      "芯片坐标去偏置",
+      "对角比例校正",
+      "再映射机体轴",
+      "覆盖不足拒绝提交"
+    ],
+    "formula": "m_body = axis_map(diag(scale) · (m_sensor − offset))",
+    "source": "application/app_imu.c|static void mag_cal_command",
+    "lines": [
+      "当前磁校准先在芯片坐标中去偏置和按轴缩放，然后再映射到机体坐标。这个顺序把器件校准参数和安装映射分开。",
+      "最大最小值方法只估计偏置与对角比例，不包含交叉轴项。因此能够改善轴向椭球，却不能被称为完整的三维软铁矩阵校正。",
+      "提交条件要求足够样本和每轴跨度。样本数量很多但姿态覆盖很窄，仍然可能无法辨识参数，所以覆盖范围比采样总数更关键。",
+      "如果环境磁场在校准期间发生变化，最大最小值也会包含环境变化。验证应比较不同姿态下的模长和航向一致性，而不只看保存成功。"
+    ],
+    "audio": "voice/neural-scene-19.wav",
+    "seconds": 30.887291666666666,
+    "beats": [
+      0.35,
+      7.76,
+      15.324,
+      22.914
+    ],
+    "captions": [
+      {
+        "text": "磁校准先在芯片坐标下去偏置、按轴缩放，",
+        "startMs": 420,
+        "endMs": 4000,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "之后再映射到机体坐标，把校准与安装方向",
+        "startMs": 4236,
+        "endMs": 7245,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "分开。",
+        "startMs": 7196,
+        "endMs": 7640,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "最大最小值法只估计偏置和对角比例，不",
+        "startMs": 7830,
+        "endMs": 11530,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "含交叉轴项，因此不能称为完整软铁矩阵",
+        "startMs": 11470,
+        "endMs": 14853,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "校正。",
+        "startMs": 14804,
+        "endMs": 15204,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "样本够多，还得每轴跨度够大。",
+        "startMs": 15394,
+        "endMs": 17647,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "只在一个方向反复晃动，采得再多，也未必",
+        "startMs": 18074,
+        "endMs": 21303,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "能辨识出完整参数。",
+        "startMs": 21254,
+        "endMs": 22794,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "环境变化也会进入最大最小值。",
+        "startMs": 22984,
+        "endMs": 25456,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "验证应该比较不同姿态下的模长与航向，",
+        "startMs": 25884,
+        "endMs": 28455,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "不能只看保存是否成功。",
+        "startMs": 28745,
+        "endMs": 30417,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 19,
+    "evidence": {
+      "scene": 19,
+      "file": "application/app_imu.c",
+      "line": 154,
+      "sha256": "54e15580588e8ee0bc5e1f824416c93730e7bd6e24b4302446880b6939094fc6",
+      "excerpt": "static void mag_cal_command(uint8_t command)\n{\n    uint8_t i;\n    float radius[3], average;\n\n    if (command == APP_MAG_CMD_START) /* 保留上次已生效的校准系数 */"
+    },
+    "frames": 927,
+    "startFrame": 16857,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "持久化的有效性是多重条件",
+    "chapter": "05 · 持久化提交语义",
+    "kind": "memory",
+    "nodes": [
+      "MPU1 格式标识",
+      "量程标记",
+      "CRC32 完整性",
+      "序号判新 / 回绕"
+    ],
+    "formula": "记录可读 ≠ 校准可恢复；量程属于数据语义",
+    "source": "application/app_imu_store.c|#define IMU_STORE_MAGIC",
+    "lines": [
+      "恢复校准不只看 EEPROM 有没有字节。记录必须同时满足格式标识、当前量程和 CRC 校验，才能把六轴偏移解释为有效数据。",
+      "量程标记尤其重要：同样的原始计数偏移，在不同灵敏度下对应不同物理量。内容完整但量程不符，仍然不能恢复。",
+      "两个副本都有效时，按无符号序号差选择较新记录，以处理正常序号回绕。选新逻辑与校验逻辑分别解决版本顺序和内容完整性。",
+      "状态五表示恢复已保存偏移，而非本次完成静止校准。运行诊断应保留这个来源信息，否则很难解释为什么这次启动没有校准帧。"
+    ],
+    "audio": "voice/neural-scene-20.wav",
+    "seconds": 31.6315,
+    "beats": [
+      0.35,
+      8.072,
+      15.706,
+      23.593
+    ],
+    "captions": [
+      {
+        "text": "恢复零偏要同时验证格式、量程和 CRC。",
+        "startMs": 420,
+        "endMs": 4022,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "EEPROM 里能读到字节，不等于这些",
+        "startMs": 4460,
+        "endMs": 6899,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "字节可以直接用。",
+        "startMs": 6850,
+        "endMs": 7952,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "量程尤其重要：同样的计数偏移，换了灵敏度",
+        "startMs": 8142,
+        "endMs": 11765,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "就对应不同物理量。",
+        "startMs": 11793,
+        "endMs": 13070,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "内容没坏，也可能语义不匹配。",
+        "startMs": 13509,
+        "endMs": 15586,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "两份都有效时，按无符号序号差选较新记录，",
+        "startMs": 15776,
+        "endMs": 19531,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "以兼容回绕。",
+        "startMs": 19745,
+        "endMs": 20683,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "序号和校验解决的是不同问题。",
+        "startMs": 21121,
+        "endMs": 23472,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "恢复状态五，表示用了保存记录，不是这",
+        "startMs": 23662,
+        "endMs": 26497,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "次又完成了静止校准。",
+        "startMs": 26437,
+        "endMs": 27922,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "来源信息保留下来，启动过程才好解释。",
+        "startMs": 28360,
+        "endMs": 31161,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 20,
+    "evidence": {
+      "scene": 20,
+      "file": "application/app_imu_store.c",
+      "line": 9,
+      "sha256": "511820e6f30bdfeb2abb7c7e3f98cb07804a0f280ae9c0045d08a3a0a0ee11f1",
+      "excerpt": "#define IMU_STORE_MAGIC        0x3155504DU /* 小端字符MPU1 */\n#define IMU_STORE_RECORD_BYTES 28U\n#define IMU_STORE_CRC_OFFSET   24U\n#define IMU_STORE_SLOT_BYTES   32U\n#define IMU_STORE_BASE         0x60U\n#define IMU_STORE_RANGE        ((uint32_t)MPU6050_ACCEL_RANGE << 8 | MPU6050_GYRO_RANGE)"
+    },
+    "frames": 949,
+    "startFrame": 17784,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "掉电一致性落在提交顺序",
+    "chapter": "05 · 持久化提交语义",
+    "kind": "memory",
+    "nodes": [
+      "先读两槽且成功",
+      "选择非最新槽",
+      "分页写入",
+      "回读比对 + 解码"
+    ],
+    "formula": "保存失败保留旧副本；RAM 校准成功与持久化成功分别报告",
+    "source": "application/app_imu_store.c|app_imu_store_result app_imu_store_save",
+    "lines": [
+      "保存前必须成功读取两个槽位，不能把通信错误误当成空白槽位。确认有效状态后，选择不是最新副本的另一槽写入。",
+      "二十八字节记录跨过十六字节页边界，所以驱动分段写，并用有界应答轮询等待内部写周期，避免页地址回卷覆盖。",
+      "写完后还会回读，逐字节比对并再次解码。这样即使写保护让总线看似完成，也不能只凭发送返回值报告保存成功。",
+      "双副本降低部分写入破坏当前有效记录的风险，但仍需断电注入验证。RAM 已校准而保存失败是独立状态，不应伪装成全部失败或全部成功。"
+    ],
+    "audio": "voice/neural-scene-21.wav",
+    "seconds": 30.979791666666667,
+    "beats": [
+      0.35,
+      8.467,
+      14.714,
+      22.425
+    ],
+    "captions": [
+      {
+        "text": "保存前先成功读两个槽，不能把通信错误",
+        "startMs": 420,
+        "endMs": 3726,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "当空白。",
+        "startMs": 3688,
+        "endMs": 4329,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "之后选非最新槽写入，保留上一份有效记录。",
+        "startMs": 4756,
+        "endMs": 8347,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "二十八字节记录会跨十六字节页，所以驱动",
+        "startMs": 8537,
+        "endMs": 11469,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "分段写，再用有界 ACK 轮询等待内部",
+        "startMs": 11431,
+        "endMs": 13958,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "写入结束。",
+        "startMs": 13909,
+        "endMs": 14594,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "写完还要回读，比对字节并重新解码。",
+        "startMs": 14784,
+        "endMs": 17805,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "这样写保护即使没让总线报错，也不能被",
+        "startMs": 18243,
+        "endMs": 21154,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "误报成保存成功。",
+        "startMs": 21105,
+        "endMs": 22305,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "双副本仍需断电实验验证。",
+        "startMs": 22495,
+        "endMs": 24694,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "RAM 校准成功而保存失败，要单独报告，",
+        "startMs": 25132,
+        "endMs": 28152,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "不能笼统说全成功或全失败。",
+        "startMs": 28366,
+        "endMs": 30510,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 21,
+    "evidence": {
+      "scene": 21,
+      "file": "application/app_imu_store.c",
+      "line": 161,
+      "sha256": "511820e6f30bdfeb2abb7c7e3f98cb07804a0f280ae9c0045d08a3a0a0ee11f1",
+      "excerpt": "app_imu_store_result app_imu_store_save(const mpu6050_offset_struct *offset)\n{\n    uint8_t record[2][IMU_STORE_RECORD_BYTES], verify[IMU_STORE_RECORD_BYTES], valid[2];\n    uint8_t i, latest, target;\n    uint32_t sequence = 1;\n    uint32_t started_ms = HAL_GetTick();"
+    },
+    "frames": 930,
+    "startFrame": 18733,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "跨寄存器读取也会撕裂",
+    "chapter": "06 · 信号与候选状态",
+    "kind": "register",
+    "nodes": [
+      "EM7028 高字节",
+      "再读低字节",
+      "重读高字节",
+      "变化则 NOT_READY"
+    ],
+    "formula": "高—低—高检查抑制跨更新拼接；不是硬件同步采样证明",
+    "source": "interface/em7028.c|if (high != high_check)",
+    "lines": [
+      "EM7028 当前没有直接把两次独立寄存器读取当作天然一致。它先读高字节，再读低字节，最后重新读取高字节。",
+      "如果两次高字节不同，就返回未就绪，拒绝把跨更新拼出来的整数送进算法。这样把数据变化与总线错误区分开。",
+      "每次开始测量还重新确认器件标识和配置，而不是永远信任开机时的 ready。失败信息先保存，再执行关闭照明与测量的清理。",
+      "优化这一链路时，不能只数函数调用次数。删除重读或启动验证必须有器件语义依据，否则减少的事务可能以偶发异常样本为代价。"
+    ],
+    "audio": "voice/neural-scene-22.wav",
+    "seconds": 32.492916666666666,
+    "beats": [
+      0.35,
+      7.771,
+      15.394,
+      23.993
+    ],
+    "captions": [
+      {
+        "text": "心率读取先高字节，再低字节，最后重读",
+        "startMs": 420,
+        "endMs": 3737,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "高字节，避免把独立寄存器读取直接当作",
+        "startMs": 3698,
+        "endMs": 6741,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一份一致数据。",
+        "startMs": 6692,
+        "endMs": 7651,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "两次高字节不同，就返回未就绪，拒绝拼接",
+        "startMs": 7841,
+        "endMs": 11443,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "结果。",
+        "startMs": 11394,
+        "endMs": 11805,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "这把采样变化与总线通信错误区分开了。",
+        "startMs": 12243,
+        "endMs": 15274,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "每次开始测量还重查标识和配置。",
+        "startMs": 15464,
+        "endMs": 18353,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "失败时先保存错误，再关照明，避免清理",
+        "startMs": 18791,
+        "endMs": 22382,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "过程覆盖最初故障。",
+        "startMs": 22333,
+        "endMs": 23873,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "所以优化不能只数读取次数。",
+        "startMs": 24063,
+        "endMs": 26393,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "删掉验证之前，得有器件语义依据，否则",
+        "startMs": 26831,
+        "endMs": 30038,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "省下的事务可能换来异常样本。",
+        "startMs": 30000,
+        "endMs": 32023,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 22,
+    "evidence": {
+      "scene": 22,
+      "file": "interface/em7028.c",
+      "line": 196,
+      "sha256": "92891c7af510b098380bbd4b73c1a359ac4b8caabd50bfc9dd3d5417fac34b34",
+      "excerpt": "    if (high != high_check)\n    {\n        em7028_last_fault.kind = EM7028_FAULT_DATA_CHANGED;\n        em7028_last_fault.reg = EM7028_REG_DATA_HIGH;\n        return EM7028_NOT_READY;\n    }"
+    },
+    "frames": 975,
+    "startFrame": 19663,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "滤波器时间常数与重建策略",
+    "chapter": "06 · 信号与候选状态",
+    "kind": "wave",
+    "nodes": [
+      "dc：1500 ms",
+      "低通：70 ms",
+      "幅值：300 ms",
+      "预热 / 缺采样 / 阶跃"
+    ],
+    "formula": "α = Δt / (τ + Δt)；异常段重建状态，不继续盲目追踪",
+    "source": "application/app_heart.c|detector.dc += (float)elapsed",
+    "lines": [
+      "这里的三个一阶滤波使用实际经过时间计算系数，分别控制慢背景、交流低通和幅值估计，避免把调用次数直接当作时间。",
+      "接触阶跃的门限同时考虑绝对计数和原始值比例。首帧或重建阶段跟随当前背景，避免让慢速基线花很久追赶一个错误初值。",
+      "长缺采样会重新建立滤波与周期；原始样本仍可用于诊断，但重新建立的状态不应立即被解释为有效心率。",
+      "评价滤波参数需要同时观察噪声抑制、峰位置延迟和恢复时间。曲线看起来更平滑，不自动代表峰间隔更准确，也可能只是把瞬态隐藏了。"
+    ],
+    "audio": "voice/neural-scene-23.wav",
+    "seconds": 33.074041666666666,
+    "beats": [
+      0.35,
+      8.889,
+      17.247,
+      24.706
+    ],
+    "captions": [
+      {
+        "text": "背景、交流低通和幅值估计，用实际间隔",
+        "startMs": 420,
+        "endMs": 3945,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "算滤波系数，时间常数分别是一千五百、",
+        "startMs": 3907,
+        "endMs": 7103,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "七十和三百毫秒。",
+        "startMs": 7240,
+        "endMs": 8769,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "接触阶跃同时检查绝对变化和相对比例。",
+        "startMs": 8959,
+        "endMs": 12386,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "重建时先跟随背景，避免慢滤波器长时间",
+        "startMs": 12824,
+        "endMs": 16064,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "追赶错误初值。",
+        "startMs": 16015,
+        "endMs": 17127,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "长缺采样也会重建滤波和周期。",
+        "startMs": 17317,
+        "endMs": 19844,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "原始值可以继续诊断，但新状态不能立刻",
+        "startMs": 20283,
+        "endMs": 23555,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "被当成有效心率。",
+        "startMs": 23506,
+        "endMs": 24586,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "滤波效果要同时看降噪、峰位延迟和恢复",
+        "startMs": 24776,
+        "endMs": 28334,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "时间。",
+        "startMs": 28285,
+        "endMs": 28761,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "曲线更平滑，也可能只是把有用的瞬态磨掉",
+        "startMs": 29200,
+        "endMs": 32461,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "了。",
+        "startMs": 32401,
+        "endMs": 32604,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 23,
+    "evidence": {
+      "scene": 23,
+      "file": "application/app_heart.c",
+      "line": 275,
+      "sha256": "ee38b6fb8f98350ae3610814d13c4be0465819ff8be2e6babbe3c9ecfea2b096",
+      "excerpt": "    detector.dc += (float)elapsed / (1500.0f + (float)elapsed) * ((float)raw - detector.dc);\n    detector.filtered += (float)elapsed / (70.0f + (float)elapsed) * ((float)raw - detector.dc - detector.filtered);\n    detector.amplitude += (float)elapsed / (300.0f + (float)elapsed) * (fabsf(detector.filtered) - detector.amplitude);\n    data->signal_x10 = (uint32_t)(detector.amplitude * 10.0f + 0.5f);\n    for (i = 0; i < APP_HEART_GATE_COUNT; ++i)\n    {"
+    },
+    "frames": 993,
+    "startFrame": 20638,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "候选峰与有效心跳要分开",
+    "chapter": "06 · 信号与候选状态",
+    "kind": "wave",
+    "nodes": [
+      "candidate_tick",
+      "beat_tick",
+      "三次 RR 方差",
+      "输出连续性 25%"
+    ],
+    "formula": "短次峰不能覆盖有效心跳；高频假峰不能隔拍拼成正常心率",
+    "source": "application/app_heart.c|static void heart_track_peak",
+    "lines": [
+      "当前检测器把相邻候选峰时间与最后接受心跳时间分开。短次峰可以被拒绝，同时保留有效心跳基准，避免污染下一次正常间隔。",
+      "五路门限各自维护状态，满足三次稳定间隔后参与方差选优。相同方差时倾向更高门限，减少小次峰重复触发。",
+      "候选周期还受上一有效输出的百分之二十五连续性约束。局部 RR 看似稳定，也不能毫无条件地替换当前输出。",
+      "一个重要诊断细节是，导出的原始间隔字段不一定等于最终平滑周期。分析时不要要求它在每个状态下都与心率严格互为倒数。"
+    ],
+    "audio": "voice/neural-scene-24.wav",
+    "seconds": 31.21,
+    "beats": [
+      0.35,
+      8.149,
+      15.991,
+      23.138
+    ],
+    "captions": [
+      {
+        "text": "候选峰时间和有效心跳时间分开。",
+        "startMs": 420,
+        "endMs": 2925,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "短次峰被拒绝时，原来的有效基准还在，",
+        "startMs": 3363,
+        "endMs": 6165,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "不会污染下一次正常间隔。",
+        "startMs": 6445,
+        "endMs": 8029,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "五路门限各自维护状态，用三次稳定间隔",
+        "startMs": 8219,
+        "endMs": 11415,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "的方差选优。",
+        "startMs": 11355,
+        "endMs": 12303,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "同分时倾向高门限，减少小次峰触发。",
+        "startMs": 12719,
+        "endMs": 15871,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "新候选还受前次输出百分之二十五连续性",
+        "startMs": 16061,
+        "endMs": 19082,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "限制，局部稳定，并不意味着能立刻替换",
+        "startMs": 19033,
+        "endMs": 22404,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "当前结果。",
+        "startMs": 22366,
+        "endMs": 23018,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "另外，导出的原始间隔不一定是最终平滑",
+        "startMs": 23208,
+        "endMs": 26492,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "周期。",
+        "startMs": 26443,
+        "endMs": 26886,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "别要求每个状态下，它都和心率严格互为倒数。",
+        "startMs": 27325,
+        "endMs": 30740,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 24,
+    "evidence": {
+      "scene": 24,
+      "file": "application/app_heart.c",
+      "line": 109,
+      "sha256": "ee38b6fb8f98350ae3610814d13c4be0465819ff8be2e6babbe3c9ecfea2b096",
+      "excerpt": "static void heart_track_peak(heart_peak_struct *peak, float factor, uint32_t now)\n{\n    float threshold = peak->swing * factor;\n    float swing;\n    uint32_t interval;\n    uint32_t candidate_interval;"
+    },
+    "frames": 937,
+    "startFrame": 21631,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "单任务多速率的队头阻塞",
+    "chapter": "07 · 多速率链路与长尾",
+    "kind": "cost",
+    "nodes": [
+      "IMU → HEART → AHT",
+      "ADC / BARO 分频",
+      "保存发生在同一任务",
+      "让出 CPU 不等于采样继续"
+    ],
+    "formula": "任务数没增加，但低频操作仍可能拖慢高频服务",
+    "source": "application/app_task.c|#define APP_SENSOR_BARO_DIV",
+    "lines": [
+      "共用 sensor 任务节省了栈与调度开销，也给总线建立明确所有权。但服务按顺序执行，前面的慢操作会推迟后面的高频服务。",
+      "例如校准保存位于 IMU 服务之后、心率服务之前。即使 EEPROM 等待期间通过延时让出 CPU，同一个 sensor 任务仍然不能继续读心率。",
+      "低频并不等于低影响。一秒一次的长操作，对平均 CPU 影响很小，却可能制造一次足以触发心率重建的长间隔。",
+      "所以优化优先级应由长尾读取间隔决定，而不是只按平均耗时排序。先定位哪次保存、超时或页面刷新与异常间隔同时出现，再选择最小修改。"
+    ],
+    "audio": "voice/neural-scene-25.wav",
+    "seconds": 31.001708333333333,
+    "beats": [
+      0.35,
+      7.776,
+      16.32,
+      23.275
+    ],
+    "captions": [
+      {
+        "text": "共用任务省栈，也统一了总线所有权。",
+        "startMs": 420,
+        "endMs": 3199,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "但所有服务按顺序执行，前面的慢操作会",
+        "startMs": 3638,
+        "endMs": 7009,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "推迟后面。",
+        "startMs": 6960,
+        "endMs": 7656,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "校准保存就在 IMU 之后、心率之前。",
+        "startMs": 7846,
+        "endMs": 10822,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "即使等待 EEPROM 时让出了 CPU，",
+        "startMs": 11261,
+        "endMs": 14073,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "sensor 本身仍不能继续采样。",
+        "startMs": 14221,
+        "endMs": 16200,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "低频操作也可能造成长尾。",
+        "startMs": 16390,
+        "endMs": 18314,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一秒才运行一次，对平均 CPU 影响",
+        "startMs": 18752,
+        "endMs": 21301,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "不大，却可能触发心率重建。",
+        "startMs": 21252,
+        "endMs": 23155,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "因此先按最大成功间隔排优化优先级，再",
+        "startMs": 23345,
+        "endMs": 26749,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "关联保存、超时和刷新事件，别只按平均",
+        "startMs": 26689,
+        "endMs": 29863,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "耗时排序。",
+        "startMs": 29814,
+        "endMs": 30532,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 25,
+    "evidence": {
+      "scene": 25,
+      "file": "application/app_task.c",
+      "line": 43,
+      "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+      "excerpt": "#define APP_SENSOR_BARO_DIV    25                       /* 气压250ms轮询，器件1Hz */\n\n/**********************\n *  STATIC PROTOTYPES\n **********************/\nstatic void app_lvgl_task(void *pvParameters);"
+    },
+    "frames": 931,
+    "startFrame": 22568,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "气压合并读取保留配对语义",
+    "chapter": "07 · 多速率链路与长尾",
+    "kind": "pipeline",
+    "nodes": [
+      "一次状态读取",
+      "压力与温度都就绪",
+      "连续六字节",
+      "补偿后再发布"
+    ],
+    "formula": "少一次重复事务，也要保持未就绪与错误的区分",
+    "source": "interface/spl006.c|uint16_t spl006_read_sample",
+    "lines": [
+      "当前气压路径先读取一次状态，只有压力和温度都就绪，才连续读取六字节原始数据，避免先消耗其中一路就绪标志。",
+      "这减少了重复事务，但保留了压力与温度作为一对输入进入补偿函数的语义。不能用旧温度悄悄替换而声称只是性能优化。",
+      "结果码把压力与温度状态分别编码，补偿失败又有单独标记。初始化系数无效时，原始数据读到也不能认为压力已经可信。",
+      "验证应该覆盖只有一路就绪、总线失败和系数初始化失败，并比较合并前后的事务数量与墙钟耗时，防止用少报错误换取表面成功率。"
+    ],
+    "audio": "voice/neural-scene-26.wav",
+    "seconds": 29.05125,
+    "beats": [
+      0.35,
+      6.696,
+      13.35,
+      21.236
+    ],
+    "captions": [
+      {
+        "text": "气压先读一次状态，压力和温度都就绪后，",
+        "startMs": 420,
+        "endMs": 3462,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "再连续读六字节，保留两路配对的读取语义。",
+        "startMs": 3578,
+        "endMs": 6576,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "这样减少重复事务，但不能悄悄改成新压力",
+        "startMs": 6766,
+        "endMs": 9984,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "配旧温度，然后把行为变化也叫作性能优化。",
+        "startMs": 9946,
+        "endMs": 13230,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "压力、温度和补偿失败都有独立结果。",
+        "startMs": 13420,
+        "endMs": 16824,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "系数无效时，原始数据读到了，也不代表",
+        "startMs": 17262,
+        "endMs": 20480,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "压力可信。",
+        "startMs": 20442,
+        "endMs": 21116,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "回归覆盖单路就绪、总线失败和初始化失败，",
+        "startMs": 21306,
+        "endMs": 24787,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "再比事务数与耗时，避免靠少报错误提高",
+        "startMs": 24936,
+        "endMs": 28132,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "成功率。",
+        "startMs": 28083,
+        "endMs": 28581,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 26,
+    "evidence": {
+      "scene": 26,
+      "file": "interface/spl006.c",
+      "line": 230,
+      "sha256": "ba75199b3888dde08e10615e18391c1d3716dfe2f3d55afa9c487a1cddc2d632",
+      "excerpt": "uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw)\n{\n    uint8_t status, data[6];\n    uint16_t result = 0;\n    int32_t pressure, temperature;\n    if (spl006_read_reg(SPL06_MEAS_CFG, &status) != 0)"
+    },
+    "frames": 872,
+    "startFrame": 23499,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "异步测量是请求到完成的链路",
+    "chapter": "07 · 多速率链路与长尾",
+    "kind": "age",
+    "nodes": [
+      "触发成功",
+      "pending 等转换",
+      "80 ms 后检查",
+      "200 ms 截止 / CRC"
+    ],
+    "formula": "请求成功、设备就绪、有效样本发布是三个事件",
+    "source": "application/app_aht21.c|if (s_pending != 0)",
+    "lines": [
+      "AHT 服务把触发和取结果拆开，等待转换期间返回主循环。这里的 pending 代表存在未完成测量，而不是已经拥有一份有效温湿度。",
+      "八十毫秒后检查结果，忙状态可以继续等待到两百毫秒截止。未就绪、超时、总线错误和 CRC 错误需要保留各自含义。",
+      "这类状态机应记录请求时间与结果发布时间，才能计算端到端延迟。只测最后那次读取，会遗漏内部转换等待和调度推迟。",
+      "当前方案让转换等待与其他采样重叠，是比单纯减少运算指令更直接的收益。但最终成功间隔仍受同一个 sensor 任务的队头阻塞影响。"
+    ],
+    "audio": "voice/neural-scene-27.wav",
+    "seconds": 31.445083333333333,
+    "beats": [
+      0.35,
+      8.609,
+      16.857,
+      23.79
+    ],
+    "captions": [
+      {
+        "text": "AHT 把触发和取结果拆开，转换时返回",
+        "startMs": 420,
+        "endMs": 3945,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "主循环。",
+        "startMs": 3896,
+        "endMs": 4482,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "pending 表示测量没结束，不代表",
+        "startMs": 4909,
+        "endMs": 7437,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "已经有了有效数据。",
+        "startMs": 7398,
+        "endMs": 8489,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "八十毫秒后检查，忙就继续等，到两百毫秒",
+        "startMs": 8679,
+        "endMs": 11864,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "截止。",
+        "startMs": 11815,
+        "endMs": 12226,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "未就绪、超时、通信错误和 CRC 错误",
+        "startMs": 12664,
+        "endMs": 16123,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "分别处理。",
+        "startMs": 16085,
+        "endMs": 16737,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "端到端延迟要从触发算到发布。",
+        "startMs": 16927,
+        "endMs": 19279,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "只测最后的读取，会漏掉内部转换等待和",
+        "startMs": 19706,
+        "endMs": 22858,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "调度推迟。",
+        "startMs": 22809,
+        "endMs": 23670,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "收益来自转换等待与其他采样重叠。",
+        "startMs": 23860,
+        "endMs": 26782,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "但最终成功间隔，仍然受同一个 sensor ",
+        "startMs": 27220,
+        "endMs": 29857,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "任务的长操作影响。",
+        "startMs": 29808,
+        "endMs": 30975,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 27,
+    "evidence": {
+      "scene": 27,
+      "file": "application/app_aht21.c",
+      "line": 49,
+      "sha256": "483e583bd958ea46df4d5a866c8099b2f9f5ce81188ca776348740b4713ecdda",
+      "excerpt": "    if (s_pending != 0)\n    {\n        if (elapsed < AHT21_CONVERSION_MS)\n        {\n            return;\n        }"
+    },
+    "frames": 944,
+    "startFrame": 24371,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "ADC 链路先分清误差来源",
+    "chapter": "07 · 多速率链路与长尾",
+    "kind": "cost",
+    "nodes": [
+      "480 周期采样",
+      "12.5 MHz ADC",
+      "2 ms 有界等待",
+      "3300 mV 参考假设"
+    ],
+    "formula": "约 38.4 μs 采样窗口；电压偏差不一定来自软件时序",
+    "source": "application/app_battery.c|sample.voltage_mv =",
+    "lines": [
+      "电池 ADC 的采样窗口配置为四百八十周期，在当前十二点五兆赫 ADC 时钟下约三十八点四微秒，服务又设了两毫秒转换超时。",
+      "长采样窗口和有限等待解决不同问题：前者影响采样建立条件，后者限制故障时的任务停留时间，不能把它们混成同一个超时参数。",
+      "电压换算使用三千三百毫伏参考假设及二倍分压恢复。整数舍入已经处理，但参考、电阻和负载误差仍会进入最终电压。",
+      "如果读数偏差稳定，先对照引脚电压和参考条件；如果成功间隔异常，再看调度与转换结果。这样能避免拿滤波参数掩盖测量链路误差。"
+    ],
+    "audio": "voice/neural-scene-28.wav",
+    "seconds": 31.27575,
+    "beats": [
+      0.35,
+      7.628,
+      14.912,
+      22.634
+    ],
+    "captions": [
+      {
+        "text": "ADC 的四百八十周期采样，在当前时",
+        "startMs": 420,
+        "endMs": 3112,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "钟下约三十八点四微秒；",
+        "startMs": 3063,
+        "endMs": 4844,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "服务另外设置了两毫秒转换超时。",
+        "startMs": 5102,
+        "endMs": 7508,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "前者给输入建立留时间，后者限制故障等待。",
+        "startMs": 7698,
+        "endMs": 10840,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "这是两个不同问题，别把它们当成同一个",
+        "startMs": 11278,
+        "endMs": 14057,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "超时参数。",
+        "startMs": 14019,
+        "endMs": 14792,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "电压换算假设参考为三点三伏，再恢复二倍",
+        "startMs": 14982,
+        "endMs": 18518,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "分压。",
+        "startMs": 18458,
+        "endMs": 18901,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "舍入处理了，参考、电阻和负载误差还在。",
+        "startMs": 19329,
+        "endMs": 22514,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "稳定偏差先比引脚电压与参考条件；",
+        "startMs": 22704,
+        "endMs": 25538,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "读取间隔异常再看调度。",
+        "startMs": 25818,
+        "endMs": 27676,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "别用滤波参数掩盖测量链路误差。",
+        "startMs": 28114,
+        "endMs": 30806,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 28,
+    "evidence": {
+      "scene": 28,
+      "file": "application/app_battery.c",
+      "line": 64,
+      "sha256": "5bc898e5e2caf055b9c812feddeef3754b252587ae7a9641c3383de4400f180f",
+      "excerpt": "        sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2U + 2047U) / 4095U;\n        sample.valid = 1;\n    }\n    if (sample.result == HAL_OK)\n    {\n        app_diag_sensor_record(APP_DIAG_BATTERY, APP_DIAG_OK, (uint32_t)sample.result, read_started);"
+    },
+    "frames": 939,
+    "startFrame": 25315,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "刷屏瓶颈要拆成两个阶段",
+    "chapter": "08 · 显示吞吐与生命周期",
+    "kind": "dma",
+    "nodes": [
+      "CPU 绘制",
+      "地址命令开销",
+      "SPI 像素搬运",
+      "脏区数量与面积"
+    ],
+    "formula": "理想全屏线时约 21.5 ms；5 ms 服务周期不等于 200 fps",
+    "source": "interface/lcd.c|LCD_WR_REG(0x2A);",
+    "lines": [
+      "显示链路分为 CPU 绘制和 SPI 发送。当前配置下，全屏纯像素理想线时约二十一点五毫秒，已经说明五毫秒服务周期不能代表实际帧率。",
+      "局部刷新降低的是需要搬运的总像素数量；减少碎小脏区则可能降低每块的窗口命令与调用开销，两者不是同一个优化方向。",
+      "双缓冲只有在绘制和传输能够重叠时才有收益。若 CPU 绘制远慢于 SPI，增大串行频率不会按比例改善页面响应。",
+      "测量时记录脏区数量、总像素、绘制耗时与 DMA 等待时间。先确认瓶颈处于哪段，再考虑对象更新频率、区域合并或缓冲尺寸。"
+    ],
+    "audio": "voice/neural-scene-29.wav",
+    "seconds": 32.492875,
+    "beats": [
+      0.35,
+      7.743,
+      15.958,
+      24.426
+    ],
+    "captions": [
+      {
+        "text": "刷屏拆成绘制和发送。",
+        "startMs": 420,
+        "endMs": 2180,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "全屏理想线时约二十一点五毫秒，五毫秒",
+        "startMs": 2607,
+        "endMs": 5825,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "服务周期显然不能当帧率。",
+        "startMs": 5787,
+        "endMs": 7623,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "局部刷新减少像素量，合并碎小脏区则减少",
+        "startMs": 7813,
+        "endMs": 11524,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "窗口命令。",
+        "startMs": 11486,
+        "endMs": 12160,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "两种优化针对不同成本，收益也不同。",
+        "startMs": 12598,
+        "endMs": 15838,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "双缓冲要靠绘制和发送重叠。",
+        "startMs": 16028,
+        "endMs": 18522,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "如果慢在 CPU 绘制，继续提高 SPI ",
+        "startMs": 18961,
+        "endMs": 22124,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "时钟，响应也未必明显改善。",
+        "startMs": 22075,
+        "endMs": 24306,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "先记录脏区数、总像素、绘制耗时和 DMA ",
+        "startMs": 24496,
+        "endMs": 28086,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "等待，再决定改更新频率、区域合并，还是",
+        "startMs": 28037,
+        "endMs": 31321,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "缓冲大小。",
+        "startMs": 31283,
+        "endMs": 32023,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 29,
+    "evidence": {
+      "scene": 29,
+      "file": "interface/lcd.c",
+      "line": 93,
+      "sha256": "4afbcd58c5761b97548152852c39b63f3b83102c74cf73617e9655efa7c66544",
+      "excerpt": "    LCD_WR_REG(0x2A); /* 列地址 */\n    LCD_WR_DATA8(0x00);\n    LCD_WR_DATA8((uint8_t)x1);\n    LCD_WR_DATA8(0x00);\n    LCD_WR_DATA8((uint8_t)x2);\n    LCD_WR_REG(0x2B); /* 行地址 */"
+    },
+    "frames": 975,
+    "startFrame": 26254,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "DMA 完成也是所有权归还",
+    "chapter": "08 · 显示吞吐与生命周期",
+    "kind": "dma",
+    "nodes": [
+      "buffer A 在途",
+      "CPU 使用 buffer B",
+      "BSY 尾部等待",
+      "flush_ready / notify"
+    ],
+    "formula": "异步收益依赖缓冲生命周期，而不只是调用 DMA API",
+    "source": "Middlewares/LVGL/lvgl/examples/porting/lv_port_disp_template.c|static void lcd_flush_ready_cb(void)",
+    "lines": [
+      "启动 DMA 后，源缓冲仍归传输过程使用，不能提前覆盖。完成回调通知 LVGL 归还缓冲，双缓冲才能安全交替。",
+      "当前移植层在等待时使用任务通知，DMA 完成可以唤醒界面任务，让等待窗口里的 CPU 留给 sensor，而不是持续轮询刷新标志。",
+      "但回调链仍有等待 SPI 忙标志清除的循环，用于末尾移位完成。正常只应很短，却仍属于中断内执行成本，不能从时延模型里删除。",
+      "检查这条路径时，同时追踪启动、在途、完成和缓冲复用四个时刻。异步调用返回，只说明传输已提交，既不是显示完成，也不是数据可以立刻改写。"
+    ],
+    "audio": "voice/neural-scene-30.wav",
+    "seconds": 33.48458333333333,
+    "beats": [
+      0.35,
+      8.028,
+      16.178,
+      24.031
+    ],
+    "captions": [
+      {
+        "text": "DMA 启动后，缓冲仍归发送过程使用，",
+        "startMs": 420,
+        "endMs": 3309,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "不能覆盖。",
+        "startMs": 3424,
+        "endMs": 4087,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "完成回调归还所有权，双缓冲才可以交替。",
+        "startMs": 4526,
+        "endMs": 7908,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "当前等待采用任务通知，DMA 完成就",
+        "startMs": 8098,
+        "endMs": 11031,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "唤醒界面。",
+        "startMs": 10982,
+        "endMs": 11667,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "等待窗口里的 CPU 可以交给 sensor，",
+        "startMs": 12105,
+        "endMs": 14709,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "而非持续轮询。",
+        "startMs": 14846,
+        "endMs": 16058,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "回调还会等 SPI 忙标志清除，确保",
+        "startMs": 16248,
+        "endMs": 19356,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "末位移出。",
+        "startMs": 19318,
+        "endMs": 19981,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "正常很短，但它仍然是中断成本，不能忽略。",
+        "startMs": 20419,
+        "endMs": 23911,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "跟踪启动、在途、完成和复用四个时刻。",
+        "startMs": 24101,
+        "endMs": 27429,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "异步返回只是提交完成，不表示已经显示，",
+        "startMs": 27867,
+        "endMs": 31194,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "更不表示缓冲能改。",
+        "startMs": 31354,
+        "endMs": 33015,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 30,
+    "evidence": {
+      "scene": 30,
+      "file": "Middlewares/LVGL/lvgl/examples/porting/lv_port_disp_template.c",
+      "line": 25,
+      "sha256": "3dd75613cdf81e3faca6e9aa4a634b606a41ed8bb93146f8c1c28ec663fb1d1c",
+      "excerpt": "static void lcd_flush_ready_cb(void);\nstatic void disp_wait(lv_disp_drv_t *disp_drv);\n\n/**********************\n *  STATIC VARIABLES\n **********************/"
+    },
+    "frames": 1005,
+    "startFrame": 27229,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "界面重建要避开事件生命周期",
+    "chapter": "08 · 显示吞吐与生命周期",
+    "kind": "pipeline",
+    "nodes": [
+      "事件只记录请求",
+      "等待触点释放",
+      "等待过渡结束",
+      "统一重建页面"
+    ],
+    "formula": "延后执行，把事件目标生命周期与对象删除解耦",
+    "source": "application/app_ui.c|if (s_screen_on && !s_transition && !touch_pressed())",
+    "lines": [
+      "当前页面跳转不是在任意事件里立即删除和重建对象，而是先设置待处理页面或返回请求，在界面定时器里统一消费。",
+      "真正重建还要求触点已经释放且上一个过渡结束，这样避免滑动手势落成点击，也避免事件目标在处理链中途失效。",
+      "刷新数据同样避开过渡阶段。减少重复对象修改可以降低脏区和内存峰值，但必须保持页面状态与用户输入的既有语义。",
+      "按键熄屏只切换背光和输入，不代表任务停止或处理器深睡。评价整机功耗时，要把显示功耗与 CPU、传感器持续运行分开测量。"
+    ],
+    "audio": "voice/neural-scene-31.wav",
+    "seconds": 31.051708333333334,
+    "beats": [
+      0.35,
+      7.519,
+      14.534,
+      22.136
+    ],
+    "captions": [
+      {
+        "text": "页面事件先记录跳转请求，之后在界面定时器",
+        "startMs": 420,
+        "endMs": 4098,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "里消费，避免处理事件时立刻删除它的目标",
+        "startMs": 4038,
+        "endMs": 7059,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "对象。",
+        "startMs": 7010,
+        "endMs": 7399,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "重建还要等触点释放、过渡结束，防止滑动",
+        "startMs": 7589,
+        "endMs": 11037,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "变点击，也保住事件处理链中的对象生命",
+        "startMs": 10999,
+        "endMs": 13987,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "周期。",
+        "startMs": 13938,
+        "endMs": 14414,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "刷新也避开过渡。",
+        "startMs": 14604,
+        "endMs": 15881,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "少改对象能减少脏区和内存峰值，但必须",
+        "startMs": 16320,
+        "endMs": 19822,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "保留原有页面状态与交互语义。",
+        "startMs": 19773,
+        "endMs": 22015,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "熄屏这里只切背光和输入，任务仍在运行。",
+        "startMs": 22206,
+        "endMs": 25708,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "测功耗要分别看显示、CPU 和传感器，",
+        "startMs": 26147,
+        "endMs": 29123,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "不能把黑屏当深睡。",
+        "startMs": 29283,
+        "endMs": 30582,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 31,
+    "evidence": {
+      "scene": 31,
+      "file": "application/app_ui.c",
+      "line": 1898,
+      "sha256": "63f735ac9f8d6bf745f92ba1c64f08cfb396573bedf44841eb0a810b54b2b7cc",
+      "excerpt": "    if (s_screen_on && !s_transition && !touch_pressed())\n    {\n        if (s_pending_back)\n        {\n            s_pending_back = 0;\n            s_pending_page = PAGE_COUNT;"
+    },
+    "frames": 932,
+    "startFrame": 28234,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "异步串口把线时移出忙等",
+    "chapter": "09 · 通信背压与交接",
+    "kind": "ownership",
+    "nodes": [
+      "固定静态发送缓冲",
+      "HAL_UART_Transmit_IT",
+      "TX 回调记录结果",
+      "发起者收取结果"
+    ],
+    "formula": "36 B 约 3.125 ms；异步降低等待占用，不缩短物理线时",
+    "source": "interface/kt6368a.c|HAL_StatusTypeDef kt6368a_write_async",
+    "lines": [
+      "诊断与心率调试输出使用中断异步发送，把串口线时间从界面任务的同步忙等中移出。线上的字节仍然需要同样长时间发送。",
+      "因此发送缓冲必须静态保存，在完成或中止前不能复用。只把局部数组传进去然后立即返回，会破坏这条生命周期约束。",
+      "驱动区分空闲、在途和完成待收取状态。完成回调只记录结果，发起者收取之后才释放事务槽位，避免另一类发送抢走完成事件。",
+      "当前蓝牙目标是 BLE 与 SPP 同时开启，模块配置仍走原流程。无线模式改变和 MCU 串口异步化，是两个独立的性能与协议问题。"
+    ],
+    "audio": "voice/neural-scene-32.wav",
+    "seconds": 32.77183333333333,
+    "beats": [
+      0.35,
+      8.719,
+      15.871,
+      23.91
+    ],
+    "captions": [
+      {
+        "text": "诊断和波形改用中断发送，把线时移出界面",
+        "startMs": 420,
+        "endMs": 3967,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "忙等。",
+        "startMs": 3918,
+        "endMs": 4318,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "三十六字节约三点一毫秒，物理发送时间",
+        "startMs": 4745,
+        "endMs": 7952,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "并没缩短。",
+        "startMs": 7914,
+        "endMs": 8599,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "发送缓冲因此要一直保留到完成或中止。",
+        "startMs": 8789,
+        "endMs": 11831,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "局部数组发出去就返回，会破坏这条生命",
+        "startMs": 12269,
+        "endMs": 15104,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "周期约束。",
+        "startMs": 15055,
+        "endMs": 15751,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "状态分空闲、在途和完成待收取。",
+        "startMs": 15941,
+        "endMs": 18665,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "发起者收取后才释放槽位，防止别的发送",
+        "startMs": 19092,
+        "endMs": 22606,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "抢走完成事件。",
+        "startMs": 22634,
+        "endMs": 23790,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "蓝牙当前目标是 BLE 和 SPP ",
+        "startMs": 23980,
+        "endMs": 26847,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "都开启。",
+        "startMs": 26798,
+        "endMs": 27374,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "无线模式与 MCU 侧异步发送，是两项",
+        "startMs": 27801,
+        "endMs": 30876,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "独立的配置和性能问题。",
+        "startMs": 30838,
+        "endMs": 32302,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 32,
+    "evidence": {
+      "scene": 32,
+      "file": "interface/kt6368a.c",
+      "line": 187,
+      "sha256": "983c0986910313ef1a473ba4c3a754e582175480767cf69147c34306cc9851e7",
+      "excerpt": "HAL_StatusTypeDef kt6368a_write_async(const uint8_t *data, uint16_t size, uint32_t timeout_ms)\n{\n    HAL_StatusTypeDef status;\n    if (data == NULL || size == 0U || size > KT6368A_TX_MAX_SIZE || timeout_ms == 0U)\n    {\n        return HAL_ERROR;"
+    },
+    "frames": 984,
+    "startFrame": 29166,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "接收链路的背压与重同步",
+    "chapter": "09 · 通信背压与交接",
+    "kind": "uart",
+    "nodes": [
+      "ISR 写环形区",
+      "唯一任务消费者",
+      "满时丢新字节",
+      "解析器处理拆包粘包"
+    ],
+    "formula": "1023 B 可用容量 ≈ 88.8 ms 满线速突发缓冲",
+    "source": "interface/kt6368a.h|#define KT6368A_RX_BUFFER_SIZE",
+    "lines": [
+      "一千零二十三字节有效环形容量，在十一万五千二百波特、八无一配置下，大约能吸收八十八点八毫秒满线速数据，不能无限抵抗消费停顿。",
+      "接收中断只入队，界面任务是唯一消费者，再把同一份字节交给时钟、天气和命令解析。增加第二个抢读者会破坏消息完整性。",
+      "缓冲满时丢新字节并计数，因此解析器需要在换行、帧头或校验失败后重新同步。仅仅增大缓冲，只是延长容忍窗口，并未解决持续吞吐不足。",
+      "排查丢包应同时记录环形溢出、解析拒绝和消费者最大停顿。只有手机端出现序号缺口，无法直接断定是无线链路丢失。"
+    ],
+    "audio": "voice/neural-scene-33.wav",
+    "seconds": 30.782375,
+    "beats": [
+      0.35,
+      7.08,
+      14.462,
+      22.864
+    ],
+    "captions": [
+      {
+        "text": "接收环形区可用一千零二十三字节，大约",
+        "startMs": 420,
+        "endMs": 3451,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "容纳八十八点八毫秒满线速突发，吸收停顿",
+        "startMs": 3402,
+        "endMs": 6368,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "的能力有限。",
+        "startMs": 6308,
+        "endMs": 6960,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "中断只入队，界面是唯一消费者，再把同",
+        "startMs": 7150,
+        "endMs": 10324,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一份字节交给各解析器。",
+        "startMs": 10264,
+        "endMs": 11969,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "第二个抢读者会破坏拼包。",
+        "startMs": 12407,
+        "endMs": 14342,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "满时丢新字节，所以解析器要能重同步。",
+        "startMs": 14532,
+        "endMs": 17991,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "加大缓冲只是延长容忍窗口，解决不了持续",
+        "startMs": 18408,
+        "endMs": 22031,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "吞吐不足。",
+        "startMs": 21982,
+        "endMs": 22744,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "丢包要关联环形溢出、解析拒绝和消费停顿。",
+        "startMs": 22934,
+        "endMs": 26579,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "只有手机序号缺口，还不能直接认定无线",
+        "startMs": 27018,
+        "endMs": 29907,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "丢包。",
+        "startMs": 29858,
+        "endMs": 30312,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 33,
+    "evidence": {
+      "scene": 33,
+      "file": "interface/kt6368a.h",
+      "line": 20,
+      "sha256": "3790902912ba9bb6ac21b6a675f3a496a03132e542e2d1fa22a5f953edb6d236",
+      "excerpt": "#define KT6368A_RX_BUFFER_SIZE 1024U /* 环形缓冲有效容量1023字节 */\n#define KT6368A_TX_MAX_SIZE    512U\n#define KT6368A_BOOT_DELAY_MS  1200U /* 蓝牙模块上电等待时间 */\n#define KT6368A_AT_TIMEOUT_MS  500U\n\n    /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。"
+    },
+    "frames": 924,
+    "startFrame": 30150,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "共享接收入口，独立消息事务",
+    "chapter": "09 · 通信背压与交接",
+    "kind": "age",
+    "nodes": [
+      "累积消息边界",
+      "字段与范围检查",
+      "完整消息才提交",
+      "保留最后有效状态"
+    ],
+    "formula": "输入到达 ≠ 消息完整 ≠ 应用状态已经更新",
+    "source": "application/app_weather.c|WEATHER,",
+    "lines": [
+      "时间和天气复用同一 UART 接收入口，但各自维护消息解析与提交条件。一次读取不是消息边界，不能按缓冲长度直接更新业务状态。",
+      "天气必须完整解析并通过范围检查才替换有效状态，时间消息验证后再设置 RTC。非法片段不能先写一半再等待后续字段补齐。",
+      "这与传感器快照采用相似原则：先在局部构建候选结果，确认整体有效，再发布。这样把不完整输入与稳定业务状态隔离。",
+      "手机天气是外部模型数据，AHT 是板载测量。表盘中的新旧标记反映数据来源和年龄，不能为了视觉一致把两者混成同一种实时环境值。"
+    ],
+    "audio": "voice/neural-scene-34.wav",
+    "seconds": 32.163916666666665,
+    "beats": [
+      0.35,
+      7.721,
+      16.189,
+      23.511
+    ],
+    "captions": [
+      {
+        "text": "时间和天气共用接收入口，各自管理消息",
+        "startMs": 420,
+        "endMs": 3430,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "边界。",
+        "startMs": 3380,
+        "endMs": 3791,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一次读取不是一条消息，不能直接据此更新",
+        "startMs": 4230,
+        "endMs": 7228,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "状态。",
+        "startMs": 7179,
+        "endMs": 7601,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "字段完整且范围合法，才提交天气；",
+        "startMs": 7791,
+        "endMs": 10581,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "时间也先验证再写 RTC。",
+        "startMs": 10894,
+        "endMs": 13290,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "非法片段不能先覆盖半份状态。",
+        "startMs": 13728,
+        "endMs": 16069,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "这与快照发布思路一样：先构建候选，确认",
+        "startMs": 16259,
+        "endMs": 19838,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "整体有效后再提交，把不完整输入挡在业务",
+        "startMs": 19800,
+        "endMs": 22930,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "状态外。",
+        "startMs": 22881,
+        "endMs": 23391,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "手机天气与板载 AHT 来源不同。",
+        "startMs": 23581,
+        "endMs": 26086,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "显示新旧状态时保留来源和年龄，别为了",
+        "startMs": 26513,
+        "endMs": 29753,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "统一界面混淆两种含义。",
+        "startMs": 29715,
+        "endMs": 31694,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 34,
+    "evidence": {
+      "scene": 34,
+      "file": "application/app_weather.c",
+      "line": 45,
+      "sha256": "069e2f4edbec4c42d9d93f0509e5ce10e73a8b771d0e6da9e45d205e9f2e9ccf",
+      "excerpt": "    if (!s_overflow && s_length >= 8 && memcmp(s_frame, \"WEATHER,\", 8) == 0 && parse_number(&cursor, &code) && *cursor++ == ',' &&\n        parse_number(&cursor, &temperature) && *cursor++ == ',' && parse_number(&cursor, &humidity) && cursor == s_frame + s_length &&\n        *cursor == '\\0' && code >= 0 && code <= 99 && temperature >= -1000 && temperature <= 1000 && humidity >= 0 && humidity <= 100)\n    {\n        s_weather.code = (uint8_t)code;\n        s_weather.temperature_x10 = (int16_t)temperature;"
+    },
+    "frames": 965,
+    "startFrame": 31074,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "观察系统也会改变系统",
+    "chapter": "10 · 诊断归因与优化闭环",
+    "kind": "register",
+    "nodes": [
+      "编译开关 = 0",
+      "采样与统计保留",
+      "快照 / 打包 / TX 停止",
+      "调试版做开关对照"
+    ],
+    "formula": "性能观察要控制诊断开销，不能只增加日志",
+    "source": "application/app_diag.h|#define APP_DEBUG_TELEMETRY 0",
+    "lines": [
+      "当前编译开关为零，停止诊断、心率波形和发送测试输出，计时统计与本地测量仍保留。手机开启命令不能绕过这个编译选择。",
+      "启用调试版后，即使 UART 已异步化，快照复制、CRC 打包和发送中断仍会消耗资源。异步不是零成本，只是改变成本分布。",
+      "比较开关状态时，应使用同样操作、相近负载和独立统计窗口；历史最大值不会自动清除，不能把关闭后的历史峰值当作新测量。",
+      "这个对照能判断问题是否被观察手段放大。先减掉不必要输出，再确认真实采样间隔，通常比继续增加每帧打印更可靠。"
+    ],
+    "audio": "voice/neural-scene-35.wav",
+    "seconds": 31.236833333333333,
+    "beats": [
+      0.35,
+      8.127,
+      16.101,
+      23.68
+    ],
+    "captions": [
+      {
+        "text": "当前编译开关关闭调试外发，统计和本地",
+        "startMs": 420,
+        "endMs": 3967,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "测量仍运行。",
+        "startMs": 3918,
+        "endMs": 4932,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "手机的开启命令，不能绕过这个开关。",
+        "startMs": 5370,
+        "endMs": 8007,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "即使发送已异步，快照、CRC 和发送",
+        "startMs": 8197,
+        "endMs": 11360,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "中断也要消耗资源。",
+        "startMs": 11311,
+        "endMs": 12719,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "异步改变的是成本分布，不会让成本消失。",
+        "startMs": 13158,
+        "endMs": 15981,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "对照开关时，用同样操作和独立窗口。",
+        "startMs": 16171,
+        "endMs": 19158,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "历史最大值不会自动清零，不能把旧峰值",
+        "startMs": 19597,
+        "endMs": 22628,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "当成新结果。",
+        "startMs": 22667,
+        "endMs": 23560,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "先确认观察手段有没有放大问题。",
+        "startMs": 23750,
+        "endMs": 26080,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "继续增加每帧打印，可能让采样更差，反而",
+        "startMs": 26518,
+        "endMs": 29725,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "离真实原因更远。",
+        "startMs": 29676,
+        "endMs": 30767,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 35,
+    "evidence": {
+      "scene": 35,
+      "file": "application/app_diag.h",
+      "line": 8,
+      "sha256": "2616ef9df16501561c1884213d934ffb05e2e69a9c478fcee95dd8d5475a125b",
+      "excerpt": "#define APP_DEBUG_TELEMETRY 0\n#endif\n\nenum\n{\n    APP_DIAG_LVGL,"
+    },
+    "frames": 938,
+    "startFrame": 32039,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "数据时间与到达时间分开",
+    "chapter": "10 · 诊断归因与优化闭环",
+    "kind": "age",
+    "nodes": [
+      "成功读取时间",
+      "样本序号",
+      "队列丢弃 / TX 失败",
+      "手机到达与解析"
+    ],
+    "formula": "Adata = 消费时刻 − 采样标记时刻；跨设备时钟需另行对齐",
+    "source": "application/app_heart.c|static app_heart_sample_struct heart_samples",
+    "lines": [
+      "调试波形保留同次成功读取的时间和序号，发送排队与手机显示可以晚于这个时刻。到达时间抖动不应直接被当成采样抖动。",
+      "三十二帧队列满时丢最旧样本，优先保留近期状态。这适合观察实时波形，却不等于完整保存历史，每种丢弃都需要计数解释。",
+      "板端时间差可以分析读取间隔，序号步长可以发现缺口，再对照队列丢弃与 UART 失败，缩小问题所在的链路范围。",
+      "手机与板端时钟没有天然统一零点，因此不能直接相减得到精确单向传输延迟。需要时钟对齐或往返实验，才能进一步量化跨设备时延。"
+    ],
+    "audio": "voice/neural-scene-36.wav",
+    "seconds": 31.567041666666668,
+    "beats": [
+      0.35,
+      8.214,
+      15.383,
+      22.212
+    ],
+    "captions": [
+      {
+        "text": "波形记录同次成功读取的时间与序号，排队",
+        "startMs": 420,
+        "endMs": 3824,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "和显示可以晚一些。",
+        "startMs": 3786,
+        "endMs": 5195,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "到达抖动不能直接算作采样抖动。",
+        "startMs": 5622,
+        "endMs": 8094,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "三十二帧队列满时丢最旧，优先保留近期",
+        "startMs": 8284,
+        "endMs": 11776,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "状态，适合实时观察，但不等于完整历史",
+        "startMs": 11727,
+        "endMs": 14967,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "记录。",
+        "startMs": 14918,
+        "endMs": 15263,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "时间差看采样节奏，序号看缺口，再关联队",
+        "startMs": 15453,
+        "endMs": 18748,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "列丢弃和 UART 失败，才能逐步缩小",
+        "startMs": 18699,
+        "endMs": 21401,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "异常范围。",
+        "startMs": 21363,
+        "endMs": 22092,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "手机和板端时钟没有共同零点，不能直接",
+        "startMs": 22282,
+        "endMs": 25434,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "相减求单向延迟。",
+        "startMs": 25385,
+        "endMs": 27013,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "要继续量化，就得做时钟对齐或往返实验。",
+        "startMs": 27451,
+        "endMs": 31097,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 36,
+    "evidence": {
+      "scene": 36,
+      "file": "application/app_heart.c",
+      "line": 70,
+      "sha256": "ee38b6fb8f98350ae3610814d13c4be0465819ff8be2e6babbe3c9ecfea2b096",
+      "excerpt": "static app_heart_sample_struct heart_samples[APP_HEART_SAMPLE_COUNT];\nstatic uint16_t sample_head;\nstatic uint16_t sample_count;\nstatic uint16_t sample_sequence;\nstatic uint32_t sample_start_tick;\n"
+    },
+    "frames": 948,
+    "startFrame": 32977,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "诊断分辨率与归因边界",
+    "chapter": "10 · 诊断归因与优化闭环",
+    "kind": "cost",
+    "nodes": [
+      "TIM2：100 μs 分辨率",
+      "墙钟包含抢占",
+      "CPU 归属包含 ISR",
+      "未就绪不计通信失败"
+    ],
+    "formula": "最大值定位长尾；分辨率与统计窗口决定能回答的问题",
+    "source": "application/app_diag.c|TIM2->PSC = timer_hz / 10000U - 1U;",
+    "lines": [
+      "TIM2 一百微秒一计数，适合任务和驱动量级的比较，但不能据此精确测量几条寄存器指令或每个位操作的纳秒差异。",
+      "任务处理耗时包含抢占和内部等待，运行统计的调度归属也包含中断时间。因此界面占比升高，不一定全部来自 LVGL 绘制本身。",
+      "传感器成功、未就绪和错误分开统计，数据年龄补充最近成功时刻。只有读取耗时下降而成功间隔不变，可能说明瓶颈在调度而不是驱动。",
+      "把周期最大值、读取最大值和成功间隔放在同一事件窗口看，才能形成因果假设。单个平均 CPU 百分比不足以证明实时性已经改善。"
+    ],
+    "audio": "voice/neural-scene-37.wav",
+    "seconds": 32.558708333333335,
+    "beats": [
+      0.35,
+      7.08,
+      14.682,
+      23.862
+    ],
+    "captions": [
+      {
+        "text": "诊断时钟每一百微秒计数，适合比较任务",
+        "startMs": 420,
+        "endMs": 3320,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "和读取耗时，不适合声称测出了几条指令",
+        "startMs": 3282,
+        "endMs": 6116,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "的微小差别。",
+        "startMs": 6056,
+        "endMs": 6960,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "墙钟耗时包含抢占，任务运行归属也包含",
+        "startMs": 7150,
+        "endMs": 10620,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "中断。",
+        "startMs": 10571,
+        "endMs": 10960,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "因此界面占比升高，不一定全部来自绘制。",
+        "startMs": 11398,
+        "endMs": 14562,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "成功、未就绪和错误分开，年龄补充最近",
+        "startMs": 14752,
+        "endMs": 18781,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "读到何时。",
+        "startMs": 18732,
+        "endMs": 19483,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "如果驱动变快、样本间隔却没变，就继续",
+        "startMs": 19921,
+        "endMs": 23215,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "查调度。",
+        "startMs": 23166,
+        "endMs": 23742,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "把周期、读取耗时和成功间隔放在同一窗口",
+        "startMs": 23932,
+        "endMs": 27654,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "关联。",
+        "startMs": 27605,
+        "endMs": 28049,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "单个平均 CPU 百分比，证明不了实时性",
+        "startMs": 28487,
+        "endMs": 31519,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "已经改善。",
+        "startMs": 31480,
+        "endMs": 32089,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 37,
+    "evidence": {
+      "scene": 37,
+      "file": "application/app_diag.c",
+      "line": 76,
+      "sha256": "8d8f0e49cd7eba136d7b04cb1fa1c8a98e8e2c6ebd13a23baabacbe57fb524d0",
+      "excerpt": "    TIM2->PSC = timer_hz / 10000U - 1U;\n    TIM2->ARR = UINT32_MAX;\n    TIM2->EGR = TIM_EGR_UG;\n    TIM2->SR = 0;\n    TIM2->CNT = 0;\n    TIM2->CR1 = TIM_CR1_CEN;"
+    },
+    "frames": 977,
+    "startFrame": 33925,
+    "playbackRate": 1.0
+  },
+  {
+    "title": "把优化变成可复现的实验",
+    "chapter": "10 · 诊断归因与优化闭环",
+    "kind": "pipeline",
+    "nodes": [
+      "固定负载与基线",
+      "一次改变一个成本",
+      "验证数据与时序",
+      "保留异常路径"
+    ],
+    "formula": "优化闭环：假设 → 最小改动 → 对照 → 回归 → 实板证据",
+    "source": "application/app_task.c|App_IMU_Service();",
+    "lines": [
+      "针对这个项目，先固定静置、切页、心率测量与校准保存四类负载，分别记录任务间隔、成功样本间隔、错误计数和内存峰值。",
+      "每次只针对已确认的成本做最小修改，例如合并重复事务、减少持锁工作或替换忙等。保留优先级、采样参数和算法，方便归因。",
+      "主机回归检查状态与故障语义，链接和构建检查资源边界，最后用板端统计与逻辑分析仪验证时序。各层证据回答不同问题。",
+      "最终判断不只是更快，而是数据仍然有效、失败仍可诊断、长尾得到改善。这个闭环才是把现有手表工程继续做稳、做精的可迁移方法。"
+    ],
+    "audio": "voice/neural-scene-38.wav",
+    "seconds": 32.60870833333333,
+    "beats": [
+      0.35,
+      8.495,
+      16.414,
+      23.703
+    ],
+    "captions": [
+      {
+        "text": "先固定静置、切页、心率和保存四类负载，",
+        "startMs": 420,
+        "endMs": 4033,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "建立周期、成功间隔、错误计数和内存峰值",
+        "startMs": 4203,
+        "endMs": 7958,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "的基线。",
+        "startMs": 7898,
+        "endMs": 8375,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "一次只改一个已确认的成本，比如重复事务、",
+        "startMs": 8565,
+        "endMs": 11815,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "持锁工作或忙等。",
+        "startMs": 12019,
+        "endMs": 13405,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "其他参数保留，收益才容易归因。",
+        "startMs": 13844,
+        "endMs": 16294,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "主机回归验证状态与故障语义，构建检查",
+        "startMs": 16484,
+        "endMs": 19801,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "资源边界，板端统计和逻辑分析仪验证实际",
+        "startMs": 19752,
+        "endMs": 23167,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "时序。",
+        "startMs": 23118,
+        "endMs": 23583,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "最终要同时满足：数据有效，失败可诊断，",
+        "startMs": 23773,
+        "endMs": 27408,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "长尾有改善。",
+        "startMs": 27567,
+        "endMs": 28581,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "这样留下的优化方法，才方便迁移到下个",
+        "startMs": 29019,
+        "endMs": 31766,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      },
+      {
+        "text": "工程。",
+        "startMs": 31717,
+        "endMs": 32139,
+        "timestampMs": null,
+        "confidence": null,
+        "pageBreakAfter": true
+      }
+    ],
+    "id": 38,
+    "evidence": {
+      "scene": 38,
+      "file": "application/app_task.c",
+      "line": 192,
+      "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+      "excerpt": "        App_IMU_Service();\n        if (cal_finished == 0)\n        {\n            cal_state = my_mpu6050_zero_offset_state();\n            my_mpu6050_zero_offset_progress(&cal_stable, &cal_frames);\n            app_diag_boot_set(APP_BOOT_CAL_STATE, (uint32_t)cal_state);"
+    },
+    "frames": 979,
+    "startFrame": 34902,
+    "playbackRate": 1.0
+  }
+]

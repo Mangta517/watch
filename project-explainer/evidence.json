@@ -1,0 +1,268 @@
+[
+  {
+    "scene": 1,
+    "file": "application/app_task.c",
+    "line": 54,
+    "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+    "excerpt": "void App_Task_Create(void)\n{\n    if (xTaskCreate(app_lvgl_task, \"lvgl\", APP_LVGL_TASK_STK, NULL, APP_LVGL_TASK_PRIO, NULL) != pdPASS)\n    {\n        Error_Handler(); /* FreeRTOS 堆不足 */\n    }"
+  },
+  {
+    "scene": 2,
+    "file": "application/app_display.c",
+    "line": 28,
+    "sha256": "8b5155f560ef2dda9dd700070c8a08e333315382282ea7ac3c859fa76eaf8eab",
+    "excerpt": "void App_Display_Init(void)\n{\n    /* mutex 在任务上下文创建: 此时调度器已运行, 临界区计数才真正归零工作\n     * (CM4F port 的 uxCriticalNesting 以 0xaaaaaaaa 哨兵初值, 调度器前的\n     *  enter/exit 不解除 BASEPRI, 属设计行为, 见 SVC 启动时统一清零) */\n    s_lvgl_mux = xSemaphoreCreateMutex();"
+  },
+  {
+    "scene": 3,
+    "file": "common/my_i2c.c",
+    "line": 32,
+    "sha256": "f48dcc597a2daa2eee9fbd8cdb388b00cdf66277eacbff491bff6abb4f0b99cb",
+    "excerpt": "static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] = {\n    /* SENSOR 总线: MPU6050 等 */\n    {SENSOR_SCL_GPIO_Port, SENSOR_SCL_Pin, SENSOR_SDA_GPIO_Port, SENSOR_SDA_Pin},\n    /* TP 总线: 触摸屏 (touch.c 用自己的位翻实现, 本表项为其保留) */\n    {TP_SCL_GPIO_Port, TP_SCL_Pin, TP_SDA_GPIO_Port, TP_SDA_Pin},\n    {EEPROM_SCL_GPIO_Port, EEPROM_SCL_Pin, EEPROM_SDA_GPIO_Port, EEPROM_SDA_Pin},"
+  },
+  {
+    "scene": 4,
+    "file": "application/app_task.c",
+    "line": 84,
+    "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+    "excerpt": "    app_diag_boot_set(APP_BOOT_FIRST_FRAME_MS, HAL_GetTick());\n\n    if (xTaskCreate(app_sensor_task, \"sensor\", APP_SENSOR_TASK_STK, NULL, APP_SENSOR_TASK_PRIO, NULL) != pdPASS)\n    {\n        Error_Handler(); /* FreeRTOS 堆不足 */\n    }"
+  },
+  {
+    "scene": 5,
+    "file": "interface/lcd.c",
+    "line": 272,
+    "sha256": "4afbcd58c5761b97548152852c39b63f3b83102c74cf73617e9655efa7c66544",
+    "excerpt": "    HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 12, 0);\n\n    LCD_RES_Clr(); /* 硬复位 */\n    lcd_delay_ms(100);\n    LCD_RES_Set();\n    lcd_delay_ms(100);"
+  },
+  {
+    "scene": 6,
+    "file": "application/app_task.c",
+    "line": 93,
+    "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+    "excerpt": "    watch_rtc_init_begin();\n    app_diag_boot_set(APP_BOOT_BT_BEGIN_MS, HAL_GetTick());\n    kt6368a_init_begin();\n\n    for (;;)\n    {"
+  },
+  {
+    "scene": 7,
+    "file": "application/app_task.c",
+    "line": 36,
+    "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+    "excerpt": "#define APP_LVGL_TASK_PRIO   3    /* configMAX_PRIORITIES=5 */\n#define APP_LVGL_TASK_STK    1024 /* 字 = 4KB (Watch 工程实测足够跑 UI+刷新) */\n#define APP_LVGL_TASK_PERIOD 5    /* 保留原LVGL服务周期(ms) */\n\n#define APP_SENSOR_TASK_PRIO   2                        /* 低于 lvgl: UI 响应优先, 采样是后台生产 */\n#define APP_SENSOR_TASK_STK    512                      /* 字 = 2KB (IMU 读 + 零偏校准 + 气压读路径) */"
+  },
+  {
+    "scene": 8,
+    "file": "common/my_i2c.c",
+    "line": 46,
+    "sha256": "f48dcc597a2daa2eee9fbd8cdb388b00cdf66277eacbff491bff6abb4f0b99cb",
+    "excerpt": "static void my_i2c_delay(my_i2c_bus_t bus)\n{\n    volatile uint32_t n;\n    if (bus == MY_I2C_BUS_SENSOR)\n    {\n        n = MY_I2C_SENSOR_DELAY_LOOPS;"
+  },
+  {
+    "scene": 9,
+    "file": "Middlewares/FreeRTOS/include/FreeRTOSConfig.h",
+    "line": 50,
+    "sha256": "56004b000b912130a2d0738bc91d3b78bcb277488e3e3e7e244b853b5202af87",
+    "excerpt": "#define configTOTAL_HEAP_SIZE\t\t( ( size_t ) ( 16 * 1024 ) )\t/* 10K 偏紧: lvgl任务4K栈+idle+mutex≈6.5K, 留余量防建任务失败 */\n#define configMAX_TASK_NAME_LEN\t\t( 16 )\n#define configUSE_TRACE_FACILITY\t1\n\n#include \"app_diag.h\"\n#define configGENERATE_RUN_TIME_STATS 1"
+  },
+  {
+    "scene": 10,
+    "file": "application/app_imu.c",
+    "line": 462,
+    "sha256": "54e15580588e8ee0bc5e1f824416c93730e7bd6e24b4302446880b6939094fc6",
+    "excerpt": "uint8_t App_IMU_GetSnapshot(app_imu_struct *imu)\n{\n    uint8_t online;\n\n    if (imu == NULL)\n    {"
+  },
+  {
+    "scene": 11,
+    "file": "common/my_i2c.c",
+    "line": 21,
+    "sha256": "f48dcc597a2daa2eee9fbd8cdb388b00cdf66277eacbff491bff6abb4f0b99cb",
+    "excerpt": "#define MY_I2C_SENSOR_DELAY_LOOPS 160U\n\n/* ================================================================ 总线表 */\ntypedef struct\n{\n    GPIO_TypeDef *scl_port;"
+  },
+  {
+    "scene": 12,
+    "file": "interface/spl006.c",
+    "line": 230,
+    "sha256": "ba75199b3888dde08e10615e18391c1d3716dfe2f3d55afa9c487a1cddc2d632",
+    "excerpt": "uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw)\n{\n    uint8_t status, data[6];\n    uint16_t result = 0;\n    int32_t pressure, temperature;\n    if (spl006_read_reg(SPL06_MEAS_CFG, &status) != 0)"
+  },
+  {
+    "scene": 13,
+    "file": "common/my_i2c.c",
+    "line": 105,
+    "sha256": "f48dcc597a2daa2eee9fbd8cdb388b00cdf66277eacbff491bff6abb4f0b99cb",
+    "excerpt": "    uint32_t primask = __get_PRIMASK();\n    uint8_t direction = as_input + 1U;\n    if (s_sda_direction[bus] == direction)\n    {\n        return;\n    }"
+  },
+  {
+    "scene": 14,
+    "file": "interface/mpu6050.c",
+    "line": 493,
+    "sha256": "818321a2793bdc80d2ec4bc527545ea910477e36d8b471c0d88754a4c2a3d836",
+    "excerpt": "    mpu6050_int_status = packet[0];\n    data->Accel.Accel_x = (int16_t)(((buf[0] << 8) | buf[1]) - offset_accel_x);\n    data->Accel.Accel_y = (int16_t)(((buf[2] << 8) | buf[3]) - offset_accel_y);\n    data->Accel.Accel_z = (int16_t)(((buf[4] << 8) | buf[5]) - offset_accel_z);\n    data->Gyro.Gyro_x = (int16_t)(((buf[8] << 8) | buf[9]) - offset_gyro_x);\n    data->Gyro.Gyro_y = (int16_t)(((buf[10] << 8) | buf[11]) - offset_gyro_y);"
+  },
+  {
+    "scene": 15,
+    "file": "application/app_imu.c",
+    "line": 335,
+    "sha256": "54e15580588e8ee0bc5e1f824416c93730e7bd6e24b4302446880b6939094fc6",
+    "excerpt": "    s_last = now;\n\n    /* 1. 采样：同一sensor任务先取磁参考，再取MPU帧，避免总线竞争。 */\n    mag_online = mag_service(now, mag_body);\n    field_squared = mag_body[0] * mag_body[0] + mag_body[1] * mag_body[1] + mag_body[2] * mag_body[2];\n    /* 15 字节突发读同时释放 MPU INT 锁存，无 ISR 总线竞争。 */"
+  },
+  {
+    "scene": 16,
+    "file": "interface/mpu6050.c",
+    "line": 224,
+    "sha256": "818321a2793bdc80d2ec4bc527545ea910477e36d8b471c0d88754a4c2a3d836",
+    "excerpt": "static uint8_t mpu6050_cal_still(const Accel_struct *current)\n{\n    uint32_t reason = 0;\n    s_cal.diag[MPU_CAL_DIAG_AX] = (uint32_t)(int32_t)current->Accel_x;\n    s_cal.diag[MPU_CAL_DIAG_AY] = (uint32_t)(int32_t)current->Accel_y;\n    s_cal.diag[MPU_CAL_DIAG_AZ] = (uint32_t)(int32_t)current->Accel_z;"
+  },
+  {
+    "scene": 17,
+    "file": "common/common_imu.c",
+    "line": 24,
+    "sha256": "a34bc264c2fd69f9fb7ab4783acd3813634d4d1f56011951415d4b35d495ddda",
+    "excerpt": "uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const float mag_uT[3], Euler_struct *euler, float dt)\n{\n    /* 三轴数组统一按机体X/Y/Z排列；四元数q0为标量，q1/q2/q3为向量。 */\n    float q0 = s_q.q0, q1 = s_q.q1, q2 = s_q.q2, q3 = s_q.q3;\n    float gravity[3];     /* 四元数预测的单位重力向量 */\n    float accel[3];       /* 加速度，先为LSB，再归一化 */"
+  },
+  {
+    "scene": 18,
+    "file": "common/common_imu.c",
+    "line": 83,
+    "sha256": "a34bc264c2fd69f9fb7ab4783acd3813634d4d1f56011951415d4b35d495ddda",
+    "excerpt": "            horizontal[i] = mag_uT[i] - dot * gravity[i];\n        }\n        norm = sqrtf(horizontal[0] * horizontal[0] + horizontal[1] * horizontal[1] + horizontal[2] * horizontal[2]);\n        if (norm > 5.0f) /* 水平磁场大于5μT时才修正航向 */\n        {\n            for (i = 0; i < 3; ++i)"
+  },
+  {
+    "scene": 19,
+    "file": "application/app_imu.c",
+    "line": 154,
+    "sha256": "54e15580588e8ee0bc5e1f824416c93730e7bd6e24b4302446880b6939094fc6",
+    "excerpt": "static void mag_cal_command(uint8_t command)\n{\n    uint8_t i;\n    float radius[3], average;\n\n    if (command == APP_MAG_CMD_START) /* 保留上次已生效的校准系数 */"
+  },
+  {
+    "scene": 20,
+    "file": "application/app_imu_store.c",
+    "line": 9,
+    "sha256": "511820e6f30bdfeb2abb7c7e3f98cb07804a0f280ae9c0045d08a3a0a0ee11f1",
+    "excerpt": "#define IMU_STORE_MAGIC        0x3155504DU /* 小端字符MPU1 */\n#define IMU_STORE_RECORD_BYTES 28U\n#define IMU_STORE_CRC_OFFSET   24U\n#define IMU_STORE_SLOT_BYTES   32U\n#define IMU_STORE_BASE         0x60U\n#define IMU_STORE_RANGE        ((uint32_t)MPU6050_ACCEL_RANGE << 8 | MPU6050_GYRO_RANGE)"
+  },
+  {
+    "scene": 21,
+    "file": "application/app_imu_store.c",
+    "line": 161,
+    "sha256": "511820e6f30bdfeb2abb7c7e3f98cb07804a0f280ae9c0045d08a3a0a0ee11f1",
+    "excerpt": "app_imu_store_result app_imu_store_save(const mpu6050_offset_struct *offset)\n{\n    uint8_t record[2][IMU_STORE_RECORD_BYTES], verify[IMU_STORE_RECORD_BYTES], valid[2];\n    uint8_t i, latest, target;\n    uint32_t sequence = 1;\n    uint32_t started_ms = HAL_GetTick();"
+  },
+  {
+    "scene": 22,
+    "file": "interface/em7028.c",
+    "line": 196,
+    "sha256": "92891c7af510b098380bbd4b73c1a359ac4b8caabd50bfc9dd3d5417fac34b34",
+    "excerpt": "    if (high != high_check)\n    {\n        em7028_last_fault.kind = EM7028_FAULT_DATA_CHANGED;\n        em7028_last_fault.reg = EM7028_REG_DATA_HIGH;\n        return EM7028_NOT_READY;\n    }"
+  },
+  {
+    "scene": 23,
+    "file": "application/app_heart.c",
+    "line": 275,
+    "sha256": "ee38b6fb8f98350ae3610814d13c4be0465819ff8be2e6babbe3c9ecfea2b096",
+    "excerpt": "    detector.dc += (float)elapsed / (1500.0f + (float)elapsed) * ((float)raw - detector.dc);\n    detector.filtered += (float)elapsed / (70.0f + (float)elapsed) * ((float)raw - detector.dc - detector.filtered);\n    detector.amplitude += (float)elapsed / (300.0f + (float)elapsed) * (fabsf(detector.filtered) - detector.amplitude);\n    data->signal_x10 = (uint32_t)(detector.amplitude * 10.0f + 0.5f);\n    for (i = 0; i < APP_HEART_GATE_COUNT; ++i)\n    {"
+  },
+  {
+    "scene": 24,
+    "file": "application/app_heart.c",
+    "line": 109,
+    "sha256": "ee38b6fb8f98350ae3610814d13c4be0465819ff8be2e6babbe3c9ecfea2b096",
+    "excerpt": "static void heart_track_peak(heart_peak_struct *peak, float factor, uint32_t now)\n{\n    float threshold = peak->swing * factor;\n    float swing;\n    uint32_t interval;\n    uint32_t candidate_interval;"
+  },
+  {
+    "scene": 25,
+    "file": "application/app_task.c",
+    "line": 43,
+    "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+    "excerpt": "#define APP_SENSOR_BARO_DIV    25                       /* 气压250ms轮询，器件1Hz */\n\n/**********************\n *  STATIC PROTOTYPES\n **********************/\nstatic void app_lvgl_task(void *pvParameters);"
+  },
+  {
+    "scene": 26,
+    "file": "interface/spl006.c",
+    "line": 230,
+    "sha256": "ba75199b3888dde08e10615e18391c1d3716dfe2f3d55afa9c487a1cddc2d632",
+    "excerpt": "uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw)\n{\n    uint8_t status, data[6];\n    uint16_t result = 0;\n    int32_t pressure, temperature;\n    if (spl006_read_reg(SPL06_MEAS_CFG, &status) != 0)"
+  },
+  {
+    "scene": 27,
+    "file": "application/app_aht21.c",
+    "line": 49,
+    "sha256": "483e583bd958ea46df4d5a866c8099b2f9f5ce81188ca776348740b4713ecdda",
+    "excerpt": "    if (s_pending != 0)\n    {\n        if (elapsed < AHT21_CONVERSION_MS)\n        {\n            return;\n        }"
+  },
+  {
+    "scene": 28,
+    "file": "application/app_battery.c",
+    "line": 64,
+    "sha256": "5bc898e5e2caf055b9c812feddeef3754b252587ae7a9641c3383de4400f180f",
+    "excerpt": "        sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2U + 2047U) / 4095U;\n        sample.valid = 1;\n    }\n    if (sample.result == HAL_OK)\n    {\n        app_diag_sensor_record(APP_DIAG_BATTERY, APP_DIAG_OK, (uint32_t)sample.result, read_started);"
+  },
+  {
+    "scene": 29,
+    "file": "interface/lcd.c",
+    "line": 93,
+    "sha256": "4afbcd58c5761b97548152852c39b63f3b83102c74cf73617e9655efa7c66544",
+    "excerpt": "    LCD_WR_REG(0x2A); /* 列地址 */\n    LCD_WR_DATA8(0x00);\n    LCD_WR_DATA8((uint8_t)x1);\n    LCD_WR_DATA8(0x00);\n    LCD_WR_DATA8((uint8_t)x2);\n    LCD_WR_REG(0x2B); /* 行地址 */"
+  },
+  {
+    "scene": 30,
+    "file": "Middlewares/LVGL/lvgl/examples/porting/lv_port_disp_template.c",
+    "line": 25,
+    "sha256": "3dd75613cdf81e3faca6e9aa4a634b606a41ed8bb93146f8c1c28ec663fb1d1c",
+    "excerpt": "static void lcd_flush_ready_cb(void);\nstatic void disp_wait(lv_disp_drv_t *disp_drv);\n\n/**********************\n *  STATIC VARIABLES\n **********************/"
+  },
+  {
+    "scene": 31,
+    "file": "application/app_ui.c",
+    "line": 1898,
+    "sha256": "63f735ac9f8d6bf745f92ba1c64f08cfb396573bedf44841eb0a810b54b2b7cc",
+    "excerpt": "    if (s_screen_on && !s_transition && !touch_pressed())\n    {\n        if (s_pending_back)\n        {\n            s_pending_back = 0;\n            s_pending_page = PAGE_COUNT;"
+  },
+  {
+    "scene": 32,
+    "file": "interface/kt6368a.c",
+    "line": 187,
+    "sha256": "983c0986910313ef1a473ba4c3a754e582175480767cf69147c34306cc9851e7",
+    "excerpt": "HAL_StatusTypeDef kt6368a_write_async(const uint8_t *data, uint16_t size, uint32_t timeout_ms)\n{\n    HAL_StatusTypeDef status;\n    if (data == NULL || size == 0U || size > KT6368A_TX_MAX_SIZE || timeout_ms == 0U)\n    {\n        return HAL_ERROR;"
+  },
+  {
+    "scene": 33,
+    "file": "interface/kt6368a.h",
+    "line": 20,
+    "sha256": "3790902912ba9bb6ac21b6a675f3a496a03132e542e2d1fa22a5f953edb6d236",
+    "excerpt": "#define KT6368A_RX_BUFFER_SIZE 1024U /* 环形缓冲有效容量1023字节 */\n#define KT6368A_TX_MAX_SIZE    512U\n#define KT6368A_BOOT_DELAY_MS  1200U /* 蓝牙模块上电等待时间 */\n#define KT6368A_AT_TIMEOUT_MS  500U\n\n    /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。"
+  },
+  {
+    "scene": 34,
+    "file": "application/app_weather.c",
+    "line": 45,
+    "sha256": "069e2f4edbec4c42d9d93f0509e5ce10e73a8b771d0e6da9e45d205e9f2e9ccf",
+    "excerpt": "    if (!s_overflow && s_length >= 8 && memcmp(s_frame, \"WEATHER,\", 8) == 0 && parse_number(&cursor, &code) && *cursor++ == ',' &&\n        parse_number(&cursor, &temperature) && *cursor++ == ',' && parse_number(&cursor, &humidity) && cursor == s_frame + s_length &&\n        *cursor == '\\0' && code >= 0 && code <= 99 && temperature >= -1000 && temperature <= 1000 && humidity >= 0 && humidity <= 100)\n    {\n        s_weather.code = (uint8_t)code;\n        s_weather.temperature_x10 = (int16_t)temperature;"
+  },
+  {
+    "scene": 35,
+    "file": "application/app_diag.h",
+    "line": 8,
+    "sha256": "2616ef9df16501561c1884213d934ffb05e2e69a9c478fcee95dd8d5475a125b",
+    "excerpt": "#define APP_DEBUG_TELEMETRY 0\n#endif\n\nenum\n{\n    APP_DIAG_LVGL,"
+  },
+  {
+    "scene": 36,
+    "file": "application/app_heart.c",
+    "line": 70,
+    "sha256": "ee38b6fb8f98350ae3610814d13c4be0465819ff8be2e6babbe3c9ecfea2b096",
+    "excerpt": "static app_heart_sample_struct heart_samples[APP_HEART_SAMPLE_COUNT];\nstatic uint16_t sample_head;\nstatic uint16_t sample_count;\nstatic uint16_t sample_sequence;\nstatic uint32_t sample_start_tick;\n"
+  },
+  {
+    "scene": 37,
+    "file": "application/app_diag.c",
+    "line": 76,
+    "sha256": "8d8f0e49cd7eba136d7b04cb1fa1c8a98e8e2c6ebd13a23baabacbe57fb524d0",
+    "excerpt": "    TIM2->PSC = timer_hz / 10000U - 1U;\n    TIM2->ARR = UINT32_MAX;\n    TIM2->EGR = TIM_EGR_UG;\n    TIM2->SR = 0;\n    TIM2->CNT = 0;\n    TIM2->CR1 = TIM_CR1_CEN;"
+  },
+  {
+    "scene": 38,
+    "file": "application/app_task.c",
+    "line": 192,
+    "sha256": "6bc7ca1c0ed40133fedc11c121ef89683a806e02473548ce9ea525d8841cdacb",
+    "excerpt": "        App_IMU_Service();\n        if (cal_finished == 0)\n        {\n            cal_state = my_mpu6050_zero_offset_state();\n            my_mpu6050_zero_offset_progress(&cal_stable, &cal_frames);\n            app_diag_boot_set(APP_BOOT_CAL_STATE, (uint32_t)cal_state);"
+  }
+]
