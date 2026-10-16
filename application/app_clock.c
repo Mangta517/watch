@@ -14,6 +14,13 @@ typedef struct
 
 static app_clock_parser_struct parser;
 
+void app_clock_reset_receive(void)
+{
+    parser.length = 0;
+    parser.overflow = 0;
+    parser.has_colon = 0;
+}
+
 static void app_clock_finish(void)
 {
     uint8_t i, part = 0, digits = 0, value[3] = {0};

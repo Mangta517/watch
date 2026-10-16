@@ -28,6 +28,9 @@ static HAL_StatusTypeDef host_bt_init_status = HAL_OK;
 static uint8_t host_bt_rx[1024];
 static uint16_t host_bt_rx_size;
 static uint16_t host_bt_rx_pos;
+static uint32_t host_bt_dropped, host_bt_errors;
+static uint8_t host_bt_error_on_read;
+extern unsigned host_diag_rx_resets;
 static HAL_StatusTypeDef host_bt_tx_result = HAL_OK;
 static uint8_t host_bt_tx_busy;
 static uint8_t host_async_active;
@@ -175,7 +178,20 @@ uint16_t kt6368a_read(uint8_t *data, uint16_t size)
     }
     memcpy(data, host_bt_rx + host_bt_rx_pos, count);
     host_bt_rx_pos += count;
+    if (host_bt_error_on_read != 0)
+    {
+        ++host_bt_errors;
+        host_bt_error_on_read = 0;
+    }
     return count;
+}
+uint32_t kt6368a_get_rx_dropped(void)
+{
+    return host_bt_dropped;
+}
+uint32_t kt6368a_get_rx_errors(void)
+{
+    return host_bt_errors;
 }
 void kt6368a_flush_rx(void)
 {
@@ -187,6 +203,61 @@ static void host_bluetooth_feed(const uint8_t *data, uint16_t size)
     memcpy(host_bt_rx, data, size);
     host_bt_rx_size = size;
     host_bt_rx_pos = 0;
+}
+
+static void bluetooth_rx_error_tests(void)
+{
+    uint32_t calls = host_rtc_set_calls;
+    unsigned resets = host_diag_rx_resets;
+    app_weather_struct before, after;
+    app_weather_get_snapshot(&before);
+    host_bluetooth_feed((const uint8_t *)"12:", 3);
+    bluetooth_receive();
+    ++host_bt_dropped;
+    host_bluetooth_feed((const uint8_t *)"34\n", 3);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls && host_diag_rx_resets == resets + 1);
+    host_bluetooth_feed((const uint8_t *)"35\n13:14:15\n", 12);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 13U * 3600U + 14U * 60U + 15U);
+
+    host_bluetooth_feed((const uint8_t *)"WEATHER,3,2", 11);
+    bluetooth_receive();
+    ++host_bt_errors;
+    bluetooth_receive();
+    host_bluetooth_feed((const uint8_t *)"63,80\n", 6);
+    bluetooth_receive();
+    app_weather_get_snapshot(&after);
+    assert(after.received_ms == before.received_ms && after.temperature_x10 == before.temperature_x10);
+    host_bluetooth_feed((const uint8_t *)"WEATHER,1,-20,60\n", 17);
+    bluetooth_receive();
+    app_weather_get_snapshot(&after);
+    assert(after.code == 1 && after.temperature_x10 == -20 && after.humidity_rh == 60);
+
+    host_bluetooth_feed((const uint8_t *)"10:", 3);
+    bluetooth_receive();
+    calls = host_rtc_set_calls;
+    host_bt_error_on_read = 1;
+    host_bluetooth_feed((const uint8_t *)"20\n", 3);
+    bluetooth_receive();
+    host_tick += APP_CLOCK_FRAME_IDLE_MS;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls);
+    host_bluetooth_feed((const uint8_t *)"09:08", 5);
+    bluetooth_receive();
+    host_tick += APP_CLOCK_FRAME_IDLE_MS;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 9U * 3600U + 8U * 60U);
+
+    host_bt_dropped = UINT32_MAX;
+    bluetooth_receive();
+    host_bt_dropped = 0;
+    bluetooth_receive();
+    assert(host_diag_rx_resets == resets + 5);
+    host_bluetooth_feed((const uint8_t *)"\n07:06:05\n", 10);
+    bluetooth_receive();
+    assert(host_rtc_seconds == 7U * 3600U + 6U * 60U + 5U);
+    puts("PASS: UART loss/error/counter-wrap resets all parsers, discards suffixes and recovers at newline or idle without clearing valid weather.");
 }
 
 TickType_t xTaskGetTickCount(void)
@@ -1222,6 +1293,7 @@ int main(void)
     assert(strcmp(lv_label_get_text(s_watch_heart), "72") == 0);
     assert_static_refresh();
     screenshot("watch");
+    bluetooth_rx_error_tests();
     printf("PASS: seven feature entries, full-screen watch, shortcuts, swipe entry, and detail return/scroll restoration.\n");
     printf("PASS: phone weather UART parsing, watch/weather display, age and unchanged redraw.\n");
     printf("PASS: battery voltage on all pages, waiting/error/recovery, precision-aware redraw and navigation.\n");

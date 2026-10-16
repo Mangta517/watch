@@ -243,6 +243,12 @@ int main(int argc, char **argv)
     assert(app_diag_take_imu_calibration() == 1 && app_diag_take_imu_calibration() == 0);
     app_diag_receive((const uint8_t *)"IMU,CALx\n", 9);
     assert(app_diag_take_imu_calibration() == 0);
+    app_diag_receive((const uint8_t *)"IMU,", 4);
+    app_diag_reset_receive();
+    app_diag_receive((const uint8_t *)"CAL\n", 4);
+    assert(app_diag_take_imu_calibration() == 0);
+    app_diag_receive((const uint8_t *)"IMU,CAL\n", 8);
+    assert(app_diag_take_imu_calibration() == 1);
     fclose(fixture);
     puts("Diagnostics: stack bytes, CPU, deadlines, read outcomes, wrap, pacing, commands and CRC: PASS");
     return 0;
