@@ -84,6 +84,6 @@ for name in ["watch", "motion_magnetic", "motion_calibrating", "motion_calibrati
              "bluetooth", "bluetooth_empty", "bluetooth_tx", "bluetooth_time",
              "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds",
              "heart", "heart_measuring", "heart_no_signal", "heart_unavailable",
-             "aht21", "aht21_measuring", "aht21_crc_error", "aht21_unavailable", "battery_waiting", "battery_error", "phone_weather", "watch_weather"]:
+             "aht21", "aht21_measuring", "aht21_crc_error", "aht21_unavailable", "battery_waiting", "battery_error", "phone_weather", "watch_climate"]:
     Image.open(OUT / (name + ".ppm")).save(OUT / (name + ".png"))
 print("Preview:", OUT / "watch-ui-preview.png")

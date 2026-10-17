@@ -413,7 +413,7 @@ static void set_clock_hand(lv_obj_t *hand, lv_point_t *points, float degrees, ui
 
 static void watch_page(void)
 {
-    static const ui_page_t weather = PAGE_WEATHER;
+    static const ui_page_t climate = PAGE_AHT21;
     static const ui_page_t heart = PAGE_HEART;
     static const ui_page_t bluetooth = PAGE_BLUETOOTH;
     lv_obj_t *dial = panel(s_body, 20, 18, 200, 200, UI_BG);
@@ -452,10 +452,11 @@ static void watch_page(void)
     heart_icon(entry, 0, 0);
     s_watch_heart = label(entry, "--", 26, 3, &lv_font_montserrat_14, UI_TEXT);
     make_entry(entry, &heart);
-    entry = panel(s_body, 166, 226, 64, 22, UI_BG);
+    entry = panel(s_body, 166, 220, 64, 32, UI_BG);
     lv_obj_set_style_bg_opa(entry, LV_OPA_TRANSP, 0);
-    s_watch_temperature = label(entry, "--", 0, 3, &lv_font_montserrat_14, UI_TEXT);
-    make_entry(entry, &weather);
+    s_watch_temperature = label(entry, "--C\n--%", 0, 0, &lv_font_montserrat_14, UI_TEXT);
+    lv_obj_set_style_text_line_space(s_watch_temperature, 0, 0);
+    make_entry(entry, &climate);
     lv_obj_set_parent(s_battery_label, s_body);
     lv_obj_set_pos(s_battery_label, 40, 254);
     lv_obj_set_width(s_battery_label, 160);
@@ -467,12 +468,13 @@ static void watch_page(void)
 static void refresh_clock(void)
 {
     watch_time_struct time;
-    app_weather_struct weather;
+    app_aht21_struct climate;
     app_heart_struct heart;
     HAL_StatusTypeDef status;
     uint32_t now = lv_tick_get();
     uint32_t seconds;
     int32_t magnitude;
+    int32_t humidity_x10;
     const char *sign = "";
     status = watch_rtc_get_time(&time);
     if (status == HAL_OK && watch_rtc_is_synced())
@@ -510,6 +512,7 @@ static void refresh_clock(void)
     }
     else
     {
+        set_label_text(s_clock_hint, "RTC / LSE");
         if (lv_obj_has_flag(s_hour_hand, LV_OBJ_FLAG_HIDDEN))
         {
             lv_obj_clear_flag(s_hour_hand, LV_OBJ_FLAG_HIDDEN);
@@ -535,35 +538,22 @@ static void refresh_clock(void)
     {
         set_label_text(s_watch_heart, "--");
     }
-    app_weather_get_snapshot(&weather);
-    if (weather.valid)
+    app_aht21_get_snapshot(&climate);
+    if (climate.valid != 0)
     {
-        magnitude = weather.temperature_x10;
+        magnitude = (int32_t)(climate.sample.temperature_c * 10.0f);
+        humidity_x10 = (int32_t)(climate.sample.humidity_rh * 10.0f);
         if (magnitude < 0)
         {
             magnitude = -magnitude;
             sign = "-";
         }
-        set_label_text_fmt(s_watch_temperature, "%s%ld.%ldC", sign, (long)(magnitude / 10), (long)(magnitude % 10));
-        if (status == HAL_OK && watch_rtc_is_synced())
-        {
-            if (lv_tick_elaps(weather.received_ms) >= 3600000U)
-            {
-                set_label_text(s_clock_hint, "OLD WEATHER");
-            }
-            else
-            {
-                set_label_text(s_clock_hint, app_weather_description(weather.code));
-            }
-        }
+        set_label_text_fmt(s_watch_temperature, "%s%ld.%ldC\n%ld.%ld%%", sign, (long)(magnitude / 10), (long)(magnitude % 10),
+                           (long)(humidity_x10 / 10), (long)(humidity_x10 % 10));
     }
     else
     {
-        set_label_text(s_watch_temperature, "--");
-        if (status == HAL_OK && watch_rtc_is_synced())
-        {
-            set_label_text(s_clock_hint, "RTC / LSE");
-        }
+        set_label_text(s_watch_temperature, "--C\n--%");
     }
 }
 

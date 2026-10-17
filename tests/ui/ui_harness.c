@@ -1227,13 +1227,29 @@ int main(void)
     assert(strcmp(clock_text(), "00:00") == 0);
     assert_rtc_seconds(0);
     printf("PASS: HH:MM:SS sync, internal RTC second progression, invalid second preservation and midnight carry.\n");
-    /* 手机天气经实际蓝牙接收入口解析，切页保留，并显示最后同步时间。 */
+    /* 表盘只用本地温湿度，手机天气经蓝牙接收后仅显示在天气页。 */
+    host_aht21.valid = 1;
+    host_aht21.sample.temperature_c = 25.0f;
+    host_aht21.sample.humidity_rh = 50.0f;
     host_bluetooth_feed((const uint8_t *)"WEATHER,3,263,80\n", 17);
     advance(1100);
-    assert(strcmp(lv_label_get_text(s_clock_hint), "OVERCAST") == 0);
-    assert(strcmp(lv_label_get_text(s_watch_temperature), "26.3C") == 0);
+    assert(strcmp(lv_label_get_text(s_clock_hint), "RTC / LSE") == 0);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "25.0C\n50.0%") == 0);
     assert_static_refresh();
-    screenshot("watch_weather");
+    screenshot("watch_climate");
+    assert(lv_obj_get_height(s_watch_temperature) <= lv_obj_get_height(lv_obj_get_parent(s_watch_temperature)));
+    host_aht21.sample.temperature_c = -5.0f;
+    host_aht21.sample.humidity_rh = 100.0f;
+    advance(1100);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "-5.0C\n100.0%") == 0);
+    host_aht21.valid = 0;
+    advance(1100);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "--C\n--%") == 0);
+    host_aht21.valid = 1;
+    host_aht21.sample.temperature_c = 25.0f;
+    host_aht21.sample.humidity_rh = 50.0f;
+    advance(1100);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "25.0C\n50.0%") == 0);
     drag(180, 140, -120, 0);
     assert(s_page == PAGE_SETTINGS);
     open_feature(PAGE_WEATHER);
@@ -1247,10 +1263,11 @@ int main(void)
     key_back();
     host_tick += 3600000U;
     advance(120);
-    assert(strstr(lv_label_get_text(s_clock_hint), "OLD WEATHER") != NULL);
+    assert(strcmp(lv_label_get_text(s_clock_hint), "RTC / LSE") == 0);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "25.0C\n50.0%") == 0);
     /* 表盘快捷控件与左滑入口均使用真实触摸；底部非入口区域不触发导航。 */
     tap(174, 230);
-    assert(s_page == PAGE_WEATHER);
+    assert(s_page == PAGE_AHT21);
     key_back();
     tap(64, 230);
     assert(s_page == PAGE_HEART);
