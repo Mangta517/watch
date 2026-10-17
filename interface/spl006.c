@@ -74,7 +74,7 @@ enum
 };
 static struct
 {
-    uint32_t phase_ms, fault_ms;
+    uint32_t phase_ms, fault_ms, sample_ms;
     uint8_t phase, index, faults;
     uint8_t coef[16];
 } spl_recovery;
@@ -142,7 +142,8 @@ uint8_t spl006_recover_step(uint32_t now_ms)
     uint8_t status;
     if (spl006_coef_ready != 0)
     {
-        if (spl_recovery.faults >= 3U && (uint32_t)(now_ms - spl_recovery.fault_ms) >= 1000U)
+        if ((uint32_t)(now_ms - spl_recovery.sample_ms) >= SPL006_SAMPLE_MAX_AGE_MS ||
+            (spl_recovery.faults >= 3U && (uint32_t)(now_ms - spl_recovery.fault_ms) >= 1000U))
         {
             spl006_recover_begin();
             return 2;
@@ -219,6 +220,7 @@ uint8_t spl006_recover_step(uint32_t now_ms)
         {
             spl006_coef_ready = 1;
             spl_recovery.phase = SPL_RECOVER_DONE;
+            spl_recovery.sample_ms = HAL_GetTick();
             return 0;
         }
         return 2;
@@ -344,6 +346,7 @@ uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw)
         temperature |= (int32_t)0xFF000000;
     }
     spl_recovery.faults = 0;
+    spl_recovery.sample_ms = HAL_GetTick();
     *pressure_raw = pressure;
     *temperature_raw = temperature;
     return 0;

@@ -179,6 +179,8 @@ extern "C"
     uint8_t my_mpu6050_get_gyro(Gyro_struct *gyro);
     /* 读取三轴加速度(已减零偏，抖动较大，必要时上层再滤波) */
     uint8_t my_mpu6050_get_accel(Accel_struct *accel);
+/* 0=新帧，1=通信/配置失败，2=未就绪；未就绪不覆盖输出。 */
+#define MPU6050_DATA_NOT_READY 2U
     /* 一次突发读取 INT_STATUS+加速度+温度+陀螺仪共 15 字节；仅 sensor 任务调用 */
     uint8_t my_mpu6050_get_data(Accel_Gyro_struct *accel_gyro);
     /* 读片内温度传感器, 输出 0.01℃ 定点 (T = raw/340 + 36.53) */

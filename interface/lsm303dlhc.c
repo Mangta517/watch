@@ -14,6 +14,7 @@
 #define MAG_OUT_X_H 0x03
 #define MAG_STATUS  0x09
 #define MAG_ID_A    0x0A
+#define MAG_SAMPLE_TIMEOUT_MS 1000U /* 75Hz输出连续1s没有有效帧，进入原有分步重配置。 */
 
 static uint8_t s_ready;
 
@@ -33,8 +34,8 @@ enum
 };
 static struct
 {
-    uint32_t phase_ms, fault_ms;
-    uint8_t phase, faults;
+    uint32_t phase_ms, fault_ms, sample_ms;
+    uint8_t phase, faults, no_data;
 } mag_recovery;
 
 void lsm303dlhc_mag_recover_begin(void)
@@ -42,6 +43,7 @@ void lsm303dlhc_mag_recover_begin(void)
     s_ready = 0;
     mag_recovery.phase = MAG_RECOVER_ID;
     mag_recovery.faults = 0;
+    mag_recovery.no_data = 0;
     mag_recovery.phase_ms = HAL_GetTick();
 }
 
@@ -69,7 +71,8 @@ uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
     uint8_t index;
     if (s_ready != 0)
     {
-        if (mag_recovery.faults >= 3U && (uint32_t)(now_ms - mag_recovery.fault_ms) >= 1000U)
+        if ((mag_recovery.no_data != 0 && (uint32_t)(now_ms - mag_recovery.sample_ms) >= MAG_SAMPLE_TIMEOUT_MS) ||
+            (mag_recovery.faults >= 3U && (uint32_t)(now_ms - mag_recovery.fault_ms) >= 1000U))
         {
             lsm303dlhc_mag_recover_begin();
             return 2;
@@ -103,6 +106,7 @@ uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
     {
         mag_recovery.phase = MAG_RECOVER_DONE;
         s_ready = 1;
+        mag_recovery.sample_ms = HAL_GetTick();
         return 0;
     }
     return 2;
@@ -134,6 +138,7 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
         mag_read_fault();
         return LSM303DLHC_MAG_ERROR;
     }
+    mag_recovery.no_data = 1;
     if ((status & 0x03) == 0)
     {
         mag_recovery.faults = 0;
@@ -174,6 +179,8 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
     }
     /* 只有整帧读取和转换成功才发布，失败时保留调用方的上一帧。 */
     mag_recovery.faults = 0;
+    mag_recovery.no_data = 0;
+    mag_recovery.sample_ms = HAL_GetTick();
     *mag = sample;
     return LSM303DLHC_MAG_OK;
 }

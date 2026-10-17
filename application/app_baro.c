@@ -37,6 +37,7 @@
 static SemaphoreHandle_t s_baro_mux; /* 保护快照 */
 static app_baro_struct s_baro_data;  /* 最新数据 (锁内赋值) */
 static uint8_t s_online;             /* 1=快照有效 */
+static uint32_t s_sample_ms;
 static uint8_t s_err_streak;         /* 连续总线失败计数 (仅 Service 读写) */
 
 /**********************
@@ -48,7 +49,7 @@ static void baro_unlock(void);
 /**********************
  *   STATIC FUNCTIONS
  **********************/
-/* 锁未创建成功时跳过锁操作；此时多字段快照的一致性不受保证。 */
+/* 初始化必须取得快照锁；首帧前的查询只读取静态空快照。 */
 static void baro_lock(void)
 {
     if (s_baro_mux != NULL)
@@ -72,6 +73,12 @@ void App_Baro_Init(void)
 {
     /* mutex 在任务上下文创建 (同 App_IMU_Init 的理由) */
     s_baro_mux = xSemaphoreCreateMutex();
+    if (s_baro_mux == NULL)
+    {
+        Error_Handler();
+        return;
+    }
+    s_sample_ms = HAL_GetTick();
 }
 
 void App_Baro_Service(void)
@@ -101,6 +108,7 @@ void App_Baro_Service(void)
             alt = 0.0f;
         }
         s_err_streak = 0;
+        s_sample_ms = HAL_GetTick();
         baro_lock();
         s_baro_data.pressure_pa = ppa;
         s_baro_data.alt_m = alt;
@@ -132,6 +140,12 @@ void App_Baro_Service(void)
             app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_ERROR, 0x10000U, read_started);
         }
         s_err_streak = 0;
+    }
+    if ((uint32_t)(HAL_GetTick() - s_sample_ms) >= SPL006_SAMPLE_MAX_AGE_MS)
+    {
+        baro_lock();
+        s_online = 0;
+        baro_unlock();
     }
 }
 

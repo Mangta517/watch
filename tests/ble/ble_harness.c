@@ -9,6 +9,8 @@ static uint32_t tick, mask, delay_calls;
 static uint8_t *rx_target;
 static int rx_armed, powered, connected, boots, writes, silent, reject_setting;
 static int fail_tx, fail_rx;
+static unsigned query_count, drop_queries;
+static uint8_t query_uart_error;
 static uint8_t *tx_target;
 static uint16_t tx_size;
 static uint32_t tx_aborts;
@@ -213,9 +215,26 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data, uin
     {
         return HAL_OK;
     }
-    assert(size < sizeof(command));
+    if (size >= sizeof(command))
+    {
+        return HAL_ERROR;
+    }
     memcpy(command, data, size);
     command[size] = '\0';
+    if (size >= 6U && strncmp(command, "AT+T", 4) == 0)
+    {
+        ++query_count;
+        if (drop_queries != 0)
+        {
+            --drop_queries;
+            return HAL_OK;
+        }
+        if (query_uart_error != 0)
+        {
+            query_uart_error = 0;
+            HAL_UART_ErrorCallback(&huart1);
+        }
+    }
     if (silent)
     {
         return HAL_OK;
@@ -313,8 +332,16 @@ static void staged_startup_tests(void)
     old_boots = boots;
     assert(run_staged_startup() == HAL_OK);
     assert(writes == old_writes && boots == old_boots + 1);
+    query_count = 0;
+    drop_queries = 1;
+    old_boots = boots;
+    assert(run_staged_startup() == HAL_OK && query_count == 4U && boots == old_boots + 1);
+    query_count = 0;
+    query_uart_error = 1;
+    assert(run_staged_startup() == HAL_OK && query_count == 4U);
     silent = 1;
-    assert(run_staged_startup() == HAL_TIMEOUT);
+    query_count = 0;
+    assert(run_staged_startup() == HAL_TIMEOUT && query_count == 3U);
     silent = 0;
     fail_tx = 1;
     assert(run_staged_startup() == HAL_ERROR);

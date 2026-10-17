@@ -30,7 +30,8 @@ enum
     KT_START_BOOT,
     KT_START_QUERY,
     KT_START_REPLY,
-    KT_START_SAVE
+    KT_START_SAVE,
+    KT_START_RETRY
 };
 
 typedef struct
@@ -45,6 +46,7 @@ typedef struct
     uint8_t query;
     uint8_t changed;
     uint8_t verifying;
+    uint8_t attempts;
 } kt6368a_start_struct;
 
 static kt6368a_start_struct s_start;
@@ -463,6 +465,7 @@ static HAL_StatusTypeDef kt6368a_start_finish(HAL_StatusTypeDef status)
 
 static void kt6368a_start_next(void)
 {
+    s_start.attempts = 0;
     ++s_start.query;
     if (s_start.query < 3U)
     {
@@ -481,6 +484,19 @@ static void kt6368a_start_next(void)
     {
         (void)kt6368a_start_finish(HAL_OK);
     }
+}
+
+/* 瞬态错误仅重查当前参数；明确拒绝/验证不匹配仍直接结束。 */
+static HAL_StatusTypeDef kt6368a_start_retry(HAL_StatusTypeDef status)
+{
+    if (s_start.attempts >= 3U)
+    {
+        return kt6368a_start_finish(status);
+    }
+    s_start.phase = KT_START_RETRY;
+    s_start.phase_ms = HAL_GetTick();
+    kt6368a_flush_rx();
+    return HAL_BUSY;
 }
 
 HAL_StatusTypeDef kt6368a_init_service(void)
@@ -526,6 +542,14 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         }
         return init_status;
     }
+    if (s_start.phase == KT_START_RETRY)
+    {
+        if ((uint32_t)(now - s_start.phase_ms) >= 100U)
+        {
+            s_start.phase = KT_START_QUERY;
+        }
+        return HAL_BUSY;
+    }
     if (s_start.phase == KT_START_QUERY)
     {
         kt6368a_flush_rx();
@@ -533,21 +557,22 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         s_start.rx_errors = ble.rx_errors;
         s_start.rx_dropped = ble.rx_dropped;
         s_start.phase_ms = now;
+        ++s_start.attempts;
         status = HAL_UART_Transmit(&huart1, (uint8_t *)queries[s_start.query], (uint16_t)strlen(queries[s_start.query]), 10U);
         if (status != HAL_OK)
         {
-            return kt6368a_start_finish(status);
+            return kt6368a_start_retry(status);
         }
         s_start.phase = KT_START_REPLY;
         return HAL_BUSY;
     }
     if (ble.rx_errors != s_start.rx_errors || ble.rx_dropped != s_start.rx_dropped)
     {
-        return kt6368a_start_finish(HAL_ERROR);
+        return kt6368a_start_retry(HAL_ERROR);
     }
     if ((uint32_t)(now - s_start.phase_ms) >= KT6368A_AT_TIMEOUT_MS)
     {
-        return kt6368a_start_finish(HAL_TIMEOUT);
+        return kt6368a_start_retry(HAL_TIMEOUT);
     }
     while (budget-- != 0 && kt6368a_read(&byte, 1) != 0)
     {
@@ -569,7 +594,7 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         }
         if (s_start.overflow != 0)
         {
-            return kt6368a_start_finish(HAL_ERROR);
+            return kt6368a_start_retry(HAL_ERROR);
         }
         s_start.line[s_start.length] = '\0';
         s_start.length = 0;
@@ -612,7 +637,7 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         status = HAL_UART_Transmit(&huart1, (uint8_t *)setting, (uint16_t)strlen(setting), 10U);
         if (status != HAL_OK)
         {
-            return kt6368a_start_finish(status);
+            return kt6368a_start_retry(status);
         }
         s_start.changed = 1;
         s_start.phase = KT_START_SAVE;

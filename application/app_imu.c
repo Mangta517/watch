@@ -314,26 +314,6 @@ void App_IMU_Service(void)
     uint32_t read_started;
     app_mag_fusion_state mag_fusion_state = APP_MAG_FUSION_IMU_NO_DATA;
 
-    /* dt = 距上次服务的真实间隔 (flight 端同款约定: 实测+限幅, 不硬编码) */
-    if (s_first)
-    {
-        s_first = 0;
-        dt = APP_IMU_DT_INIT_S;
-    }
-    else
-    {
-        dt = (float)(now - s_last) / (float)configTICK_RATE_HZ;
-        if (dt < APP_IMU_DT_MIN_S)
-        {
-            dt = APP_IMU_DT_MIN_S;
-        }
-        if (dt > APP_IMU_DT_MAX_S)
-        {
-            dt = APP_IMU_DT_MAX_S;
-        }
-    }
-    s_last = now;
-
     /* 1. 采样：同一sensor任务先取磁参考，再取MPU帧，避免总线竞争。 */
     mag_online = mag_service(now, mag_body);
     field_squared = mag_body[0] * mag_body[0] + mag_body[1] * mag_body[1] + mag_body[2] * mag_body[2];
@@ -344,6 +324,10 @@ void App_IMU_Service(void)
     {
         app_diag_sensor_record(APP_DIAG_MPU, APP_DIAG_OK, read_result, read_started);
     }
+    else if (read_result == MPU6050_DATA_NOT_READY)
+    {
+        app_diag_sensor_record(APP_DIAG_MPU, APP_DIAG_NOT_READY, read_result, read_started);
+    }
     else
     {
         app_diag_sensor_record(APP_DIAG_MPU, APP_DIAG_ERROR, read_result, read_started);
@@ -353,6 +337,25 @@ void App_IMU_Service(void)
     app_diag_mpu_cal_record(my_mpu6050_zero_offset_diag());
     if (read_result == 0)
     {
+        /* dt = 距上次有效更新的真实间隔 (flight 端同款约定: 实测+限幅, 不硬编码) */
+        if (s_first)
+        {
+            s_first = 0;
+            dt = APP_IMU_DT_INIT_S;
+        }
+        else
+        {
+            dt = (float)(now - s_last) / (float)configTICK_RATE_HZ;
+            if (dt < APP_IMU_DT_MIN_S)
+            {
+                dt = APP_IMU_DT_MIN_S;
+            }
+            if (dt > APP_IMU_DT_MAX_S)
+            {
+                dt = APP_IMU_DT_MAX_S;
+            }
+        }
+        s_last = now;
         if (cal_after == MPU6050_CAL_DONE && cal_before == MPU6050_CAL_AVERAGING)
         {
             Common_IMU_Reset();
@@ -393,13 +396,13 @@ void App_IMU_Service(void)
 
         s_err_streak = 0;
     }
-    else if (s_err_streak < APP_IMU_OFFLINE_STREAK)
+    else if (read_result != MPU6050_DATA_NOT_READY && s_err_streak < APP_IMU_OFFLINE_STREAK)
     {
         ++s_err_streak;
     }
     /* 3. 发布：六轴、姿态和磁状态在同一保护区更新，UI只读一致快照。 */
     imu_lock();
-    if (s_err_streak == 0)
+    if (read_result == 0)
     {
         s_imu_data.raw = raw;
         s_imu_data.pitch_deg = s_euler.pitch;
@@ -407,7 +410,8 @@ void App_IMU_Service(void)
         s_imu_data.yaw_deg = s_euler.yaw;
         s_online = 1;
     }
-    else if (s_err_streak >= APP_IMU_OFFLINE_STREAK)
+    else if (s_err_streak >= APP_IMU_OFFLINE_STREAK ||
+             (s_first == 0 && (TickType_t)(now - s_last) >= pdMS_TO_TICKS(50U)))
     {
         s_online = 0;
     }

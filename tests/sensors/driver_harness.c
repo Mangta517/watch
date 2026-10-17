@@ -319,7 +319,20 @@ static void touch_recovery_tests(void)
     queue_read(0xB5);
     queue_write();
     assert(Touch_GetPoint(&x, &y) == 0);
-    assert(tp_resets == 1 && g_tp_chip_id == 0xB5 && task_waits == 2 && hal_waits == 0);
+    assert(tp_resets == 1 && g_tp_chip_id == 0 && task_waits == 0 && hal_waits == 0);
+    start = elapsed_ms;
+    assert(Touch_GetPoint(&x, &y) == 0 && elapsed_ms == start);
+    elapsed_ms += 9U;
+    assert(Touch_GetPoint(&x, &y) == 0);
+    ++elapsed_ms;
+    assert(Touch_GetPoint(&x, &y) == 0);
+    elapsed_ms += 299U;
+    assert(Touch_GetPoint(&x, &y) == 0 && g_tp_chip_id == 0);
+    ++elapsed_ms;
+    assert(Touch_GetPoint(&x, &y) == 0);
+    assert(Touch_GetPoint(&x, &y) == 0 && g_tp_chip_id == 0xB5);
+    assert(Touch_GetPoint(&x, &y) == 0);
+    assert(task_waits == 0 && hal_waits == 0 && elapsed_ms - start == 310U);
     assert(edges_at_reset - before_edges == 20 && released_at_reset - before_released == 10);
     assert(reply_pos == reply_count);
     reply_count = reply_pos = 0;
@@ -480,6 +493,29 @@ static void lcd_dma_timeout_tests(void)
     puts("PASS: lost DMA callbacks time out at 100ms, wait for buffer safety, complete once and handle tick wrap.");
 }
 
+static void touch_async_absent_tests(void)
+{
+    uint16_t x = 123U, y = 456U;
+    uint32_t before;
+    unsigned i;
+    reset_observations(taskSCHEDULER_RUNNING);
+    elapsed_ms = UINT32_MAX - 5U;
+    for (i = 0; i < 200U; ++i)
+    {
+        assert(Touch_GetPoint(&x, &y) == 0);
+    }
+    assert(tp_resets == 1U && task_waits == 0 && hal_waits == 0);
+    for (i = 0; i < 120U; ++i)
+    {
+        elapsed_ms += 5U;
+        before = elapsed_ms;
+        assert(Touch_GetPoint(&x, &y) == 0 && elapsed_ms == before);
+    }
+    assert(g_tp_chip_id == 0 && x == 123U && y == 456U);
+    assert(tp_resets == 1U && task_waits == 0 && hal_waits == 0);
+    puts("PASS: absent touch recovers across tick wrap without sleeping in input callbacks or publishing stale coordinates.");
+}
+
 int main(void)
 {
     lcd_fill_tests();
@@ -489,6 +525,7 @@ int main(void)
     init_delay_tests(taskSCHEDULER_RUNNING);
     init_delay_tests(taskSCHEDULER_SUSPENDED);
     touch_recovery_tests();
+    touch_async_absent_tests();
     puts("PASS: real LCD/touch init and sleep delays, reset/probe recovery, failure threshold and coordinates");
     return 0;
 }
