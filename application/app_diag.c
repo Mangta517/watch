@@ -35,6 +35,8 @@ typedef struct
     uint32_t work_last_us;
     uint32_t work_max_us;
     uint32_t init_result;
+    uint32_t recovery_attempts;
+    uint8_t recovery_state;
 } app_diag_sensor_struct;
 
 static app_diag_task_struct s_tasks[APP_DIAG_TASK_COUNT];
@@ -169,6 +171,22 @@ void app_diag_sensor_init(uint8_t id, uint32_t result)
 {
     taskENTER_CRITICAL();
     s_sensors[id].init_result = result;
+    taskEXIT_CRITICAL();
+}
+
+void app_diag_sensor_recovery(uint8_t id, uint8_t state)
+{
+    app_diag_sensor_struct *stats = &s_sensors[id];
+    taskENTER_CRITICAL();
+    if (state == 2U && stats->recovery_state != 2U)
+    {
+        ++stats->recovery_attempts;
+    }
+    if (stats->recovery_state == 2U && state != 2U)
+    {
+        stats->init_result = state;
+    }
+    stats->recovery_state = state;
     taskEXIT_CRITICAL();
 }
 

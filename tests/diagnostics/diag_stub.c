@@ -77,3 +77,9 @@ void app_diag_imu_save_record(uint32_t stage, uint32_t error, uint32_t address, 
     host_imu_save_diag[2] = address;
     host_imu_save_diag[3] = elapsed_ms;
 }
+
+void app_diag_sensor_recovery(uint8_t id, uint8_t state)
+{
+    (void)id;
+    (void)state;
+}

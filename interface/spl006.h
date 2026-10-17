@@ -94,6 +94,9 @@ extern "C"
  * (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR); 内含 HAL_Delay, 由
  *  sensor任务启动时调用一次，不能在ISR或UI任务调用) */
     uint8_t spl006_init(void);
+    /* sensor每拍调用：0=就绪，1=失败冷却，2=推进中；每次至多一笔I2C事务。 */
+    void spl006_recover_begin(void);
+    uint8_t spl006_recover_step(uint32_t now_ms);
 
     /* 读原始压力/温度计数 (24bit 补码符号扩展): 0=成功, 1=数据未就绪, 2=总线失败 */
     uint8_t spl006_read_pressure(int32_t *pressure_raw);

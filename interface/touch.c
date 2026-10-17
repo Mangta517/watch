@@ -18,6 +18,7 @@
   ******************************************************************************
 ***/
 #include "touch.h"
+#include "my_i2c.h"
 #include "stm32f4xx_hal.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -279,22 +280,6 @@ static uint8_t tp_write_reg(uint8_t reg, uint8_t val)
     return 1;
 }
 
-/* 总线看门狗恢复: 从机卡在应答中间把 SDA 拉死时, 补 9 个 SCL + STOP 释放 */
-static void iic_bus_recover(void)
-{
-    uint8_t i;
-
-    tp_sda_in(); /* 释放SDA，避免与卡在低电平的从机争用 */
-    for (i = 0; i < 9; i++)
-    {
-        TP_SCL_0();
-        tp_delay();
-        TP_SCL_1();
-        tp_delay();
-    }
-    iic_stop();
-}
-
 /******************************************************************************
  * 复位: 拉低10ms, 释放后等 300ms 固件引导就绪 (CST816 RST→I2C 可用需 200ms+)
  *****************************************************************************/
@@ -357,7 +342,7 @@ uint8_t Touch_Init(void)
 
     if (id == 0)
     {
-        iic_bus_recover(); /* 未见器件: 先清一次可能的总线卡死再进运行时自愈 */
+        (void)my_i2c_recover(MY_I2C_BUS_TP); /* 未见器件: 先清一次可能的总线卡死再进运行时自愈 */
     }
     return id;
 }
@@ -422,7 +407,7 @@ void Touch_Sleep(void)
 
 void Touch_Wakeup(void)
 {
-    iic_bus_recover();
+    (void)my_i2c_recover(MY_I2C_BUS_TP);
     Touch_Reset();
     (void)tp_probe(1);                         /* 两个候选地址各探测一次 */
     (void)tp_write_reg(REG_AutoSleepTime, 0x00); /* 复位后配置丢失, 重关休眠 */

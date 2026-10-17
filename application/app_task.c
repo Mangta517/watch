@@ -217,6 +217,10 @@ static void app_sensor_task(void *pvParameters)
         static uint8_t baro_cnt = 0;
 
         app_diag_task_begin(APP_DIAG_SENSOR_TASK);
+        /* 非阻塞恢复：每个器件每拍至多推进一笔事务，失败冷却期间仍完成其他服务。 */
+        app_diag_sensor_recovery(APP_DIAG_MPU, my_mpu6050_recover_step(HAL_GetTick()));
+        app_diag_sensor_recovery(APP_DIAG_BARO, spl006_recover_step(HAL_GetTick()));
+        app_diag_sensor_recovery(APP_DIAG_MAG, lsm303dlhc_mag_recover_step(HAL_GetTick()));
         if (app_diag_take_imu_calibration() != 0)
         {
             cal_finished = 0;

@@ -37,7 +37,7 @@ static uint32_t sda_mode;
 static GPIO_PinState replies[128];
 static unsigned reply_count, reply_pos;
 static jmp_buf error_jump;
-static uint8_t error_expected, spi_capture;
+static uint8_t error_expected, spi_capture, recovery_sample;
 static int spi_fail_after = -1;
 static HAL_StatusTypeDef spi_error;
 static unsigned spi_payload_calls, spi_payload_bytes;
@@ -132,6 +132,16 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
 }
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
 {
+    if (port == TP_SCL_GPIO_Port && pin == TP_SCL_Pin)
+    {
+        recovery_sample = 1;
+        return scl_state;
+    }
+    if (recovery_sample != 0)
+    {
+        recovery_sample = 0;
+        return GPIO_PIN_SET; /* 恢复后采样线路空闲，不是下一事务的ACK。 */
+    }
     assert(!primask && port == TP_SDA_GPIO_Port && pin == TP_SDA_Pin);
     assert(sda_mode == GPIO_MODE_INPUT && elapsed_ms >= tp_ready_at);
     if (reply_pos < reply_count)
@@ -284,7 +294,7 @@ static void touch_recovery_tests(void)
     assert(tp_resets == 1 && g_tp_chip_id == 0xB7 && elapsed_ms - start >= 410);
     assert(reply_pos == reply_count && hal_waits == 0 && task_waits == 3);
     /* Nine real rising edges before reset, with SDA released throughout. */
-    assert(edges_at_reset == 9 && released_at_reset == 9);
+    assert(edges_at_reset == 10 && released_at_reset == 9);
 
     reset_observations(taskSCHEDULER_RUNNING);
     queue_read(0); /* A successful no-finger sample clears the failure streak. */
@@ -302,7 +312,7 @@ static void touch_recovery_tests(void)
     queue_write();
     assert(Touch_GetPoint(&x, &y) == 0);
     assert(tp_resets == 1 && g_tp_chip_id == 0xB5 && task_waits == 2 && hal_waits == 0);
-    assert(edges_at_reset - before_edges == 19 && released_at_reset - before_released == 10);
+    assert(edges_at_reset - before_edges == 20 && released_at_reset - before_released == 10);
     assert(reply_pos == reply_count);
     reply_count = reply_pos = 0;
     queue_read(1);
@@ -439,4 +449,8 @@ int main(void)
     touch_recovery_tests();
     puts("PASS: real LCD/touch init and sleep delays, reset/probe recovery, failure threshold and coordinates");
     return 0;
+}
+
+void host_i2c_nop(void)
+{
 }

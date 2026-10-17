@@ -37,7 +37,9 @@ static unsigned hal_delay_calls, task_delay_calls;
 static uint32_t primask;
 static uint8_t bus_active, mutex_taken;
 static int fail_dev = -1, fail_reg = -1;
-static unsigned reads, mag_frames, mag_config_writes;
+static unsigned reads, mag_frames, mag_config_writes, bus_transactions;
+static uint32_t transfer_ms, spl_reset_ended, spl_status_ended;
+static uint8_t check_recovery_waits, spl_status_polls;
 static int spl_fail_read_at = -1, spl_fail_write_at = -1;
 static unsigned spl_reads, spl_writes;
 static unsigned mpu_reads, mpu_writes;
@@ -121,6 +123,8 @@ static void bus_enter(my_i2c_bus_t bus)
 {
     assert((bus == MY_I2C_BUS_SENSOR || bus == MY_I2C_BUS_EEPROM) && !bus_active);
     assert(!primask && !mutex_taken); /* No whole-transfer IRQ mask or snapshot mutex. */
+    tick += transfer_ms;
+    ++bus_transactions;
     bus_active = 1;
     HAL_GPIO_EXTI_Callback(MPU6050_INT_Pin);
     assert(bus_active && !primask); /* ISR cannot nest an I2C transaction. */
@@ -139,7 +143,23 @@ uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev)
 uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, uint8_t *data, uint16_t len)
 {
     uint8_t error;
+    if (check_recovery_waits != 0 && dev == SPL006_ADDR && reg == SPL06_MEAS_CFG)
+    {
+        if (spl_status_polls == 0)
+        {
+            assert((uint32_t)(tick - spl_reset_ended) >= 20U);
+        }
+        else if (spl_status_polls == 1)
+        {
+            assert((uint32_t)(tick - spl_status_ended) >= 50U);
+        }
+        ++spl_status_polls;
+    }
     bus_enter(bus);
+    if (check_recovery_waits != 0 && dev == SPL006_ADDR && reg == SPL06_MEAS_CFG)
+    {
+        spl_status_ended = tick;
+    }
     ++reads;
     error = (fail_dev == dev && (fail_reg < 0 || fail_reg == reg));
     if (dev == MPU6050_ADDR)
@@ -235,6 +255,8 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, const uin
         if (dev == SPL006_ADDR && reg == SPL06_RESET)
         {
             regs[dev][SPL06_MEAS_CFG] = spl_reset_status;
+            spl_reset_ended = tick;
+            spl_status_polls = 0;
         }
         if (dev == LSM303DLHC_MAG_ADDR)
         {
@@ -1151,9 +1173,16 @@ static void spl006_init_tests(void)
     {
         spl_fail_read_at = failure;
         spl_reads = spl_writes = 0;
-        assert(spl006_init() == 1);
-        pressure = -1;
-        assert(spl006_process_pressure(0, 0, &pressure) == 1 && pressure == -1);
+        if (failure == 1 || failure == 2)
+        {
+            assert(spl006_init() == 0); /* 就绪轮询中的单次NACK被容忍。 */
+        }
+        else
+        {
+            assert(spl006_init() == 1);
+            pressure = -1;
+            assert(spl006_process_pressure(0, 0, &pressure) == 1 && pressure == -1);
+        }
         spl_fail_read_at = -1;
         assert(spl006_init() == 0);
     }
@@ -1268,9 +1297,16 @@ static void mpu_init_error_tests(void)
     {
         mpu_reads = 0;
         mpu_fail_read_at = failure;
-        assert(my_mpu6050_init() == 1);
+        if (failure == 1)
+        {
+            assert(my_mpu6050_init() == 0); /* 复位窗NACK后下一拍继续读。 */
+        }
+        else
+        {
+            assert(my_mpu6050_init() == 1);
+            assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &before, sizeof(raw)) == 0);
+        }
         mpu_fail_read_at = -1;
-        assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &before, sizeof(raw)) == 0);
         assert(my_mpu6050_init() == 0);
     }
     puts("PASS: every MPU config write and final status read reports failure; incomplete reinit cannot publish an ACK-only frame.");
@@ -1309,8 +1345,128 @@ static void init_delay_tests(void)
     puts("PASS: SPL006/MPU initialization yields only with a running scheduler, preserves minimum waits and bounded retries");
 }
 
+static uint8_t checked_recovery_step(uint8_t (*step)(uint32_t))
+{
+    unsigned transactions = bus_transactions;
+    unsigned task_waits = task_delay_calls, hal_waits = hal_delay_calls;
+    TickType_t started = tick;
+    uint8_t result = step(HAL_GetTick());
+    assert(bus_transactions - transactions <= 1U);
+    assert(task_delay_calls == task_waits && hal_delay_calls == hal_waits);
+    assert((uint32_t)(tick - started) == (bus_transactions - transactions) * transfer_ms);
+    return result;
+}
+
+static void recovery_tests(void)
+{
+    uint8_t (*const steps[])(uint32_t) = {my_mpu6050_recover_step, spl006_recover_step, lsm303dlhc_mag_recover_step};
+    uint8_t (*const inits[])(void) = {my_mpu6050_init, spl006_init, lsm303dlhc_mag_init};
+    const int devices[] = {MPU6050_ADDR, SPL006_ADDR, LSM303DLHC_MAG_ADDR};
+    const mpu6050_offset_struct saved = {{20, -10, 30}, {66, -33, 99}};
+    mpu6050_offset_struct after;
+    Accel_Gyro_struct raw, sentinel;
+    lsm303dlhc_mag_struct mag, previous;
+    uint8_t results[3] = {2, 2, 2};
+    unsigned lap, device;
+    int32_t pressure;
+    tick = UINT32_MAX - 100U;
+    transfer_ms = 2;
+    check_recovery_waits = 1;
+    regs[MPU6050_ADDR][MPU6050_WHO_AM_I] = 0x68;
+    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
+    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
+    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
+    regs[SPL006_ADDR][SPL06_C00_BYTE2] = 0x18;
+    regs[SPL006_ADDR][SPL06_C00_BYTE1] = 0x6A;
+    regs[SPL006_ADDR][SPL06_C00_BYTE0] = 0;
+    my_mpu6050_restore_offset(&saved);
+    my_mpu6050_recover_begin();
+    spl006_recover_begin();
+    lsm303dlhc_mag_recover_begin();
+    memset(&raw, 0x5A, sizeof(raw));
+    sentinel = raw;
+    memset(&mag, 0x5A, sizeof(mag));
+    previous = mag;
+    for (lap = 0; lap < 80; ++lap)
+    {
+        if (lap == 2)
+        {
+            mpu_fail_read_at = (int)mpu_reads; /* RESET轮询恰好一次NACK。 */
+        }
+        for (device = 0; device < 3; ++device)
+        {
+            results[device] = checked_recovery_step(steps[device]);
+            assert(results[device] != 1);
+        }
+        mpu_fail_read_at = -1;
+        if (results[0] == 2)
+        {
+            assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &sentinel, sizeof(raw)) == 0);
+        }
+        if (results[1] == 2)
+        {
+            pressure = -123;
+            assert(spl006_process_pressure(0, 0, &pressure) == 1 && pressure == -123);
+        }
+        if (results[2] == 2)
+        {
+            assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_ERROR && memcmp(&mag, &previous, sizeof(mag)) == 0);
+        }
+        tick += 10; /* 三状态机共同推进；真实任务随后还会走完其他服务和progress。 */
+    }
+    assert(results[0] == 0 && results[1] == 0 && results[2] == 0);
+    assert(spl006_process_pressure(0, 0, &pressure) == 0 && pressure == 100000);
+    /* 每个器件启动失败后，1s冷却结束才重试；无需重启MCU或调用阻塞init。 */
+    for (device = 0; device < 3; ++device)
+    {
+        fail_dev = devices[device];
+        assert(inits[device]() == 1);
+        fail_dev = -1;
+        tick += 999;
+        assert(checked_recovery_step(steps[device]) == 1);
+        ++tick;
+        assert(checked_recovery_step(steps[device]) == 2);
+        for (lap = 0; lap < 100 && checked_recovery_step(steps[device]) == 2; ++lap)
+        {
+            tick += 10;
+        }
+        assert(lap < 100 && checked_recovery_step(steps[device]) == 0);
+    }
+    /* 长期运行I2C故障触发MPU重配置；短暂失败仍可沿原采样路径自行恢复。 */
+    fail_dev = MPU6050_ADDR;
+    for (lap = 0; lap < 3; ++lap)
+    {
+        assert(my_mpu6050_get_data(&raw) == 1);
+    }
+    tick += 999;
+    assert(checked_recovery_step(my_mpu6050_recover_step) == 0);
+    ++tick;
+    assert(checked_recovery_step(my_mpu6050_recover_step) == 2);
+    for (lap = 0; lap < 130; ++lap)
+    {
+        checked_recovery_step(my_mpu6050_recover_step);
+        tick += 10;
+    }
+    fail_dev = -1;
+    for (lap = 0; lap < 150; ++lap)
+    {
+        checked_recovery_step(my_mpu6050_recover_step);
+        tick += 10;
+    }
+    assert(checked_recovery_step(my_mpu6050_recover_step) == 0);
+    my_mpu6050_get_offset(&after);
+    assert(memcmp(&saved, &after, sizeof(saved)) == 0);
+    assert(my_mpu6050_zero_offset_state() == MPU6050_CAL_RESTORED);
+    puts("PASS: real recovery steps use at most one transaction/no waits, tolerate reset NACK, retry failed boot/runtime faults, preserve offsets and survive tick wrap.");
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "recovery") == 0)
+    {
+        recovery_tests();
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "save_failed") != 0)
     {
         restore_tests(strcmp(argv[1], "load_failed") == 0);

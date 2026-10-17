@@ -86,3 +86,5 @@ CSV 是长表：phone_elapsed_ms,device_ms,sequence,type,name,field,value。phon
 Java 测试直接解析此 C 测试输出的真实 UART 字节，覆盖每个拆包位置、单字节输入、与心率帧混合、CRC 故障恢复、序号缺口、未知年龄、CSV 缓存和重连清空。
 原 sensor、startup、BLE、UI、clock 回归通过；Keil 构建 0 错误 / 0 警告。APK 重建及 v1/v2/v3 签名检查通过；原 APK 工具的警告保留。
 这些结果不代表已烧录、已安装或真实蓝牙/传感器测量成功，最终数据需在成品板和手机上采集。
+
+SENSOR 逐拍恢复的状态保存在 `s_sensors[id].recovery_state`（0=就绪，1=失败冷却，2=恢复中），`recovery_attempts` 在每次进入恢复中时累计。最近一次恢复完成/失败会同步更新 `init_result`。这两项供调试器观察，不改变现有手机诊断帧布局；运行期不会重建数据锁或清除已生效零偏。

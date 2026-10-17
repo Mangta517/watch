@@ -38,6 +38,11 @@ static uint8_t em7028_write_reg(uint8_t reg, uint8_t value)
 static uint8_t em7028_read_reg(uint8_t reg, uint8_t *value)
 {
     em7028_last_fault.reg = reg;
+    if (my_i2c_prepare(MY_I2C_BUS_SENSOR) != 0)
+    {
+        em7028_last_fault.kind = EM7028_FAULT_READ;
+        return 1;
+    }
     my_i2c_start(MY_I2C_BUS_SENSOR);
     my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)(EM7028_ADDR << 1));
     if (my_i2c_wait_ack(MY_I2C_BUS_SENSOR) != 0)
@@ -55,6 +60,11 @@ static uint8_t em7028_read_reg(uint8_t reg, uint8_t *value)
     }
     my_i2c_stop(MY_I2C_BUS_SENSOR);
 
+    if (my_i2c_prepare(MY_I2C_BUS_SENSOR) != 0)
+    {
+        em7028_last_fault.kind = EM7028_FAULT_READ;
+        return 1;
+    }
     my_i2c_start(MY_I2C_BUS_SENSOR);
     my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)((EM7028_ADDR << 1) | 1U));
     if (my_i2c_wait_ack(MY_I2C_BUS_SENSOR) != 0)

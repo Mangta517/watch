@@ -11,7 +11,7 @@ void tps3823_init(void);
 void tps3823_enable(void);
 /* 屏蔽外部复位并将 WDI 置高阻，停止芯片内部看门狗计时。 */
 void tps3823_disable(void);
-/* 每次翻转一次 WDI；禁用时无动作。调用间隔须明显小于最短超时 900ms。 */
+/* 每次翻转一次WDI，禁用时无动作；非A版按下降沿计算，完整高低周期须留足900ms超时余量。 */
 void tps3823_feed(void);
 
 #endif

@@ -11,7 +11,7 @@ static TaskFunction_t entries[2];
 static unsigned int task_count, fail_task;
 static uint8_t fail_devices, displayed, frame, rtc_done, ble_done, sensor_ran;
 static unsigned int hardware_count, service_count, battery_samples;
-static unsigned int cal_begins, restores, saves, sensor_rounds;
+static unsigned int cal_begins, restores, saves, sensor_rounds, recovery_steps;
 static uint8_t restored_mode, load_error, save_error, manual_request, complete_cal, fail_cal;
 static mpu6050_cal_state mock_cal_state;
 static const mpu6050_offset_struct stored_offset = {{20, -10, 30}, {66, -33, 99}};
@@ -184,6 +184,8 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     assert(hardware_count == 5 && battery_samples == sensor_rounds + 2);
     assert(!rtc_done && !ble_done);
     ++sensor_rounds;
+    assert(recovery_steps == sensor_rounds * 3U);
+    assert(app_sensor_watchdog_progress == sensor_rounds);
     if (sensor_rounds < 2)
     {
         tick += ticks;
@@ -419,5 +421,36 @@ int main(int argc, char **argv)
         assert(milestones[APP_BOOT_RTC_RESULT] == HAL_TIMEOUT && milestones[APP_BOOT_BT_RESULT] == HAL_TIMEOUT);
     }
     puts("Startup: first frame, sensor sampling and UI service proceed during RTC/Bluetooth waits: PASS");
+    return 0;
+}
+
+uint8_t my_mpu6050_recover_step(uint32_t now_ms)
+{
+    assert(now_ms == tick);
+    ++recovery_steps;
+    if (fail_devices != 0)
+    {
+        return 2; /* Recovering devices must not stop sensor progress. */
+    }
+    return 0;
+}
+uint8_t spl006_recover_step(uint32_t now_ms)
+{
+    assert(now_ms == tick);
+    ++recovery_steps;
+    if (fail_devices != 0)
+    {
+        return 2; /* Recovering devices must not stop sensor progress. */
+    }
+    return 0;
+}
+uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
+{
+    assert(now_ms == tick);
+    ++recovery_steps;
+    if (fail_devices != 0)
+    {
+        return 2; /* Recovering devices must not stop sensor progress. */
+    }
     return 0;
 }

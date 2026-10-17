@@ -28,6 +28,10 @@ static void aht21_delay_ms(uint32_t ms)
 static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
 {
     uint8_t i;
+    if (my_i2c_prepare(MY_I2C_BUS_SENSOR) != 0)
+    {
+        return AHT21_I2C_ERROR;
+    }
     my_i2c_start(MY_I2C_BUS_SENSOR);
     my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)((AHT21_ADDR << 1) | 1U));
     if (my_i2c_wait_ack(MY_I2C_BUS_SENSOR) != 0)

@@ -347,3 +347,9 @@ int main(void)
          "wrap.");
     return 0;
 }
+
+uint8_t my_i2c_prepare(my_i2c_bus_t bus)
+{
+    assert(bus == MY_I2C_BUS_SENSOR && phase == 0);
+    return 0;
+}

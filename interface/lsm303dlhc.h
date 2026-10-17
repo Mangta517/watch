@@ -25,6 +25,9 @@ typedef enum
 
 /* 总线初始化后、调度器启动前调用；0=成功，1=通信/识别/配置失败。 */
 uint8_t lsm303dlhc_mag_init(void);
+/* sensor每拍调用：0=就绪，1=失败冷却，2=推进中；每次至多一笔I2C事务。 */
+void lsm303dlhc_mag_recover_begin(void);
+uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms);
 /* 状态轮询 + 完整六字节突发读；失败或无新数据时保留调用方输出。 */
 lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag);
 

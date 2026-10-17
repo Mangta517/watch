@@ -156,6 +156,15 @@ int main(int argc, char **argv)
     assert(s_sensors[APP_DIAG_MPU].gap_last_ms == 10);
     assert(s_sensors[APP_DIAG_MPU].ok == 2 && s_sensors[APP_DIAG_MPU].not_ready == 1 && s_sensors[APP_DIAG_MPU].errors == 1);
     assert(s_sensors[APP_DIAG_MPU].work_max_us == 1000);
+    app_diag_sensor_recovery(APP_DIAG_MPU, 2);
+    app_diag_sensor_recovery(APP_DIAG_MPU, 2);
+    assert(s_sensors[APP_DIAG_MPU].recovery_attempts == 1);
+    app_diag_sensor_recovery(APP_DIAG_MPU, 1);
+    assert(s_sensors[APP_DIAG_MPU].init_result == 1);
+    app_diag_sensor_recovery(APP_DIAG_MPU, 2);
+    app_diag_sensor_recovery(APP_DIAG_MPU, 0);
+    assert(s_sensors[APP_DIAG_MPU].recovery_attempts == 2);
+    assert(s_sensors[APP_DIAG_MPU].recovery_state == 0 && s_sensors[APP_DIAG_MPU].init_result == 0);
     app_diag_sensor_init(APP_DIAG_MPU, 0);
     app_diag_task_begin(APP_DIAG_SENSOR_TASK);
     diag_timer.CNT += 120;
