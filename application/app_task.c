@@ -70,6 +70,21 @@ static void app_watchdog_render_progress(void);
 /**********************
  *   GLOBAL FUNCTIONS
  **********************/
+/* 独立于HAL tick和主时钟启动；最大分频/重装在LSI=17~47kHz时约22.3~61.7s。
+ * 不在ISR或独立定时器喂狗；外部TPS3823启用后，两只狗共用任务进度条件。 */
+void app_boot_watchdog_start(void)
+{
+    WRITE_REG(IWDG->KR, 0xCCCCU);
+    WRITE_REG(IWDG->KR, 0x5555U);
+    WRITE_REG(IWDG->PR, 6U); /* 256分频。 */
+    WRITE_REG(IWDG->RLR, 0x0FFFU);
+    while (IWDG->SR != 0U)
+    {
+        /* 配置无法同步时也不刷新，已启动的IWDG负责复位。 */
+    }
+    WRITE_REG(IWDG->KR, 0xAAAAU);
+}
+
 void App_Task_Create(void)
 {
     tps3823_init();
@@ -120,6 +135,7 @@ static void app_watchdog_service(void)
     if ((uint32_t)(now_ms - app_watchdog.last_feed_ms) >= APP_WATCHDOG_FEED_PERIOD_MS)
     {
         tps3823_feed();
+        WRITE_REG(IWDG->KR, 0xAAAAU);
         app_watchdog.last_sensor_progress = progress;
         app_watchdog.last_feed_ms = now_ms;
     }

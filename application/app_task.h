@@ -26,6 +26,9 @@ extern "C"
  */
     void App_Task_Create(void);
 
+    /* PA3保持供电后、HAL/时钟初始化前启用；正常运行共用双任务进度喂狗。 */
+    void app_boot_watchdog_start(void);
+
     /**
  * @brief 启动 FreeRTOS 调度器 (正常情况永不返回)
  */

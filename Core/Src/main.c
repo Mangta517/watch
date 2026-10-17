@@ -121,6 +121,7 @@ int main(void)
     power_gpio.Pull = GPIO_PULLDOWN;
     power_gpio.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(POWER_EN_GPIO_Port, &power_gpio);
+    app_boot_watchdog_start(); /* 覆盖HAL/时钟、LCD/触摸初始化及UI建树。 */
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/

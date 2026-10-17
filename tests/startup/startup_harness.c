@@ -1,4 +1,7 @@
 /* 执行真实任务入口，模拟等待期间sensor获得调度，验证首帧和采集不等RTC/蓝牙。 */
+#include <stdint.h>
+static void startup_write_reg(uint32_t *reg, uint32_t value);
+#define WRITE_REG(reg, value)         startup_write_reg(&(reg), (value))
 #define app_diag_boot_set startup_boot_set
 #define app_diag_take_imu_calibration startup_take_imu_calibration
 #include "../../application/app_task.c"
@@ -7,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+IWDG_TypeDef host_iwdg;
 static TaskFunction_t entries[2];
 static unsigned int task_count, fail_task;
 static uint8_t fail_devices, displayed, frame, rtc_done, ble_done, sensor_ran;
@@ -60,6 +64,7 @@ static TickType_t tick;
 static TickType_t rtc_begin_tick, ble_begin_tick;
 static jmp_buf stop, sensor_stop;
 static unsigned int watchdog_inits, watchdog_enables, watchdog_feeds;
+static unsigned int iwdg_config_writes, iwdg_feeds;
 static uint32_t watchdog_enable_delay;
 static uint8_t first_frame_stall;
 static uint8_t first_frame_slow, first_frame_deadline;
@@ -70,6 +75,24 @@ static uint32_t watchdog_last_falling_ms;
 static uint8_t runtime_render, runtime_sensor_stalled;
 static uint32_t runtime_chunk_ms = 150U;
 static unsigned int runtime_chunks = 10U, render_yields;
+
+static void startup_write_reg(uint32_t *reg, uint32_t value)
+{
+    if (reg == &host_iwdg.KR && value == 0xAAAAU)
+    {
+        assert(iwdg_config_writes == 4U && iwdg_feeds == watchdog_feeds);
+        ++iwdg_feeds;
+    }
+    else
+    {
+        const uint32_t values[] = {0xCCCCU, 0x5555U, 6U, 0x0FFFU};
+        uint32_t *registers[] = {&host_iwdg.KR, &host_iwdg.KR, &host_iwdg.PR, &host_iwdg.RLR};
+        assert(iwdg_config_writes < 4U && reg == registers[iwdg_config_writes]);
+        assert(value == values[iwdg_config_writes]);
+        ++iwdg_config_writes;
+    }
+    *reg = value;
+}
 
 void tps3823_init(void)
 {
@@ -481,6 +504,8 @@ void app_aht21_service(void)
 int main(int argc, char **argv)
 {
     int result;
+    app_boot_watchdog_start();
+    assert(host_iwdg.PR == 6U && host_iwdg.RLR == 0x0FFFU && iwdg_feeds == 1U);
     if (argc > 1 && (strcmp(argv[1], "watchdog_progress") == 0 || strcmp(argv[1], "watchdog_wrap") == 0))
     {
         test_watchdog_progress((uint8_t)(strcmp(argv[1], "watchdog_wrap") == 0));

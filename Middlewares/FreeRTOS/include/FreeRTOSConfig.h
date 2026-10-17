@@ -59,7 +59,7 @@
 #define configIDLE_SHOULD_YIELD		1
 
 /* 栈溢出检测(方法1: 切换时比对栈顶哨兵值, 开销小):
- * 触发即进入 vApplicationStackOverflowHook(app_display.c) 停死, 便于调试定位越界任务 */
+ * 触发即进入 vApplicationStackOverflowHook(app_task.c) 停死, 便于调试定位越界任务 */
 #define configCHECK_FOR_STACK_OVERFLOW	1
 
 

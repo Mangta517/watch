@@ -5,6 +5,16 @@
 
 typedef struct
 {
+    uint32_t KR, PR, RLR, SR;
+} IWDG_TypeDef;
+extern IWDG_TypeDef host_iwdg;
+#define IWDG (&host_iwdg)
+#ifndef WRITE_REG
+#define WRITE_REG(reg, value) ((reg) = (value))
+#endif
+
+typedef struct
+{
     uint32_t unused;
 } GPIO_TypeDef;
 extern GPIO_TypeDef host_gpio_a, host_gpio_b;
