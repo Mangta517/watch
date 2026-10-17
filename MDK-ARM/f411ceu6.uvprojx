@@ -1125,6 +1125,16 @@
           <GroupName>interface</GroupName>
           <Files>
             <File>
+              <FileName>tps3823.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\interface\tps3823.c</FilePath>
+            </File>
+            <File>
+              <FileName>tps3823.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\interface\tps3823.h</FilePath>
+            </File>
+            <File>
               <FileName>aht21.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\interface\aht21.c</FilePath>

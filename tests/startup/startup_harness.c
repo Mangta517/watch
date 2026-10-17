@@ -58,6 +58,59 @@ void my_mpu6050_get_offset(mpu6050_offset_struct *offset)
 static uint32_t milestones[APP_BOOT_FIELD_COUNT];
 static TickType_t tick;
 static jmp_buf stop, sensor_stop;
+static unsigned int watchdog_inits, watchdog_enables, watchdog_feeds;
+static uint32_t watchdog_enable_delay;
+
+void tps3823_init(void)
+{
+    ++watchdog_inits;
+}
+void tps3823_enable(void)
+{
+    assert(frame && app_sensor_watchdog_progress != 0);
+    ++watchdog_enables;
+    tick += watchdog_enable_delay;
+}
+void tps3823_feed(void)
+{
+    assert(watchdog_enables == 1);
+    ++watchdog_feeds;
+}
+
+static void test_watchdog_progress(uint8_t wrap)
+{
+    frame = 1;
+    watchdog_enable_delay = 302;
+    tick = 1000;
+    if (wrap != 0)
+    {
+        tick = UINT32_MAX - 350U;
+    }
+    app_watchdog_service();
+    assert(watchdog_enables == 0 && watchdog_feeds == 0);
+    ++app_sensor_watchdog_progress;
+    app_watchdog_service();
+    assert(watchdog_enables == 1 && watchdog_feeds == 0);
+    tick += 99;
+    ++app_sensor_watchdog_progress;
+    app_watchdog_service();
+    assert(watchdog_feeds == 0);
+    ++tick;
+    app_watchdog_service();
+    assert(watchdog_feeds == 1);
+    /* sensor 卡住时，即使 LVGL 继续执行，也不再喂狗。 */
+    tick += 2000;
+    app_watchdog_service();
+    assert(watchdog_feeds == 1);
+    ++app_sensor_watchdog_progress;
+    app_watchdog_service();
+    assert(watchdog_feeds == 2);
+    /* LVGL 卡住时，sensor 的计数更新本身不会触发喂狗。 */
+    tick += 2000;
+    ++app_sensor_watchdog_progress;
+    assert(watchdog_feeds == 2);
+    puts("Watchdog: first-round gate, 100ms cadence, task stalls and tick wrap: PASS");
+}
 
 void startup_boot_set(uint8_t field, uint32_t value)
 {
@@ -292,6 +345,11 @@ void app_aht21_service(void)
 int main(int argc, char **argv)
 {
     int result;
+    if (argc > 1 && (strcmp(argv[1], "watchdog_progress") == 0 || strcmp(argv[1], "watchdog_wrap") == 0))
+    {
+        test_watchdog_progress((uint8_t)(strcmp(argv[1], "watchdog_wrap") == 0));
+        return 0;
+    }
     if (argc > 1)
     {
         fail_devices = strcmp(argv[1], "devices_failed") == 0;
@@ -319,12 +377,14 @@ int main(int argc, char **argv)
     }
     if (fail_task != 0)
     {
+        assert(watchdog_inits == 1 && watchdog_enables == 0 && watchdog_feeds == 0);
         assert(result == 2);
         assert(frame == (fail_task == 2));
         puts("Startup allocation failure: PASS");
         return 0;
     }
     assert(result == 1 && frame && service_count > 900);
+    assert(watchdog_inits == 1 && watchdog_enables == 1 && watchdog_feeds == 0);
     assert(hardware_count == 5 && battery_samples == 3 && sensor_ran);
     assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650);
     assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == 655);

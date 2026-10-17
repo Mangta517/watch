@@ -55,14 +55,14 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, POWER_EN_Pin|EEPROM_SDA_Pin|EEPROM_SCL_Pin|TP_RST_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, SENSOR_SDA_Pin|SENSOR_SCL_Pin|HEART_LED_Pin|TP_SDA_Pin
-                          |TP_SCL_Pin|LCD_CS_Pin|LCD_DC_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, WDG_EN_Pin|LCD_RST_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, WDI_Pin|SENSOR_SDA_Pin|SENSOR_SCL_Pin|HEART_LED_Pin
+                          |TP_SDA_Pin|TP_SCL_Pin|LCD_CS_Pin|LCD_DC_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : POWER_EN_Pin */
   GPIO_InitStruct.Pin = POWER_EN_Pin;
@@ -83,18 +83,20 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(KEY_1_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : WDG_EN_Pin WDI_Pin SENSOR_SDA_Pin SENSOR_SCL_Pin
+                           TP_SDA_Pin TP_SCL_Pin */
+  GPIO_InitStruct.Pin = WDG_EN_Pin|WDI_Pin|SENSOR_SDA_Pin|SENSOR_SCL_Pin
+                          |TP_SDA_Pin|TP_SCL_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
   /*Configure GPIO pin : MPU6050_INT_Pin */
   GPIO_InitStruct.Pin = MPU6050_INT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(MPU6050_INT_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : SENSOR_SDA_Pin SENSOR_SCL_Pin TP_SDA_Pin TP_SCL_Pin */
-  GPIO_InitStruct.Pin = SENSOR_SDA_Pin|SENSOR_SCL_Pin|TP_SDA_Pin|TP_SCL_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : HEART_LED_Pin LCD_CS_Pin LCD_DC_Pin */
   GPIO_InitStruct.Pin = HEART_LED_Pin|LCD_CS_Pin|LCD_DC_Pin;

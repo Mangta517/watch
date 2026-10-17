@@ -29,6 +29,7 @@
 #include "em7028.h"
 #include "kt6368a.h"
 #include "watch_rtc.h"
+#include "tps3823.h"
 
 /*********************
  *  任务配置
@@ -41,18 +42,24 @@
 #define APP_SENSOR_TASK_STK    512                      /* 字 = 2KB (IMU 读 + 零偏校准 + 气压读路径) */
 #define APP_SENSOR_TASK_PERIOD MPU6050_SAMPLE_PERIOD_MS /* 与MPU100Hz输出一致 */
 #define APP_SENSOR_BARO_DIV    25                       /* 气压250ms轮询，器件1Hz */
+#define APP_WATCHDOG_FEED_PERIOD_MS 100U
+
+/* sensor 单写、LVGL 单读；Cortex-M4 对齐的 32 位访问不会撕裂，不共享复合快照。 */
+static volatile uint32_t app_sensor_watchdog_progress;
 
 /**********************
  *  STATIC PROTOTYPES
  **********************/
 static void app_lvgl_task(void *pvParameters);
 static void app_sensor_task(void *pvParameters);
+static void app_watchdog_service(void);
 
 /**********************
  *   GLOBAL FUNCTIONS
  **********************/
 void App_Task_Create(void)
 {
+    tps3823_init();
     if (xTaskCreate(app_lvgl_task, "lvgl", APP_LVGL_TASK_STK, NULL, APP_LVGL_TASK_PRIO, NULL) != pdPASS)
     {
         Error_Handler(); /* FreeRTOS 堆不足 */
@@ -70,6 +77,35 @@ void App_Task_Start(void)
 /**********************
  *   STATIC FUNCTIONS
  **********************/
+static void app_watchdog_service(void)
+{
+    static uint32_t last_sensor_progress;
+    static uint32_t last_feed_ms;
+    static uint8_t started;
+    uint32_t progress = app_sensor_watchdog_progress;
+
+    if (progress == last_sensor_progress)
+    {
+        return;
+    }
+    if (started == 0)
+    {
+        /* 首帧和两任务首轮完成后才接通；外设初始化等待不消耗看门狗超时。 */
+        tps3823_enable();
+        started = 1;
+    }
+    else if ((uint32_t)(HAL_GetTick() - last_feed_ms) >= APP_WATCHDOG_FEED_PERIOD_MS)
+    {
+        tps3823_feed();
+    }
+    else
+    {
+        return;
+    }
+    last_sensor_progress = app_sensor_watchdog_progress;
+    last_feed_ms = HAL_GetTick();
+}
+
 /* LVGL 测试任务: 屏幕+触摸测试 UI 全部跑在本任务栈上 */
 static void app_lvgl_task(void *pvParameters)
 {
@@ -120,6 +156,7 @@ static void app_lvgl_task(void *pvParameters)
         App_Display_Service(); /* 锁 → lv_timer_handler → 解锁 */
         app_diag_service();
         app_diag_task_end(APP_DIAG_LVGL, APP_LVGL_TASK_PERIOD);
+        app_watchdog_service();
         vTaskDelay(pdMS_TO_TICKS(APP_LVGL_TASK_PERIOD));
     }
 }
@@ -228,6 +265,7 @@ static void app_sensor_task(void *pvParameters)
             baro_cnt = 0;
         }
         app_diag_task_end(APP_DIAG_SENSOR_TASK, APP_SENSOR_TASK_PERIOD);
+        ++app_sensor_watchdog_progress;
         /* 校准保存会等待EEPROM写周期；错过周期后重新计时，避免连续补跑旧帧。 */
         if ((TickType_t)(xTaskGetTickCount() - xLastWakeTime) > pdMS_TO_TICKS(APP_SENSOR_TASK_PERIOD))
         {
