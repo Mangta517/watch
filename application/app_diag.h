@@ -68,6 +68,7 @@ void app_diag_sensor_record(uint8_t id, uint8_t outcome, uint32_t result, uint32
 void app_diag_heart_queue(uint8_t dropped);
 void app_diag_heart_tx(uint16_t count, uint8_t success);
 void app_diag_receive(const uint8_t *data, uint16_t size);
+void app_diag_reset_receive(void);
 /* IMU,CAL请求仅传递标志；sensor任务消费后执行校准/EEPROM保存。 */
 uint8_t app_diag_take_imu_calibration(void);
 /* 仅LVGL任务发送，每100ms最多一帧；不增加任务，不在传感器/ISR里发串口。 */

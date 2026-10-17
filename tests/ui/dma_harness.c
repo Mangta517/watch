@@ -8,6 +8,25 @@ static int scheduler_state = taskSCHEDULER_RUNNING;
 static unsigned dma_pending, dma_ticks, flush_calls, sensor_runs, lcd_inits;
 static TickType_t host_tick;
 static unsigned notifications, dma_wakes, yields;
+static uint32_t host_ipsr;
+static uint8_t dma_failed;
+
+uint32_t __get_IPSR(void)
+{
+    return host_ipsr;
+}
+
+uint8_t LCD_Flush_Service(void)
+{
+    if (dma_failed == 0)
+    {
+        return 0;
+    }
+    assert(host_ipsr == 0 && dma_pending);
+    dma_pending = dma_failed = 0;
+    dma_done();
+    return 1;
+}
 
 TaskHandle_t xTaskGetCurrentTaskHandle(void)
 {
@@ -81,7 +100,9 @@ void vTaskDelay(TickType_t ticks)
     if (--dma_ticks == 0)
     {
         dma_pending = 0;
+        host_ipsr = 1;
         dma_done();
+        host_ipsr = 0;
     }
 }
 
@@ -101,7 +122,23 @@ int main(void)
         disp_wait(display->driver);
     }
     assert(s_flush_drv == NULL && display->driver->draw_buf->flushing == 0);
-    assert(dma_wakes == flush_calls && yields == dma_wakes);
+    before = dma_wakes;
+    display->driver->draw_buf->flushing = 1;
+    disp_flush(display->driver, &(lv_area_t){0, 0, 1, 1}, display->driver->draw_buf->buf1);
+    dma_failed = 1;
+    disp_wait(display->driver);
+    assert(!dma_pending && !display->driver->draw_buf->flushing && s_redraw_pending);
+    assert(dma_wakes == before); /* 任务侧收尾不能调用FromISR接口。 */
+    before = flush_calls;
+    lv_port_disp_service();
+    lv_refr_now(display);
+    while (dma_pending)
+    {
+        disp_wait(display->driver);
+    }
+    assert(flush_calls >= before + 10 && !s_redraw_pending);
+    puts("PASS: task-side DMA error completion releases LVGL and schedules a full redraw without ISR API calls.");
+    assert(dma_wakes + 1 == flush_calls && yields == dma_wakes);
     before = sensor_runs;
     (void)ulTaskNotifyTake(pdTRUE, 0);
     notifications = 1;

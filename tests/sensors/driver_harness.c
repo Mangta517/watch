@@ -24,7 +24,9 @@
 
 GPIO_TypeDef host_gpio_a, host_gpio_b;
 SPI_TypeDef host_spi;
-SPI_HandleTypeDef hspi1 = {&host_spi};
+static DMA_Stream_TypeDef host_dma_stream;
+static DMA_HandleTypeDef host_dma = {&host_dma_stream};
+SPI_HandleTypeDef hspi1 = {.Instance = &host_spi, .hdmatx = &host_dma};
 TIM_HandleTypeDef htim3;
 static int scheduler_state;
 static uint32_t primask, elapsed_ms, hal_waits, task_waits;
@@ -39,6 +41,12 @@ static uint8_t error_expected, spi_capture;
 static int spi_fail_after = -1;
 static HAL_StatusTypeDef spi_error;
 static unsigned spi_payload_calls, spi_payload_bytes;
+static int spi_command_fail_after = -1;
+static HAL_StatusTypeDef dma_start_result = HAL_OK;
+static unsigned dma_starts, dma_stops, spi_aborts, flush_completions;
+static uint8_t dma_stuck;
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *spi);
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *spi);
 
 uint32_t __get_PRIMASK(void)
 {
@@ -139,6 +147,13 @@ void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority)
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout)
 {
     assert(spi == &hspi1 && data && size && timeout);
+    if (size == 1 && spi_command_fail_after >= 0)
+    {
+        if (spi_command_fail_after-- == 0)
+        {
+            return HAL_ERROR;
+        }
+    }
     if (spi_capture && size > 1)
     {
         unsigned i;
@@ -164,6 +179,25 @@ HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16
 HAL_StatusTypeDef HAL_SPI_Transmit_DMA(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size)
 {
     assert(spi == &hspi1 && data && size);
+    ++dma_starts;
+    host_dma_stream.CR = DMA_SxCR_EN;
+    return dma_start_result;
+}
+HAL_StatusTypeDef HAL_SPI_DMAStop(SPI_HandleTypeDef *spi)
+{
+    assert(spi == &hspi1);
+    ++dma_stops;
+    if (dma_stuck != 0)
+    {
+        return HAL_TIMEOUT;
+    }
+    host_dma_stream.CR = 0;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_SPI_Abort(SPI_HandleTypeDef *spi)
+{
+    assert(spi == &hspi1 && host_dma_stream.CR == 0);
+    ++spi_aborts;
     return HAL_OK;
 }
 HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *timer, uint32_t channel)
@@ -329,9 +363,76 @@ static void lcd_fill_tests(void)
     puts("PASS: LCD_Fill chunk/tail bytes and colors, ERROR/BUSY/TIMEOUT stop without later payloads");
 }
 
+static void flush_done(void)
+{
+    assert(host_dma_stream.CR == 0);
+    ++flush_completions;
+}
+
+static void lcd_dma_error_tests(void)
+{
+    static uint16_t pixels[LCD_WIDTH * LCD_HEIGHT];
+    static const HAL_StatusTypeDef errors[] = {HAL_ERROR, HAL_BUSY, HAL_TIMEOUT};
+    unsigned i, before, starts;
+    LCD_Set_Flush_Complete_Callback(flush_done);
+    for (i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i)
+    {
+        dma_start_result = errors[i];
+        before = flush_completions;
+        LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+        assert(flush_completions == before);
+        assert(LCD_Flush_Service() == 1 && flush_completions == before + 1);
+        HAL_SPI_TxCpltCallback(&hspi1);
+        assert(LCD_Flush_Service() == 0 && flush_completions == before + 1);
+    }
+    dma_start_result = HAL_OK;
+    for (i = 0; i < 11; ++i)
+    {
+        spi_command_fail_after = (int)i;
+        starts = dma_starts;
+        LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+        assert(dma_starts == starts && LCD_Flush_Service() == 1);
+    }
+    spi_command_fail_after = -1;
+    LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+    before = flush_completions;
+    starts = spi_aborts;
+    HAL_SPI_ErrorCallback(&hspi1);
+    assert(spi_aborts == starts && flush_completions == before);
+    dma_stuck = 1;
+    assert(LCD_Flush_Service() == 0 && flush_completions == before);
+    dma_stuck = 0;
+    assert(LCD_Flush_Service() == 1 && flush_completions == before + 1);
+    HAL_SPI_ErrorCallback(&hspi1);
+    HAL_SPI_TxCpltCallback(&hspi1);
+    assert(LCD_Flush_Service() == 0 && flush_completions == before + 1);
+    LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+    host_dma_stream.CR = 0;
+    HAL_SPI_TxCpltCallback(&hspi1);
+    assert(flush_completions == before + 2 && LCD_Flush_Service() == 0);
+    starts = dma_starts;
+    LCD_Color_Fill_DMA(0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1, pixels);
+    assert(dma_starts == starts && flush_completions == before + 3);
+    for (i = 0; i < sizeof(pixels) / sizeof(pixels[0]); ++i)
+    {
+        pixels[i] = 0x1234;
+    }
+    spi_capture = 1;
+    spi_fail_after = 0;
+    spi_error = HAL_TIMEOUT;
+    LCD_Color_Fill_DMA(0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1, pixels);
+    assert(flush_completions == before + 3);
+    assert(LCD_Flush_Service() == 1 && flush_completions == before + 4);
+    spi_capture = 0;
+    spi_fail_after = -1;
+    assert(dma_stops == spi_aborts + 1);
+    puts("PASS: LCD address/start/transfer errors stop DMA before releasing buffers, ignore late callbacks and allow the next frame.");
+}
+
 int main(void)
 {
     lcd_fill_tests();
+    lcd_dma_error_tests();
     init_delay_tests(taskSCHEDULER_NOT_STARTED);
     init_delay_tests(taskSCHEDULER_RUNNING);
     init_delay_tests(taskSCHEDULER_SUSPENDED);

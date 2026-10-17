@@ -55,9 +55,11 @@ extern "C"
     void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p); /* RGB565块传输(阻塞) */
 
     /* DMA 异步刷屏 (SPI1_TX DMA @DMA2_Stream2, OV_Watch/Watch 同款): 发起即返回,
- * 传输完成经 HAL_SPI_TxCpltCallback → LCD_Set_Flush_Complete_Callback 注册的回调通知 */
+ * 正常完成从ISR通知，异常收尾及阻塞回退从显示任务通知，回调需区分上下文。 */
     typedef void (*LCD_CallbackFunc_t)(void);
     void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb);
+    /* 显示任务调用；异常时先停止DMA再释放缓冲，返回1要求重绘。 */
+    uint8_t LCD_Flush_Service(void);
     void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p);
 
     void LCD_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, uint16_t color); /* 单色填充 */

@@ -119,6 +119,8 @@ static lv_obj_t *s_bt_log_box;
 static char s_bt_text[UI_BT_LOG_SIZE];
 static uint16_t s_bt_text_length;
 static uint32_t s_bt_rx_bytes;
+static uint32_t s_bt_rx_dropped, s_bt_rx_errors, s_bt_rx_activity_ms;
+static uint8_t s_bt_rx_resync;
 static uint8_t s_bt_last_cr;
 static uint8_t s_bt_dirty;
 static const char *s_bt_tx_text = "TX READY";
@@ -645,17 +647,41 @@ static void brightness_cb(lv_event_t *event)
     set_label_text_fmt(s_brightness_label, "%d%%", (int)s_brightness);
 }
 
-/* 按字节接收，不要求发送端的一条信息在一次UART接收中完成。
- * 保留最近511个显示字符；非ASCII/非打印字节显示为\xHH，避免NUL截断文本。 */
+/* 丢字节位置在环形队列中不可定位，废弃队列和残帧后重新寻找消息边界。 */
+static uint8_t bluetooth_rx_check(uint32_t now_ms)
+{
+    uint32_t dropped = kt6368a_get_rx_dropped();
+    uint32_t errors = kt6368a_get_rx_errors();
+    if (dropped == s_bt_rx_dropped && errors == s_bt_rx_errors)
+    {
+        return 0;
+    }
+    s_bt_rx_dropped = dropped;
+    s_bt_rx_errors = errors;
+    kt6368a_flush_rx();
+    app_clock_reset_receive();
+    app_weather_reset_receive();
+    app_diag_reset_receive();
+    s_bt_rx_resync = 1;
+    s_bt_rx_activity_ms = now_ms;
+    return 1;
+}
+
+/* 按字节接收，保留最近511个显示字符；非ASCII字节显示为\xHH。 */
 static void bluetooth_receive(void)
 {
     static const char hex[] = "0123456789ABCDEF";
     uint8_t data[UI_BT_READ_SIZE];
     char text[UI_BT_READ_SIZE * 4];
-    uint16_t received, length, remove, i, budget = UI_BT_RX_BUDGET;
+    uint16_t received, length, remove, i, start, budget = UI_BT_RX_BUDGET;
+    uint32_t now_ms;
 
     /* AT响应留给初始化；RTC未就绪时先保留手机校时等业务字节。 */
     if (kt6368a_init_is_pending() != 0 || watch_rtc_init_is_pending() != 0)
+    {
+        return;
+    }
+    if (bluetooth_rx_check(lv_tick_get()) != 0)
     {
         return;
     }
@@ -675,9 +701,31 @@ static void bluetooth_receive(void)
             break;
         }
         budget -= received;
-        app_diag_receive(data, received);
-        app_clock_receive(data, received, lv_tick_get());
-        app_weather_receive(data, received, lv_tick_get());
+        now_ms = lv_tick_get();
+        if (bluetooth_rx_check(now_ms) != 0)
+        {
+            return; /* 读取期间发生的溢出/串口错误也不能交给解析器。 */
+        }
+        if (s_bt_rx_resync != 0 && (uint32_t)(now_ms - s_bt_rx_activity_ms) >= APP_CLOCK_FRAME_IDLE_MS)
+        {
+            s_bt_rx_resync = 0;
+        }
+        start = 0;
+        while (s_bt_rx_resync != 0 && start < received)
+        {
+            if (data[start] == '\r' || data[start] == '\n')
+            {
+                s_bt_rx_resync = 0;
+            }
+            ++start;
+        }
+        s_bt_rx_activity_ms = now_ms;
+        if (start < received)
+        {
+            app_diag_receive(data + start, received - start);
+            app_clock_receive(data + start, received - start, now_ms);
+            app_weather_receive(data + start, received - start, now_ms);
+        }
         s_bt_rx_bytes += received;
         length = 0;
         for (i = 0; i < received; ++i)
@@ -726,8 +774,11 @@ static void bluetooth_receive(void)
         s_bt_text[s_bt_text_length] = '\0';
         s_bt_dirty = 1;
     }
-    app_clock_service(lv_tick_get());
-    app_weather_service(lv_tick_get());
+    if (bluetooth_rx_check(lv_tick_get()) == 0)
+    {
+        app_clock_service(lv_tick_get());
+        app_weather_service(lv_tick_get());
+    }
 }
 
 static void bluetooth_clear_cb(lv_event_t *event)

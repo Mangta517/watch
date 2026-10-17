@@ -228,6 +228,14 @@ void app_diag_heart_tx(uint16_t count, uint8_t success)
 }
 
 static uint8_t s_imu_cal_requested;
+static char s_rx_command[16];
+static uint8_t s_rx_length, s_rx_overflow;
+
+void app_diag_reset_receive(void)
+{
+    s_rx_length = 0;
+    s_rx_overflow = 0;
+}
 
 uint8_t app_diag_take_imu_calibration(void)
 {
@@ -241,39 +249,37 @@ uint8_t app_diag_take_imu_calibration(void)
 
 void app_diag_receive(const uint8_t *data, uint16_t size)
 {
-    static char command[16];
-    static uint8_t length, overflow;
     uint16_t i;
     for (i = 0; i < size; ++i)
     {
         if (data[i] == '\n' || data[i] == '\r')
         {
-            command[length] = '\0';
-            if (overflow == 0 && strcmp(command, "DIAG,0") == 0)
+            s_rx_command[s_rx_length] = '\0';
+            if (s_rx_overflow == 0 && strcmp(s_rx_command, "DIAG,0") == 0)
             {
                 s_enabled = 0;
             }
-            else if (overflow == 0 && strcmp(command, "DIAG,1") == 0)
+            else if (s_rx_overflow == 0 && strcmp(s_rx_command, "DIAG,1") == 0)
             {
                 s_enabled = APP_DEBUG_TELEMETRY;
                 s_row = 0;
                 s_snapshot_ready = 0;
             }
-            else if (overflow == 0 && strcmp(command, "IMU,CAL") == 0)
+            else if (s_rx_overflow == 0 && strcmp(s_rx_command, "IMU,CAL") == 0)
             {
                 taskENTER_CRITICAL();
                 s_imu_cal_requested = 1;
                 taskEXIT_CRITICAL();
             }
-            length = overflow = 0;
+            app_diag_reset_receive();
         }
-        else if (length < sizeof(command) - 1U)
+        else if (s_rx_length < sizeof(s_rx_command) - 1U)
         {
-            command[length++] = (char)data[i];
+            s_rx_command[s_rx_length++] = (char)data[i];
         }
         else
         {
-            overflow = 1;
+            s_rx_overflow = 1;
         }
     }
 }

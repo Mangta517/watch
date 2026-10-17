@@ -85,22 +85,46 @@ void LCD_WR_REG(uint8_t reg)
 /******************************************************************************
  * 地址窗口 (自动加 Y 偏移; 0x2A 高16bit恒0, 0x2B 按16bit发)
  *****************************************************************************/
-void LCD_Address_Set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
+static HAL_StatusTypeDef lcd_address_set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
 {
+    uint8_t data[11];
+    uint8_t i;
+    HAL_StatusTypeDef status;
     y1 += LCD_OFFSET_Y;
     y2 += LCD_OFFSET_Y;
+    data[0] = 0x2A;
+    data[1] = 0;
+    data[2] = (uint8_t)x1;
+    data[3] = 0;
+    data[4] = (uint8_t)x2;
+    data[5] = 0x2B;
+    data[6] = (uint8_t)(y1 >> 8);
+    data[7] = (uint8_t)y1;
+    data[8] = (uint8_t)(y2 >> 8);
+    data[9] = (uint8_t)y2;
+    data[10] = 0x2C;
+    for (i = 0; i < sizeof(data); ++i)
+    {
+        if (i == 0 || i == 5 || i == 10)
+        {
+            LCD_DC_Clr();
+        }
+        status = HAL_SPI_Transmit(&hspi1, &data[i], 1, LCD_SPI_TMO);
+        LCD_DC_Set();
+        if (status != HAL_OK)
+        {
+            return status;
+        }
+    }
+    return HAL_OK;
+}
 
-    LCD_WR_REG(0x2A); /* 列地址 */
-    LCD_WR_DATA8(0x00);
-    LCD_WR_DATA8((uint8_t)x1);
-    LCD_WR_DATA8(0x00);
-    LCD_WR_DATA8((uint8_t)x2);
-    LCD_WR_REG(0x2B); /* 行地址 */
-    LCD_WR_DATA8((uint8_t)(y1 >> 8));
-    LCD_WR_DATA8((uint8_t)y1);
-    LCD_WR_DATA8((uint8_t)(y2 >> 8));
-    LCD_WR_DATA8((uint8_t)y2);
-    LCD_WR_REG(0x2C); /* 进入显存写入 */
+void LCD_Address_Set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
+{
+    if (lcd_address_set(x1, y1, x2, y2) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
 
 /******************************************************************************
@@ -109,13 +133,17 @@ void LCD_Address_Set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
 /* LVGL flush: 把 w*h 个 RGB565 像素发到指定窗口 (字节序由 LV_COLOR_16_SWAP=1 保证)。
  * HAL_SPI_Transmit 的 Size 是 uint16_t, 超过 64KB 的块自动分片;
  * GRAM 游标在窗口内自动前进, 分片之间不需要重设地址。 */
-void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p)
+static HAL_StatusTypeDef lcd_color_fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p)
 {
     uint32_t bytes = (uint32_t)(xend - xsta + 1) * (uint32_t)(yend - ysta + 1) * 2;
     const uint8_t *p = (const uint8_t *)color_p;
     HAL_StatusTypeDef st = HAL_OK;
 
-    LCD_Address_Set(xsta, ysta, xend, yend);
+    st = lcd_address_set(xsta, ysta, xend, yend);
+    if (st != HAL_OK)
+    {
+        return st;
+    }
     while (bytes > 0xFFFF)
     { /* 每片 <=64KB-2, 保证整像素边界 */
         st = HAL_SPI_Transmit(&hspi1, (uint8_t *)p, 0xFFFE, LCD_SPI_TMO);
@@ -130,8 +158,13 @@ void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, 
     {
         st = HAL_SPI_Transmit(&hspi1, (uint8_t *)p, (uint16_t)bytes, LCD_SPI_TMO);
     }
-    if (st != HAL_OK)
-    { /* 刷屏发送失败不再静默丢帧 */
+    return st;
+}
+
+void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p)
+{
+    if (lcd_color_fill(xsta, ysta, xend, yend, color_p) != HAL_OK)
+    {
         Error_Handler();
     }
 }
@@ -142,6 +175,9 @@ void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, 
  *       且命令/参数写都在上一笔 ready 之后, 天然串行)
  *****************************************************************************/
 static LCD_CallbackFunc_t s_lcd_flush_done_cb = NULL;
+static volatile uint8_t s_lcd_flush_active;
+static volatile uint8_t s_lcd_flush_failed;
+static volatile uint32_t s_lcd_flush_errors; /* 调试器可观察累计失败次数。 */
 
 void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb)
 {
@@ -151,39 +187,78 @@ void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb)
 void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p)
 {
     uint32_t bytes = (uint32_t)(xend - xsta + 1) * (uint32_t)(yend - ysta + 1) * 2;
+    HAL_StatusTypeDef status;
 
-    LCD_Address_Set(xsta, ysta, xend, yend);
+    s_lcd_flush_active = 1;
 
     if (bytes > 0xFFFE)
     { /* F4 HAL Size 为 uint16: 超 64KB 罕见大块, 退回阻塞分片 */
-        LCD_Color_Fill(xsta, ysta, xend, yend, color_p);
-        if (s_lcd_flush_done_cb != NULL)
+        status = lcd_color_fill(xsta, ysta, xend, yend, color_p);
+        if (status == HAL_OK)
         {
-            s_lcd_flush_done_cb(); /* 阻塞路径无 DMA 中断, 手动补完成事件 */
+            s_lcd_flush_active = 0;
+            if (s_lcd_flush_done_cb != NULL)
+            {
+                s_lcd_flush_done_cb();
+            }
         }
-        return;
     }
-    if (HAL_SPI_Transmit_DMA(&hspi1, (uint8_t *)color_p, (uint16_t)bytes) != HAL_OK)
+    else
     {
-        Error_Handler();
+        status = lcd_address_set(xsta, ysta, xend, yend);
+        if (status == HAL_OK)
+        {
+            status = HAL_SPI_Transmit_DMA(&hspi1, (uint8_t *)color_p, (uint16_t)bytes);
+        }
+    }
+    if (status != HAL_OK)
+    {
+        s_lcd_flush_failed = 1;
     }
 }
 
-/* DMA 传输完成回调 (HAL_DMA_IRQHandler→SPI_DMATransmitCplt 的下游, DMA2_Stream2 中断上下文)
- * 注意: 只做"等末字节移位完成 + 清残留标志 + 通知", 不调任何 FreeRTOS API。 */
+/* HAL已检查SPI收尾；这里只释放本次刷新并经移植层发送ISR任务通知。 */
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    if (hspi->Instance == SPI1)
+    if (hspi->Instance == SPI1 && s_lcd_flush_active != 0 && s_lcd_flush_failed == 0)
     {
-        while (READ_BIT(hspi->Instance->SR, SPI_SR_BSY) != 0)
-        {
-        } /* 等末字节移出(~1字节位时间) */
-        (void)hspi->Instance->DR; /* 清可能残留的 RXNE/OVR */
+        s_lcd_flush_active = 0;
         if (s_lcd_flush_done_cb != NULL)
         {
             s_lcd_flush_done_cb();
         }
     }
+}
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi->Instance == SPI1 && s_lcd_flush_active != 0)
+    {
+        s_lcd_flush_failed = 1; /* ISR只记错，阻塞式中止留给显示任务。 */
+    }
+}
+
+uint8_t LCD_Flush_Service(void)
+{
+    if (s_lcd_flush_failed == 0)
+    {
+        return 0;
+    }
+    (void)HAL_SPI_DMAStop(&hspi1);
+    if (hspi1.hdmatx != NULL && (hspi1.hdmatx->Instance->CR & DMA_SxCR_EN) != 0)
+    {
+        return 0; /* DMA尚未停止访问像素缓冲，不能通知LVGL复用。 */
+    }
+    __HAL_SPI_DISABLE(&hspi1);
+    (void)HAL_SPI_Abort(&hspi1);
+    ++s_lcd_flush_errors;
+    s_lcd_flush_active = 0;
+    s_lcd_flush_failed = 0;
+    if (s_lcd_flush_done_cb != NULL)
+    {
+        s_lcd_flush_done_cb();
+    }
+    return 1;
 }
 
 /* 单色填充(局部): 用 64 像素的重复色缓冲分片写 */

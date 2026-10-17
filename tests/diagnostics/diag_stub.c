@@ -46,6 +46,11 @@ void app_diag_receive(const uint8_t *data, uint16_t size)
     (void)data;
     (void)size;
 }
+unsigned host_diag_rx_resets;
+void app_diag_reset_receive(void)
+{
+    ++host_diag_rx_resets;
+}
 void app_diag_boot_set(uint8_t field, uint32_t value)
 {
     (void)field;

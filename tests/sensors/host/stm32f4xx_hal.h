@@ -50,7 +50,7 @@ typedef struct
 } GPIO_InitTypeDef;
 typedef struct
 {
-    uint32_t SR, DR;
+    uint32_t SR, DR, CR1;
 } SPI_TypeDef;
 extern SPI_TypeDef host_spi;
 #define SPI1                (&host_spi)
@@ -58,8 +58,19 @@ extern SPI_TypeDef host_spi;
 #define READ_BIT(reg, bits) ((reg) & (bits))
 typedef struct
 {
+    uint32_t CR;
+} DMA_Stream_TypeDef;
+typedef struct
+{
+    DMA_Stream_TypeDef *Instance;
+} DMA_HandleTypeDef;
+typedef struct
+{
     SPI_TypeDef *Instance;
+    DMA_HandleTypeDef *hdmatx;
 } SPI_HandleTypeDef;
+#define DMA_SxCR_EN 1U
+#define __HAL_SPI_DISABLE(spi) ((spi)->Instance->CR1 = 0)
 typedef struct
 {
     uint32_t arr, compare;
@@ -90,5 +101,7 @@ GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
 void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority);
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout);
 HAL_StatusTypeDef HAL_SPI_Transmit_DMA(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size);
+HAL_StatusTypeDef HAL_SPI_DMAStop(SPI_HandleTypeDef *spi);
+HAL_StatusTypeDef HAL_SPI_Abort(SPI_HandleTypeDef *spi);
 HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *timer, uint32_t channel);
 #endif
