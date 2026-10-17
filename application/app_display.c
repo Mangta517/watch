@@ -9,6 +9,7 @@
   ******************************************************************************
 ***/
 #include "app_display.h"
+#include "main.h"
 
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -31,6 +32,11 @@ void App_Display_Init(void)
      * (CM4F port 的 uxCriticalNesting 以 0xaaaaaaaa 哨兵初值, 调度器前的
      *  enter/exit 不解除 BASEPRI, 属设计行为, 见 SVC 启动时统一清零) */
     s_lvgl_mux = xSemaphoreCreateMutex();
+    if (s_lvgl_mux == NULL)
+    {
+        Error_Handler();
+        return;
+    }
 
     lv_init();
 
