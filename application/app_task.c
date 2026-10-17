@@ -22,6 +22,7 @@
 #include "app_aht21.h"
 #include "app_battery.h"
 #include "lvgl.h"
+#include "lv_port_disp_template.h"
 #include "my_i2c.h"
 #include "mpu6050.h"
 #include "spl006.h"
@@ -43,16 +44,28 @@
 #define APP_SENSOR_TASK_PERIOD MPU6050_SAMPLE_PERIOD_MS /* 与MPU100Hz输出一致 */
 #define APP_SENSOR_BARO_DIV    25                       /* 气压250ms轮询，器件1Hz */
 #define APP_WATCHDOG_FEED_PERIOD_MS 100U
+#define APP_WATCHDOG_SENSOR_STARTUP_MS 5000U
+#define APP_WATCHDOG_RENDER_TIMEOUT_MS 5000U
 
 /* sensor 单写、LVGL 单读；Cortex-M4 对齐的 32 位访问不会撕裂，不共享复合快照。 */
 static volatile uint32_t app_sensor_watchdog_progress;
+static struct
+{
+    uint32_t started_ms;
+    uint32_t render_started_ms;
+    uint32_t last_feed_ms;
+    uint32_t last_sensor_progress;
+    uint8_t sensor_started;
+} app_watchdog;
 
 /**********************
  *  STATIC PROTOTYPES
  **********************/
 static void app_lvgl_task(void *pvParameters);
 static void app_sensor_task(void *pvParameters);
+static void app_watchdog_begin(void);
 static void app_watchdog_service(void);
+static void app_watchdog_render_progress(void);
 
 /**********************
  *   GLOBAL FUNCTIONS
@@ -77,33 +90,50 @@ void App_Task_Start(void)
 /**********************
  *   STATIC FUNCTIONS
  **********************/
+static void app_watchdog_begin(void)
+{
+    tps3823_enable();
+    app_watchdog.started_ms = HAL_GetTick();
+    app_watchdog.last_feed_ms = app_watchdog.started_ms;
+}
+
 static void app_watchdog_service(void)
 {
-    static uint32_t last_sensor_progress;
-    static uint32_t last_feed_ms;
-    static uint8_t started;
+    uint32_t now_ms = HAL_GetTick();
     uint32_t progress = app_sensor_watchdog_progress;
 
-    if (progress == last_sensor_progress)
+    if (app_watchdog.sensor_started == 0)
+    {
+        if (progress != 0)
+        {
+            app_watchdog.sensor_started = 1;
+        }
+        else if ((uint32_t)(now_ms - app_watchdog.started_ms) >= APP_WATCHDOG_SENSOR_STARTUP_MS)
+        {
+            return;
+        }
+    }
+    if (app_watchdog.sensor_started != 0 && progress == app_watchdog.last_sensor_progress)
     {
         return;
     }
-    if (started == 0)
-    {
-        /* 首帧和两任务首轮完成后才接通；外设初始化等待不消耗看门狗超时。 */
-        tps3823_enable();
-        started = 1;
-    }
-    else if ((uint32_t)(HAL_GetTick() - last_feed_ms) >= APP_WATCHDOG_FEED_PERIOD_MS)
+    if ((uint32_t)(now_ms - app_watchdog.last_feed_ms) >= APP_WATCHDOG_FEED_PERIOD_MS)
     {
         tps3823_feed();
+        app_watchdog.last_sensor_progress = progress;
+        app_watchdog.last_feed_ms = now_ms;
     }
-    else
+}
+
+static void app_watchdog_render_progress(void)
+{
+    if ((uint32_t)(HAL_GetTick() - app_watchdog.render_started_ms) >= APP_WATCHDOG_RENDER_TIMEOUT_MS)
     {
         return;
     }
-    last_sensor_progress = app_sensor_watchdog_progress;
-    last_feed_ms = HAL_GetTick();
+    /* DMA可能在渲染时已完成、无需等待；主动阻塞一拍，让低优先级sensor继续推进。 */
+    vTaskDelay(1U);
+    app_watchdog_service();
 }
 
 /* LVGL 测试任务: 屏幕+触摸测试 UI 全部跑在本任务栈上 */
@@ -116,7 +146,13 @@ static void app_lvgl_task(void *pvParameters)
 
     /* 硬件拉起 + LVGL 注册 + 建测试界面, 在本任务上下文一次性完成 */
     App_Display_Init();
+    /* 首帧按新分块推进喂狗，卡在同一分块时不喂；总宽限仍限制为5s。 */
+    app_watchdog_begin();
+    lv_port_disp_set_progress_callback(app_watchdog_service);
     lv_refr_now(NULL); /* 先提交首帧；DMA完成中断继续工作，不等待其他模块。 */
+    lv_port_disp_set_progress_callback(app_watchdog_render_progress);
+    /* 首帧渲染时间不占用sensor初始化的5s窗口；进入主循环后恢复双任务检查。 */
+    app_watchdog.started_ms = HAL_GetTick();
     app_diag_boot_set(APP_BOOT_FIRST_FRAME_MS, HAL_GetTick());
 
     if (xTaskCreate(app_sensor_task, "sensor", APP_SENSOR_TASK_STK, NULL, APP_SENSOR_TASK_PRIO, NULL) != pdPASS)
@@ -153,6 +189,7 @@ static void app_lvgl_task(void *pvParameters)
                 app_diag_boot_set(APP_BOOT_BT_RESULT, (uint32_t)status);
             }
         }
+        app_watchdog.render_started_ms = HAL_GetTick();
         App_Display_Service(); /* 锁 → lv_timer_handler → 解锁 */
         app_diag_service();
         app_diag_task_end(APP_DIAG_LVGL, APP_LVGL_TASK_PERIOD);

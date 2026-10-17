@@ -58,7 +58,7 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOB, WDG_EN_Pin|LCD_RST_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, WDI_Pin|SENSOR_SDA_Pin|SENSOR_SCL_Pin|HEART_LED_Pin
+  HAL_GPIO_WritePin(GPIOB, SENSOR_SDA_Pin|SENSOR_SCL_Pin|HEART_LED_Pin
                           |TP_SDA_Pin|TP_SCL_Pin|LCD_CS_Pin|LCD_DC_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
@@ -83,9 +83,15 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(KEY_1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : WDG_EN_Pin WDI_Pin SENSOR_SDA_Pin SENSOR_SCL_Pin
+  /* WDI在正式启用前保持高阻，避免非A版TPS3823在上电复位期间收到跳变而锁存。 */
+  GPIO_InitStruct.Pin = WDI_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(WDI_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : WDG_EN_Pin SENSOR_SDA_Pin SENSOR_SCL_Pin
                            TP_SDA_Pin TP_SCL_Pin */
-  GPIO_InitStruct.Pin = WDG_EN_Pin|WDI_Pin|SENSOR_SDA_Pin|SENSOR_SCL_Pin
+  GPIO_InitStruct.Pin = WDG_EN_Pin|SENSOR_SDA_Pin|SENSOR_SCL_Pin
                           |TP_SDA_Pin|TP_SCL_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;

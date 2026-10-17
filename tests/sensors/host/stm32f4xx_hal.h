@@ -77,6 +77,7 @@ typedef struct
 } TIM_HandleTypeDef;
 #define TIM_CHANNEL_3                                3U
 #define DMA2_Stream2_IRQn                            2
+#define SPI1_IRQn                                    35
 #define __HAL_TIM_SET_AUTORELOAD(timer, value)       ((timer)->arr = (value))
 #define __HAL_TIM_SET_COMPARE(timer, channel, value) ((timer)->compare = (value))
 
@@ -99,6 +100,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
 void HAL_GPIO_TogglePin(GPIO_TypeDef *port, uint16_t pin);
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
 void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority);
+void HAL_NVIC_EnableIRQ(int irq);
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout);
 HAL_StatusTypeDef HAL_SPI_Transmit_DMA(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size);
 HAL_StatusTypeDef HAL_SPI_DMAStop(SPI_HandleTypeDef *spi);

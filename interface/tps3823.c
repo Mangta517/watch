@@ -35,7 +35,7 @@ void tps3823_enable(void)
     }
 
     tps3823_disable();
-    /* 非 A 版在 RESET 有效期间接收 WDI 跳变可能锁住复位；先高阻等待释放。 */
+    /* 等待正常上电复位延时；非A版若已被WDI跳变锁存，必须断电，等待不能解锁。 */
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
         vTaskDelay(pdMS_TO_TICKS(TPS3823_RESET_RELEASE_MS) + 1U);
@@ -58,8 +58,15 @@ void tps3823_enable(void)
 
 void tps3823_feed(void)
 {
+    uint8_t i;
     if (tps3823_enabled != 0)
     {
-        HAL_GPIO_TogglePin(WDI_GPIO_Port, WDI_Pin);
+        /* 每次均产生有效下降沿；100MHz下16个NOP保证高脉宽超过手册100ns。 */
+        HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_SET);
+        for (i = 0; i < 16U; ++i)
+        {
+            __NOP();
+        }
+        HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_RESET);
     }
 }

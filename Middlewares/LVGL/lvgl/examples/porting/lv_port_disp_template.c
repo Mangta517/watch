@@ -37,6 +37,7 @@ static lv_color_t buf_2[LVGL_BUF_PX];
 static lv_disp_drv_t * volatile s_flush_drv = NULL;
 static TaskHandle_t s_flush_task;
 static uint8_t s_redraw_pending;
+static void (*s_progress_callback)(void);
 
 /**********************
  *   GLOBAL FUNCTIONS
@@ -62,6 +63,11 @@ void lv_port_disp_init(void)
     lv_disp_drv_register(&disp_drv);
 }
 
+void lv_port_disp_set_progress_callback(void (*callback)(void))
+{
+    s_progress_callback = callback;
+}
+
 /**********************
  *   STATIC FUNCTIONS
  **********************/
@@ -73,6 +79,10 @@ static void disp_init(void)
 /* 发起 DMA 传输即返回; ready 由 TxCplt 中断里的 lcd_flush_ready_cb 报 */
 static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
 {
+    if (s_progress_callback != NULL)
+    {
+        s_progress_callback();
+    }
     s_flush_task = NULL;
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {

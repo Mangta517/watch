@@ -32,6 +32,8 @@
 /* SPI 单笔传输超时(ms)。HAL 用 HAL_GetTick 计时, 内核运行后由 it.c 的
  * SysTick_Handler → HAL_IncTick 持续维护。总线异常时不会永久卡死。 */
 #define LCD_SPI_TMO 1000
+/* 最大65534字节在50MHz下约10.5ms；100ms后仍无回调则按失败收尾。 */
+#define LCD_DMA_TIMEOUT_MS 100U
 
 static void lcd_delay_ms(uint32_t ms)
 {
@@ -178,6 +180,7 @@ static LCD_CallbackFunc_t s_lcd_flush_done_cb = NULL;
 static volatile uint8_t s_lcd_flush_active;
 static volatile uint8_t s_lcd_flush_failed;
 static volatile uint32_t s_lcd_flush_errors; /* 调试器可观察累计失败次数。 */
+static uint32_t s_lcd_flush_started_ms;
 
 void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb)
 {
@@ -189,6 +192,7 @@ void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t ye
     uint32_t bytes = (uint32_t)(xend - xsta + 1) * (uint32_t)(yend - ysta + 1) * 2;
     HAL_StatusTypeDef status;
 
+    s_lcd_flush_started_ms = HAL_GetTick();
     s_lcd_flush_active = 1;
 
     if (bytes > 0xFFFE)
@@ -240,6 +244,14 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 
 uint8_t LCD_Flush_Service(void)
 {
+    uint32_t primask = __get_PRIMASK();
+    /* 与完成ISR互斥认领超时；HAL中止及完成通知均在恢复中断后执行。 */
+    __disable_irq();
+    if (s_lcd_flush_active != 0 && (uint32_t)(HAL_GetTick() - s_lcd_flush_started_ms) >= LCD_DMA_TIMEOUT_MS)
+    {
+        s_lcd_flush_failed = 1;
+    }
+    __set_PRIMASK(primask);
     if (s_lcd_flush_failed == 0)
     {
         return 0;
@@ -345,6 +357,8 @@ void LCD_Init(void)
     /* SPI1_TX DMA 完成中断优先级: 从 CubeMX 的 0 提到 12 (≥configMAX_SYSCALL
      * 等效优先级 11 之下)，允许完成回调使用任务通知唤醒LVGL。 */
     HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 12, 0);
+    HAL_NVIC_SetPriority(SPI1_IRQn, 12, 0);
+    HAL_NVIC_EnableIRQ(SPI1_IRQn);
 
     LCD_RES_Clr(); /* 硬复位 */
     lcd_delay_ms(100);

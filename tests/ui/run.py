@@ -33,6 +33,17 @@ dma_exe = OUT / "dma_harness.exe"
 subprocess.run([gcc, "-Itests/sensors/host"] + args + ["-Iinterface", "-Wall", "-Wextra", "-Werror",
                "tests/ui/dma_harness.c", str(library), "-lm", "-o", str(dma_exe)], cwd=ROOT, check=True)
 subprocess.run([str(dma_exe)], cwd=ROOT, check=True)
+timeout_exe = OUT / "dma_timeout.exe"
+subprocess.run([gcc, "-std=c99", "-O0", "-Wall", "-Wextra", "-Werror",
+               "-include", "tests/sensors/host/i2c_platform.h",
+               "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Icommon",
+               "-IMiddlewares/LVGL", "-IMiddlewares/LVGL/lvgl",
+               "tests/ui/dma_timeout_harness.c", "interface/lcd.c", "interface/touch.c", "common/my_i2c.c",
+               str(library), "-lm", "-o", str(timeout_exe)], cwd=ROOT, check=True)
+subprocess.run([str(timeout_exe)], cwd=ROOT, check=True)
+subprocess.run([str(timeout_exe), "wrap"], cwd=ROOT, check=True)
+subprocess.run([str(timeout_exe), "slow"], cwd=ROOT, check=True)
+subprocess.run([str(timeout_exe), "slow_wrap"], cwd=ROOT, check=True)
 subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + ["-DAPP_DEBUG_TELEMETRY=1", "-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
 quiet_exe = OUT / "ui_quiet.exe"

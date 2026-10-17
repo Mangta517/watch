@@ -152,7 +152,15 @@ GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
 }
 void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority)
 {
-    assert(irq == DMA2_Stream2_IRQn && priority == 12 && subpriority == 0);
+    assert((irq == DMA2_Stream2_IRQn || irq == SPI1_IRQn) && priority == 12 && subpriority == 0);
+}
+void HAL_NVIC_EnableIRQ(int irq)
+{
+    assert(irq == SPI1_IRQn);
+}
+uint32_t HAL_GetTick(void)
+{
+    return elapsed_ms;
 }
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout)
 {
@@ -439,10 +447,44 @@ static void lcd_dma_error_tests(void)
     puts("PASS: LCD address/start/transfer errors stop DMA before releasing buffers, ignore late callbacks and allow the next frame.");
 }
 
+static void lcd_dma_timeout_tests(void)
+{
+    static uint16_t pixels[4];
+    unsigned int before, stops, wrap;
+    for (wrap = 0; wrap < 2U; ++wrap)
+    {
+        elapsed_ms = 1000U;
+        if (wrap != 0)
+        {
+            elapsed_ms = UINT32_MAX - 50U;
+        }
+        before = flush_completions;
+        stops = dma_stops;
+        LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+        elapsed_ms += 99U;
+        assert(LCD_Flush_Service() == 0 && dma_stops == stops);
+        ++elapsed_ms;
+        dma_stuck = 1;
+        assert(LCD_Flush_Service() == 0 && flush_completions == before);
+        dma_stuck = 0;
+        assert(LCD_Flush_Service() == 1 && flush_completions == before + 1U);
+        HAL_SPI_TxCpltCallback(&hspi1);
+        assert(flush_completions == before + 1U && LCD_Flush_Service() == 0);
+        LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+        host_dma_stream.CR = 0;
+        HAL_SPI_TxCpltCallback(&hspi1);
+        elapsed_ms += 1000U;
+        assert(LCD_Flush_Service() == 0 && flush_completions == before + 2U);
+    }
+    assert(primask == 0);
+    puts("PASS: lost DMA callbacks time out at 100ms, wait for buffer safety, complete once and handle tick wrap.");
+}
+
 int main(void)
 {
     lcd_fill_tests();
     lcd_dma_error_tests();
+    lcd_dma_timeout_tests();
     init_delay_tests(taskSCHEDULER_NOT_STARTED);
     init_delay_tests(taskSCHEDULER_RUNNING);
     init_delay_tests(taskSCHEDULER_SUSPENDED);

@@ -6,11 +6,21 @@
 #include <stdio.h>
 #include <string.h>
 
+#define __HAL_RCC_GPIOA_CLK_ENABLE() ((void)0)
+#define __HAL_RCC_GPIOB_CLK_ENABLE() ((void)0)
+#define __HAL_RCC_GPIOC_CLK_ENABLE() ((void)0)
+#define __HAL_RCC_GPIOH_CLK_ENABLE() ((void)0)
+#define GPIO_MODE_IT_RISING 3U
+#define GPIO_PULLDOWN 2U
+#define EXTI4_IRQn 4
+#define EXTI15_10_IRQn 15
+#include "../../Core/Src/gpio.c"
+
 GPIO_TypeDef host_gpio_a, host_gpio_b;
-static uint32_t wdi_mode = GPIO_MODE_OUTPUT_PP;
+static uint32_t wdi_mode = GPIO_MODE_INPUT;
 static GPIO_PinState gate = GPIO_PIN_SET;
 static GPIO_PinState wdi;
-static unsigned int toggles, waits;
+static unsigned int falling_edges, pulse_nops, waits;
 static uint8_t reset_released;
 static int scheduler = taskSCHEDULER_RUNNING;
 
@@ -41,7 +51,11 @@ void vTaskDelay(TickType_t ticks)
 
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *gpio)
 {
-    assert(port == GPIOB && gpio->Pin == GPIO_PIN_2 && gpio->Pull == GPIO_NOPULL);
+    if (port != WDI_GPIO_Port || (gpio->Pin & WDI_Pin) == 0)
+    {
+        return;
+    }
+    assert(gpio->Pull == GPIO_NOPULL);
     assert(gate == GPIO_PIN_SET);
     if (gpio->Mode == GPIO_MODE_OUTPUT_PP)
     {
@@ -58,36 +72,55 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *gpio)
 
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
 {
-    assert(port == GPIOB);
-    if (pin == GPIO_PIN_1)
+    if (port != GPIOB)
+    {
+        return;
+    }
+    if ((pin & WDG_EN_Pin) != 0)
     {
         if (state == GPIO_PIN_RESET)
         {
             assert(reset_released != 0 && wdi_mode == GPIO_MODE_OUTPUT_PP);
-            assert(wdi == GPIO_PIN_SET);
+            assert(wdi == GPIO_PIN_RESET && falling_edges != 0);
         }
         gate = state;
     }
-    else
+    if ((pin & WDI_Pin) != 0)
     {
-        assert(pin == GPIO_PIN_2 && wdi_mode == GPIO_MODE_INPUT);
+        if (wdi_mode == GPIO_MODE_OUTPUT_PP)
+        {
+            assert(reset_released != 0);
+            if (state == GPIO_PIN_SET)
+            {
+                assert(wdi == GPIO_PIN_RESET);
+                pulse_nops = 0;
+            }
+            else
+            {
+                assert(wdi == GPIO_PIN_SET && pulse_nops >= 16U);
+                ++falling_edges;
+            }
+        }
         wdi = state;
     }
 }
 
-void HAL_GPIO_TogglePin(GPIO_TypeDef *port, uint16_t pin)
+void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority)
 {
-    assert(port == GPIOB && pin == GPIO_PIN_2 && wdi_mode == GPIO_MODE_OUTPUT_PP);
-    assert(reset_released != 0);
-    if (wdi == GPIO_PIN_RESET)
-    {
-        wdi = GPIO_PIN_SET;
-    }
-    else
-    {
-        wdi = GPIO_PIN_RESET;
-    }
-    ++toggles;
+    (void)irq;
+    (void)priority;
+    (void)subpriority;
+}
+
+void HAL_NVIC_EnableIRQ(int irq)
+{
+    (void)irq;
+}
+
+void host_i2c_nop(void)
+{
+    assert(wdi_mode == GPIO_MODE_OUTPUT_PP && wdi == GPIO_PIN_SET);
+    ++pulse_nops;
 }
 
 int main(int argc, char **argv)
@@ -100,23 +133,26 @@ int main(int argc, char **argv)
     {
         scheduler = taskSCHEDULER_SUSPENDED;
     }
+    /* 覆盖真实CubeMX前缀，防止驱动初始化之前已在RESET低期间驱动WDI。 */
+    MX_GPIO_Init();
+    assert(gate == GPIO_PIN_SET && wdi_mode == GPIO_MODE_INPUT && falling_edges == 0);
     tps3823_init();
     assert(gate == GPIO_PIN_SET && wdi_mode == GPIO_MODE_INPUT && waits == 0);
     tps3823_feed();
-    assert(toggles == 0);
+    assert(falling_edges == 0);
     tps3823_enable();
-    assert(gate == GPIO_PIN_RESET && waits == 1 && toggles == 1);
+    assert(gate == GPIO_PIN_RESET && waits == 1 && falling_edges == 1);
     tps3823_enable();
-    assert(waits == 1 && toggles == 1);
+    assert(waits == 1 && falling_edges == 1);
     tps3823_feed();
-    assert(wdi == GPIO_PIN_RESET && toggles == 2);
+    assert(wdi == GPIO_PIN_RESET && falling_edges == 2);
     tps3823_feed();
-    assert(wdi == GPIO_PIN_SET && toggles == 3);
+    assert(wdi == GPIO_PIN_RESET && falling_edges == 3);
     tps3823_disable();
     tps3823_feed();
-    assert(gate == GPIO_PIN_SET && wdi_mode == GPIO_MODE_INPUT && toggles == 3);
+    assert(gate == GPIO_PIN_SET && wdi_mode == GPIO_MODE_INPUT && falling_edges == 3);
     tps3823_enable();
-    assert(gate == GPIO_PIN_RESET && waits == 2 && toggles == 4);
-    puts("TPS3823: pin polarity, high-impedance release, feed and re-enable: PASS");
+    assert(gate == GPIO_PIN_RESET && waits == 2 && falling_edges == 4);
+    puts("TPS3823: real boot GPIO keeps WDI high-impedance; gate polarity, reset wait, feed pulse and re-enable: PASS");
     return 0;
 }

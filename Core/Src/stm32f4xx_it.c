@@ -62,6 +62,7 @@ extern void xPortPendSVHandler(void);    /* FreeRTOS(CM4F port) PendSV 处理函
 extern DMA_HandleTypeDef hdma_spi1_tx;
 extern UART_HandleTypeDef huart1;
 /* USER CODE BEGIN EV */
+extern SPI_HandleTypeDef hspi1;
 
 /* USER CODE END EV */
 
@@ -267,5 +268,9 @@ void DMA2_Stream2_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void SPI1_IRQHandler(void)
+{
+    HAL_SPI_IRQHandler(&hspi1);
+}
 
 /* USER CODE END 1 */
