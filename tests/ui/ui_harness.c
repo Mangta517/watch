@@ -1239,10 +1239,79 @@ int main(void)
     open_feature(PAGE_WEATHER);
     assert(strstr(lv_label_get_text(s_weather_label), "26.3C / RH 80%") != NULL);
     assert(strcmp(lv_label_get_text(s_weather_value), "26.3 C") == 0);
-    lv_obj_scroll_to_view(s_weather_label, LV_ANIM_OFF);
+    assert(strcmp(lv_label_get_text(s_weather_condition), "OVERCAST") == 0);
+    {
+        static const struct
+        {
+            const char *frame;
+            const char *description;
+        } cases[] =
+        {
+            {"WEATHER,0,263,80\n", "CLEAR"},
+            {"WEATHER,1,263,80\n", "MAINLY CLEAR"},
+            {"WEATHER,2,263,80\n", "PARTLY CLOUDY"},
+            {"WEATHER,45,263,80\n", "FOG"},
+            {"WEATHER,51,263,80\n", "DRIZZLE"},
+            {"WEATHER,61,263,80\n", "RAIN"},
+            {"WEATHER,71,263,80\n", "SNOW"},
+            {"WEATHER,95,263,80\n", "THUNDERSTORM"},
+            {"WEATHER,4,263,80\n", "UNKNOWN"}
+        };
+        uint32_t icon_hashes[sizeof(cases) / sizeof(cases[0])];
+        unsigned index;
+        for (index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index)
+        {
+            lv_area_t condition_area, card_area, body_area, icon_area, value_area;
+            lv_coord_t x, y;
+            char preview_name[32];
+            host_bluetooth_feed((const uint8_t *)cases[index].frame, (uint16_t)strlen(cases[index].frame));
+            advance(120);
+            assert(strcmp(lv_label_get_text(s_weather_condition), cases[index].description) == 0);
+            assert(strcmp(lv_label_get_text(s_weather_value), "26.3 C") == 0);
+            lv_obj_get_coords(s_weather_condition, &condition_area);
+            lv_obj_get_coords(lv_obj_get_parent(s_weather_condition), &card_area);
+            lv_obj_get_coords(s_body, &body_area);
+            assert(condition_area.x1 >= card_area.x1 && condition_area.x2 <= card_area.x2);
+            assert(condition_area.y1 >= card_area.y1 && condition_area.y2 <= card_area.y2);
+            assert(condition_area.y1 >= body_area.y1 && condition_area.y2 <= body_area.y2);
+            lv_obj_get_coords(s_weather_icon, &icon_area);
+            lv_obj_get_coords(s_weather_value, &value_area);
+            assert(icon_area.x1 >= card_area.x1 && icon_area.x2 < value_area.x1);
+            assert(icon_area.y1 >= card_area.y1 && icon_area.y2 < condition_area.y1);
+            assert(s_weather_icon_code == (uint8_t)strtoul(cases[index].frame + 8, NULL, 10));
+            icon_hashes[index] = 2166136261U;
+            for (y = icon_area.y1; y <= icon_area.y2; ++y)
+            {
+                for (x = icon_area.x1; x <= icon_area.x2; ++x)
+                {
+                    icon_hashes[index] = (icon_hashes[index] ^ lv_color_to32(framebuffer[y * 240 + x])) * 16777619U;
+                }
+            }
+            snprintf(preview_name, sizeof(preview_name), "weather_icon_%u", index);
+            screenshot(preview_name);
+        }
+        assert(icon_hashes[0] != icon_hashes[2]); /* 太阳与多云实际像素不同。 */
+        assert(icon_hashes[2] != icon_hashes[3]);
+        assert(icon_hashes[3] != icon_hashes[5]);
+        assert(icon_hashes[5] != icon_hashes[6]);
+        assert(icon_hashes[6] != icon_hashes[7]);
+        assert(icon_hashes[7] != icon_hashes[8]);
+    }
+    host_bluetooth_feed((const uint8_t *)"WEATHER,2,263,80\n", sizeof("WEATHER,2,263,80\n") - 1);
     advance(120);
+    host_bluetooth_feed((const uint8_t *)"WEATHER,100,263,80\n", sizeof("WEATHER,100,263,80\n") - 1);
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_weather_condition), "PARTLY CLOUDY") == 0);
+    assert(s_weather_icon_code == 2);
     assert_static_refresh();
     screenshot("phone_weather");
+    host_tick += 3600000U;
+    advance(120);
+    assert(lv_color_to32(lv_obj_get_style_text_color(s_weather_condition, 0)) == lv_color_to32(lv_color_hex(UI_MUTED)));
+    host_bluetooth_feed((const uint8_t *)"WEATHER,0,263,80\n", sizeof("WEATHER,0,263,80\n") - 1);
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_weather_condition), "CLEAR") == 0);
+    assert(lv_color_to32(lv_obj_get_style_text_color(s_weather_condition, 0)) == lv_color_to32(lv_color_hex(UI_TEXT)));
     key_back();
     key_back();
     host_tick += 3600000U;

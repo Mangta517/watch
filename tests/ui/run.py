@@ -69,6 +69,9 @@ make_preview(["watch", "settings", "settings_scrolled"], ["WATCH / HOME", "APPS 
 make_preview(["heart", "motion", "environment", "aht21", "phone_weather", "bluetooth", "display"],
              ["HEART RATE", "MOTION", "BAROMETER", "CLIMATE", "PHONE WEATHER", "BLUETOOTH", "DISPLAY"],
              4, "watch-ui-details.png")
+make_preview([f"weather_icon_{index}" for index in range(9)],
+             ["CLEAR", "MAINLY CLEAR", "PARTLY CLOUDY", "FOG", "DRIZZLE", "RAIN", "SNOW", "THUNDERSTORM", "UNKNOWN"],
+             3, "weather-icons-preview.png")
 for name in ["watch", "motion_magnetic", "motion_calibrating", "motion_calibration_status", "motion_restored", "motion_save_failed",
              "bluetooth", "bluetooth_empty", "bluetooth_tx", "bluetooth_time",
              "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds",

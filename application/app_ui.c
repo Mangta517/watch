@@ -77,6 +77,9 @@ static lv_obj_t *s_screen;
 static lv_obj_t *s_battery_label;
 static lv_obj_t *s_weather_label;
 static lv_obj_t *s_weather_value;
+static lv_obj_t *s_weather_condition;
+static lv_obj_t *s_weather_icon;
+static uint8_t s_weather_icon_code;
 static lv_obj_t *s_body;
 static lv_obj_t *s_time;
 static lv_obj_t *s_hour_hand;
@@ -315,6 +318,100 @@ static lv_obj_t *heart_icon(lv_obj_t *parent, int x, int y)
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(obj, heart_icon_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
     return obj;
+}
+
+static void weather_icon_shape(lv_draw_ctx_t *context, const lv_area_t *origin, int x, int y, int w, int h, uint32_t color)
+{
+    lv_draw_rect_dsc_t style;
+    lv_area_t area = {origin->x1 + x, origin->y1 + y, origin->x1 + x + w - 1, origin->y1 + y + h - 1};
+    lv_draw_rect_dsc_init(&style);
+    style.radius = LV_RADIUS_CIRCLE;
+    style.bg_color = lv_color_hex(color);
+    lv_draw_rect(context, &style, &area);
+}
+
+static void weather_icon_line(lv_draw_ctx_t *context, const lv_area_t *origin, int x1, int y1, int x2, int y2, uint32_t color)
+{
+    lv_draw_line_dsc_t style;
+    lv_point_t start = {origin->x1 + x1, origin->y1 + y1};
+    lv_point_t end = {origin->x1 + x2, origin->y1 + y2};
+    lv_draw_line_dsc_init(&style);
+    style.color = lv_color_hex(color);
+    style.width = 3;
+    style.round_start = 1;
+    style.round_end = 1;
+    lv_draw_line(context, &style, &start, &end);
+}
+
+/* 天气码沿用手机协议；矢量图形由显示任务绘制，不额外加载位图或字库。 */
+static void weather_icon_draw_cb(lv_event_t *event)
+{
+    lv_draw_ctx_t *context = lv_event_get_draw_ctx(event);
+    lv_area_t area;
+    uint8_t code = s_weather_icon_code;
+    uint8_t i;
+    lv_obj_get_coords(lv_event_get_target(event), &area);
+    if (code == 255 || strcmp(app_weather_description(code), "UNKNOWN") == 0)
+    {
+        lv_draw_label_dsc_t style;
+        lv_draw_label_dsc_init(&style);
+        style.font = &lv_font_montserrat_30;
+        style.color = lv_color_hex(UI_MUTED);
+        style.align = LV_TEXT_ALIGN_CENTER;
+        area.y1 += 16;
+        lv_draw_label(context, &style, &area, "?", NULL);
+        return;
+    }
+    if (code <= 2)
+    {
+        for (i = 0; i < 8; ++i)
+        {
+            int32_t sine = lv_trigo_sin(i * 45);
+            int32_t cosine = lv_trigo_cos(i * 45);
+            weather_icon_line(context, &area, 27 + sine * 17 / LV_TRIGO_SIN_MAX, 25 + cosine * 17 / LV_TRIGO_SIN_MAX,
+                              27 + sine * 22 / LV_TRIGO_SIN_MAX, 25 + cosine * 22 / LV_TRIGO_SIN_MAX, 0xF5BD58);
+        }
+        weather_icon_shape(context, &area, 15, 13, 25, 25, 0xF5BD58);
+        if (code == 0)
+        {
+            return;
+        }
+    }
+    if (code == 3)
+    {
+        weather_icon_shape(context, &area, 9, 17, 24, 24, UI_MUTED);
+        weather_icon_shape(context, &area, 22, 12, 29, 29, UI_MUTED);
+    }
+    weather_icon_shape(context, &area, 7, 29, 25, 25, UI_TEXT);
+    weather_icon_shape(context, &area, 22, 21, 30, 30, UI_TEXT);
+    weather_icon_shape(context, &area, 40, 32, 20, 20, UI_TEXT);
+    weather_icon_shape(context, &area, 17, 37, 36, 17, UI_TEXT);
+    if (code == 45 || code == 48)
+    {
+        weather_icon_line(context, &area, 8, 50, 56, 50, UI_MUTED);
+        weather_icon_line(context, &area, 12, 58, 51, 58, UI_MUTED);
+    }
+    else if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82))
+    {
+        for (i = 0; i < 3; ++i)
+        {
+            weather_icon_line(context, &area, 18 + i * 15, 56, 14 + i * 15, 62, UI_BLUE);
+        }
+    }
+    else if ((code >= 71 && code <= 77) || code == 85 || code == 86)
+    {
+        for (i = 0; i < 3; ++i)
+        {
+            weather_icon_line(context, &area, 14 + i * 16, 58, 20 + i * 16, 58, UI_BLUE);
+            weather_icon_line(context, &area, 17 + i * 16, 55, 17 + i * 16, 61, UI_BLUE);
+        }
+    }
+    else if (code >= 95)
+    {
+        weather_icon_line(context, &area, 35, 46, 27, 54, 0xF5BD58);
+        weather_icon_line(context, &area, 27, 54, 36, 54, 0xF5BD58);
+        weather_icon_line(context, &area, 36, 54, 28, 62, 0xF5BD58);
+    }
 }
 
 static void card(const char *icon, const char *title, int index, uint32_t accent, const ui_page_t *destination)
@@ -1215,7 +1312,9 @@ static void back_cb(lv_event_t *event)
 static void clear_page_refs(void)
 {
     s_battery_label = NULL;
-    s_weather_label = s_weather_value = NULL;
+    s_weather_label = s_weather_value = s_weather_condition = NULL;
+    s_weather_icon = NULL;
+    s_weather_icon_code = 255;
     s_time = s_clock_hint = s_watch_heart = s_watch_temperature = NULL;
     s_hour_hand = s_minute_hand = s_second_hand = NULL;
     s_clock_refresh_tick = lv_tick_get() - 1000U;
@@ -1385,9 +1484,19 @@ static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
             climate_page();
             break;
         case PAGE_WEATHER:
-            s_weather_value = metric("PHONE WEATHER", "BLE", 4, UI_BLUE);
-            s_weather_label = note(s_body, "PHONE WEATHER / WAITING FOR PHONE", 104);
-            note(s_body, "Weather comes from your phone. Open Bluetooth to receive updates.", 162);
+            s_weather_value = metric("TODAY'S WEATHER", "BLE", 4, UI_BLUE);
+            lv_obj_set_height(lv_obj_get_parent(s_weather_value), 132);
+            lv_obj_set_pos(s_weather_value, 88, 48);
+            lv_obj_set_width(s_weather_value, 110);
+            lv_obj_set_style_text_font(s_weather_value, &lv_font_montserrat_20, 0);
+            s_weather_icon = panel(lv_obj_get_parent(s_weather_value), 14, 27, 64, 64, UI_CARD);
+            lv_obj_set_style_bg_opa(s_weather_icon, LV_OPA_TRANSP, 0);
+            lv_obj_clear_flag(s_weather_icon, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(s_weather_icon, weather_icon_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+            s_weather_condition = label(lv_obj_get_parent(s_weather_value), "--", 14, 100, &lv_font_montserrat_20, UI_TEXT);
+            lv_obj_set_width(s_weather_condition, 184);
+            s_weather_label = note(s_body, "WAITING FOR PHONE", 148);
+            note(s_body, "Weather comes from your phone. Connect the app to sync.", 190);
             break;
         default:
             break;
@@ -1661,17 +1770,24 @@ static void refresh_weather(void)
             sign = "";
         }
         set_label_text_fmt(s_weather_value, "%s%ld.%ld C", sign, (long)(magnitude / 10), (long)(magnitude % 10));
-        set_label_text_fmt(s_weather_label, "PHONE WEATHER / %s\n%s%ld.%ldC / RH %u%% / %lu min ago",
-                           app_weather_description(weather.code), sign,
+        set_label_text(s_weather_condition, app_weather_description(weather.code));
+        if (s_weather_icon_code != weather.code)
+        {
+            s_weather_icon_code = weather.code;
+            lv_obj_invalidate(s_weather_icon);
+        }
+        set_label_text_fmt(s_weather_label, "%s%ld.%ldC / RH %u%%\n%lu min ago", sign,
                            (long)(magnitude / 10), (long)(magnitude % 10), (unsigned)weather.humidity_rh,
                            (unsigned long)(lv_tick_elaps(weather.received_ms) / 60000U));
         if (lv_tick_elaps(weather.received_ms) >= 3600000U)
         {
             set_text_color(s_weather_label, UI_MUTED);
+            set_text_color(s_weather_condition, UI_MUTED);
         }
         else
         {
             set_text_color(s_weather_label, UI_TEXT);
+            set_text_color(s_weather_condition, UI_TEXT);
         }
     }
 }
