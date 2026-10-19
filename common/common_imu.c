@@ -13,12 +13,14 @@ float Gyro_Gr = 1.0f / MPU6050_GYRO_LSB_PER_DPS / 180.0f * 3.1415926f;
 
 static Quaternion_Struct s_q = {1, 0, 0, 0};
 static float s_error_i[3];
+static uint8_t s_gravity_pending = 1;
 
 void Common_IMU_Reset(void)
 {
     s_q.q0 = 1.0f;
     s_q.q1 = s_q.q2 = s_q.q3 = 0.0f;
     memset(s_error_i, 0, sizeof(s_error_i));
+    s_gravity_pending = 1;
 }
 
 uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const float mag_uT[3], Euler_struct *euler, float dt)
@@ -29,7 +31,7 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
     float accel[3];       /* 加速度，先为LSB，再归一化 */
     float gyro[3];        /* 修正后的机体角速度，rad/s */
     float error[3] = {0}; /* 加速度与预测重力的方向误差 */
-    float norm, dot;
+    float norm, dot, half_roll, half_pitch;
     float north[3];      /* 四元数预测的单位磁北向量 */
     float horizontal[3]; /* 实测磁场的水平投影 */
     float cross[3];      /* 水平磁场与预测磁北的叉积 */
@@ -42,14 +44,28 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
         return 0;
     }
 
-    /* 1. 提取机体坐标下的重力方向，作为俯仰/横滚参考。 */
-    gravity[0] = 2.0f * (q1 * q3 - q0 * q2);
-    gravity[1] = 2.0f * (q0 * q1 + q2 * q3);
-    gravity[2] = 1.0f - 2.0f * (q1 * q1 + q2 * q2);
     accel[0] = raw->Accel.Accel_x;
     accel[1] = raw->Accel.Accel_y;
     accel[2] = raw->Accel.Accel_z;
     norm = sqrtf(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]);
+
+    /* 首个有效重力样本建立俯仰/横滚；倒置时叉积为零，不能从正Z初值自行收敛。
+     * 航向从0开始，仍由后续磁参考修正；仅启动/显式Reset后执行一次。 */
+    if (s_gravity_pending != 0 && norm > 0.75f * MPU6050_ACCEL_LSB_PER_G && norm < 1.25f * MPU6050_ACCEL_LSB_PER_G)
+    {
+        half_roll = 0.5f * atan2f(accel[1], accel[2]);
+        half_pitch = 0.5f * atan2f(-accel[0], sqrtf(accel[1] * accel[1] + accel[2] * accel[2]));
+        s_q.q0 = q0 = cosf(half_roll) * cosf(half_pitch);
+        s_q.q1 = q1 = sinf(half_roll) * cosf(half_pitch);
+        s_q.q2 = q2 = cosf(half_roll) * sinf(half_pitch);
+        s_q.q3 = q3 = -sinf(half_roll) * sinf(half_pitch);
+        s_gravity_pending = 0;
+    }
+
+    /* 1. 提取机体坐标下的重力方向，作为俯仰/横滚参考。 */
+    gravity[0] = 2.0f * (q1 * q3 - q0 * q2);
+    gravity[1] = 2.0f * (q0 * q1 + q2 * q3);
+    gravity[2] = 1.0f - 2.0f * (q1 * q1 + q2 * q2);
 
     /* 2. 仅在0.75～1.25g内用加速度修正重力方向，排除明显跑步冲击。 */
     if (norm > 0.75f * MPU6050_ACCEL_LSB_PER_G && norm < 1.25f * MPU6050_ACCEL_LSB_PER_G)

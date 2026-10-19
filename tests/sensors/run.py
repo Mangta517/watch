@@ -63,3 +63,9 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
                     "tests/sensors/heart_harness.c", "application/app_heart.c",
                     "-lm", "-o", service_exe], cwd=root, check=True)
     subprocess.run([service_exe], cwd=root, check=True)
+    motion_exe = str(Path(out) / "heart-motion.exe")
+    subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                    "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Iapplication",
+                    "tests/sensors/heart_motion_harness.c", "application/app_heart.c",
+                    "-lm", "-o", motion_exe], cwd=root, check=True)
+    subprocess.run([motion_exe], cwd=root, check=True)

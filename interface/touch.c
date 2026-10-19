@@ -373,35 +373,132 @@ uint8_t Touch_Init(void)
 #define TP_FAIL_STREAK_RECOVER 200 /* 5ms/次 约1s，与LVGL输入周期一致 */
 static uint32_t s_tp_fail_streak = 0;
 
+enum
+{
+    TP_RECOVER_IDLE,
+    TP_RECOVER_RESET_WAIT,
+    TP_RECOVER_BOOT_WAIT,
+    TP_RECOVER_PROBE,
+    TP_RECOVER_PROBE_WAIT,
+    TP_RECOVER_CONFIG
+};
+static struct
+{
+    uint32_t phase_ms;
+    uint8_t phase, address_index;
+} tp_recovery;
+
+static void tp_recover_begin(void)
+{
+    iic_bus_recover();
+    TP_RST_0();
+    tp_recovery.phase_ms = HAL_GetTick();
+    tp_recovery.phase = TP_RECOVER_RESET_WAIT;
+    tp_recovery.address_index = 0;
+    g_tp_chip_id = 0;
+}
+
+/* 手指数和坐标共享连续失败计数，复位后的等待由后续输入轮询推进。 */
+static void tp_read_failed(void)
+{
+    if (++s_tp_fail_streak >= TP_FAIL_STREAK_RECOVER)
+    {
+        s_tp_fail_streak = 0;
+        tp_recover_begin();
+    }
+}
+
+/* 与输入读取同属显示任务；每次至多一笔事务，毫秒等待只检查墙钟。 */
+static void tp_recover_step(void)
+{
+    static const uint8_t addrs[2] = {CST816_ADDR_1, CST816_ADDR_2};
+    uint32_t now_ms = HAL_GetTick();
+    uint8_t id;
+    switch (tp_recovery.phase)
+    {
+    case TP_RECOVER_RESET_WAIT:
+        if ((uint32_t)(now_ms - tp_recovery.phase_ms) >= 10U)
+        {
+            TP_RST_1();
+            tp_recovery.phase_ms = HAL_GetTick();
+            tp_recovery.phase = TP_RECOVER_BOOT_WAIT;
+        }
+        break;
+    case TP_RECOVER_BOOT_WAIT:
+        if ((uint32_t)(now_ms - tp_recovery.phase_ms) >= 300U)
+        {
+            tp_recovery.phase = TP_RECOVER_PROBE;
+        }
+        break;
+    case TP_RECOVER_PROBE:
+        if (tp_read_regs_at(addrs[tp_recovery.address_index], REG_ChipID, &id, 1) && id != 0 && id != 0xFF)
+        {
+            s_tp_addr8 = addrs[tp_recovery.address_index];
+            g_tp_chip_id = id;
+            tp_recovery.phase = TP_RECOVER_CONFIG;
+        }
+        else
+        {
+            tp_recovery.phase_ms = HAL_GetTick();
+            tp_recovery.phase = TP_RECOVER_PROBE_WAIT;
+        }
+        break;
+    case TP_RECOVER_PROBE_WAIT:
+        if ((uint32_t)(now_ms - tp_recovery.phase_ms) >= 100U)
+        {
+            ++tp_recovery.address_index;
+            if (tp_recovery.address_index < 2U)
+            {
+                tp_recovery.phase = TP_RECOVER_PROBE;
+            }
+            else
+            {
+                tp_recovery.phase = TP_RECOVER_CONFIG;
+            }
+        }
+        break;
+    case TP_RECOVER_CONFIG:
+        (void)tp_write_reg(REG_AutoSleepTime, 0x00);
+        tp_recovery.phase = TP_RECOVER_IDLE;
+        break;
+    default:
+        break;
+    }
+}
+
 uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
 {
     uint8_t num, d[4];
     uint16_t px, py;
 
-    if (!tp_read_regs(REG_FingerNum, &num, 1))
+    if (tp_recovery.phase != TP_RECOVER_IDLE)
     {
-        if (++s_tp_fail_streak >= TP_FAIL_STREAK_RECOVER)
-        {
-            s_tp_fail_streak = 0;
-            Touch_Wakeup(); /* 恢复+复位+重探测，约310~510ms；等待时让出CPU */
-        }
+        tp_recover_step();
         return 0;
     }
-    s_tp_fail_streak = 0;
+    if (!tp_read_regs(REG_FingerNum, &num, 1))
+    {
+        tp_read_failed();
+        return 0;
+    }
 
     if (num == 0xFF)
     {
+        s_tp_fail_streak = 0;
         return 0; /* 芯片在休眠扫描(理论已关) */
     }
     if (num == 0x00)
     {
+        s_tp_fail_streak = 0;
         return 0; /* 无手指 */
     }
 
     if (!tp_read_regs(REG_XposH, d, 4))
     {
+        tp_read_failed(); /* 坐标失败同样累计；后续轮询推进复位，不阻塞LVGL。 */
         return 0; /* XposH..YposL 连读 */
     }
+    s_tp_fail_streak = 0;
     px = (uint16_t)(((uint16_t)(d[0] & 0x0F) << 8) | d[1]);
     py = (uint16_t)(((uint16_t)(d[2] & 0x0F) << 8) | d[3]);
 

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "app_imu.h"
+#include "app_heart.h"
 #include "common_imu.h"
 #include "my_i2c.h"
 #include "spl006.h"
@@ -32,6 +33,7 @@
 void HAL_GPIO_EXTI_Callback(uint16_t pin);
 static uint8_t regs[128][256];
 static TickType_t tick;
+static uint8_t mpu_auto_ready = 1;
 static int scheduler_state = taskSCHEDULER_RUNNING;
 static unsigned hal_delay_calls, task_delay_calls;
 static uint32_t primask;
@@ -53,6 +55,17 @@ static int eeprom_read_fail_after = -1;
 static TickType_t eeprom_busy_ms = 3U;
 extern uint32_t host_imu_save_diag[4];
 static void word(uint8_t dev, uint8_t reg, int16_t value);
+static uint32_t heart_motion_frames;
+static int16_t heart_motion_accel[3];
+
+void app_heart_motion_update(int16_t accel_x, int16_t accel_y, int16_t accel_z, uint32_t sample_ms)
+{
+    heart_motion_accel[0] = accel_x;
+    heart_motion_accel[1] = accel_y;
+    heart_motion_accel[2] = accel_z;
+    assert(sample_ms == HAL_GetTick());
+    ++heart_motion_frames;
+}
 
 uint32_t __get_PRIMASK(void)
 {
@@ -181,6 +194,10 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, uint8_t *d
         if (dev == MPU6050_ADDR && reg == 0x3A)
         {
             assert(len == 15 || len == 1);
+            if (len == 15 && mpu_auto_ready != 0)
+            {
+                data[0] |= 1U; /* 默认模拟持续100Hz输出；新鲜度用例可暂停转换。 */
+            }
             regs[dev][0x3A] = 0;
         }
     }
@@ -330,6 +347,42 @@ static void driver_tests(void)
     puts("PASS: ID/config, XZY/endian/units, NACK/saturation/LOCK, deferred MPU IRQ, shared bus");
 }
 
+static void missing_frame_tests(void)
+{
+    Accel_Gyro_struct raw, previous;
+    mpu6050_offset_struct zero = {{0, 0, 0}, {0, 0, 0}};
+    uint16_t stable, average;
+    unsigned i, before;
+    assert(my_mpu6050_init() == 0);
+    memset(&raw, 0x35, sizeof(raw));
+    previous = raw;
+    mpu_auto_ready = 0;
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 0;
+    before = reads;
+    assert(my_mpu6050_get_data(&raw) == MPU6050_DATA_NOT_READY);
+    assert(reads == before + 1 && memcmp(&raw, &previous, sizeof(raw)) == 0);
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
+    assert(my_mpu6050_get_data(&raw) == 0);
+    previous = raw;
+    assert(my_mpu6050_get_data(&raw) == MPU6050_DATA_NOT_READY);
+    assert(memcmp(&raw, &previous, sizeof(raw)) == 0);
+    mpu_auto_ready = 1;
+    my_mpu6050_restore_offset(&zero);
+    my_mpu6050_zero_offset_begin(0);
+    for (i = 0; i <= 202U; ++i)
+    {
+        raw = (Accel_Gyro_struct){.Gyro = {66, -33, 99}, .Accel = {20, -10, 8222}};
+        my_mpu6050_zero_offset_step(&raw, i != 50U && i != 150U, i * 10U);
+    }
+    my_mpu6050_zero_offset_progress(&stable, &average);
+    assert(my_mpu6050_zero_offset_state() == MPU6050_CAL_DONE && stable == 100U && average == 100U);
+    my_mpu6050_zero_offset_begin(UINT32_MAX - 1000U);
+    assert(my_mpu6050_zero_offset_step(NULL, 0, UINT32_MAX - 999U) == MPU6050_CAL_WAIT_STILL);
+    assert(my_mpu6050_zero_offset_step(NULL, 0, 1999U) == MPU6050_CAL_FAILED);
+    my_mpu6050_restore_offset(&zero);
+    puts("PASS: DATA_RDY gates publication; missing calibration frames keep the wall-clock timeout and valid sample counts.");
+}
+
 static void calibration_tests(void)
 {
     TickType_t start;
@@ -425,7 +478,8 @@ static void incremental_calibration_tests(void)
     assert(offset_accel_x == 20 && offset_gyro_z == 99);
     assert(my_mpu6050_zero_offset_diag()[MPU_CAL_DIAG_REJECT] == MPU_CAL_REJECT_AVERAGE_TIMEOUT);
     my_mpu6050_zero_offset_begin(now);
-    assert(my_mpu6050_zero_offset_step(NULL, 0, now) == MPU6050_CAL_FAILED);
+    assert(my_mpu6050_zero_offset_step(NULL, 0, now) == MPU6050_CAL_WAIT_STILL);
+    assert(my_mpu6050_zero_offset_step(NULL, 0, now + 3000U) == MPU6050_CAL_FAILED);
     assert(offset_accel_x == 20 && offset_gyro_z == 99);
     offset_accel_x = offset_accel_y = offset_accel_z = 0;
     offset_gyro_x = offset_gyro_y = offset_gyro_z = 0;
@@ -480,7 +534,7 @@ static void calibration_diag_tests(void)
     my_mpu6050_zero_offset_begin(1000);
     diag = my_mpu6050_zero_offset_diag();
     assert(diag[MPU_CAL_DIAG_STABLE_PEAK] == 0 && diag[MPU_CAL_DIAG_REJECT_SEEN] == 0 && diag[MPU_CAL_DIAG_CHECKED] == 0);
-    assert(my_mpu6050_zero_offset_step(NULL, 0, 1000) == MPU6050_CAL_FAILED);
+    assert(my_mpu6050_zero_offset_step(NULL, 0, 1000) == MPU6050_CAL_WAIT_STILL);
     assert(my_mpu6050_zero_offset_diag()[MPU_CAL_DIAG_REJECT] == MPU_CAL_REJECT_READ);
     assert(tick == started && reads == bus_reads); /* 诊断自身不增加等待或总线读取。 */
     my_mpu6050_restore_offset(&zero);
@@ -646,6 +700,45 @@ static void truth(float roll_deg, float pitch_deg, float yaw_deg, Accel_Gyro_str
     mag[1] = 30 * (cy * sp * sr - sy * cr) + 40 * cp * sr;
     mag[2] = 30 * (cy * sp * cr + sy * sr) + 40 * cp * cr;
 }
+static void fusion_startup_tests(void)
+{
+    static const float poses[][2] = {{180.0f, 0.0f}, {-179.0f, 5.0f}, {35.0f, 25.0f}, {0.0f, 90.0f}, {0.0f, -90.0f}};
+    Accel_Gyro_struct raw;
+    Euler_struct euler;
+    float mag[3], gravity[3], predicted[3];
+    uint32_t pose, frame, axis;
+
+    for (pose = 0; pose < sizeof(poses) / sizeof(poses[0]); ++pose)
+    {
+        Common_IMU_Reset();
+        memset(&raw, 0, sizeof(raw));
+        Common_IMU_GetEulerAngle(&raw, &euler, 0.01f);
+        raw.Accel.Accel_x = 24576; /* 3g冲击不能决定初始重力方向。 */
+        Common_IMU_GetEulerAngle(&raw, &euler, 0.01f);
+        assert(fabsf(euler.pitch) < 0.01f && fabsf(euler.roll) < 0.01f);
+        truth(poses[pose][0], poses[pose][1], 0.0f, &raw, mag, gravity);
+        for (frame = 0; frame < 1000U; ++frame)
+        {
+            Common_IMU_GetEulerAngle(&raw, &euler, 0.01f);
+            predicted[0] = -sinf(euler.pitch / RtA);
+            predicted[1] = cosf(euler.pitch / RtA) * sinf(euler.roll / RtA);
+            predicted[2] = cosf(euler.pitch / RtA) * cosf(euler.roll / RtA);
+            for (axis = 0; axis < 3U; ++axis)
+            {
+                assert(fabsf(predicted[axis] - gravity[axis]) < 0.001f);
+            }
+        }
+        if (pose == 0U)
+        {
+            assert(angle_error(euler.roll, 180.0f) < 0.01f);
+            Common_IMU_Reset(); /* 校准结束后同样需要重新建立倒置姿态。 */
+            Common_IMU_GetEulerAngleWithMag(&raw, mag, &euler, 0.01f);
+            assert(angle_error(euler.roll, 180.0f) < 0.01f);
+        }
+    }
+    puts("PASS: first valid gravity seeds inverted/tilted/vertical poses after reset; zero/3g samples defer seeding.");
+}
+
 static void fusion_tests(void)
 {
     const float cases[][3] = {{0, 0, 90}, {35, 25, 90}, {-40, 30, -135}, {20, -55, 179}, {0, 0, -179}, {45, 45, 0}};
@@ -653,6 +746,7 @@ static void fusion_tests(void)
     Euler_struct euler = {0};
     float mag[3], gravity[3], without_mag, with_mag, before;
     unsigned c, n;
+    fusion_startup_tests();
     for (c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c)
     {
         Common_IMU_Reset();
@@ -772,6 +866,45 @@ static void service_step(void)
     tick += 10;
     App_IMU_Service();
 }
+static void service_missing_frame_tests(void)
+{
+    app_imu_struct before, after;
+    uint32_t motion_frames;
+    mpu6050_offset_struct zero = {{0, 0, 0}, {0, 0, 0}};
+    my_mpu6050_restore_offset(&zero);
+    Common_IMU_Reset();
+    fail_dev = LSM303DLHC_MAG_ADDR;
+    word(MPU6050_ADDR, 0x3F, 8192);
+    word(MPU6050_ADDR, 0x47, 6560); /* 200deg/s；相邻有效更新隔20ms应前进4度。 */
+    service_step();
+    assert(App_IMU_GetSnapshot(&before));
+    assert(heart_motion_accel[0] == before.raw.Accel.Accel_x && heart_motion_accel[1] == before.raw.Accel.Accel_y &&
+           heart_motion_accel[2] == before.raw.Accel.Accel_z);
+    motion_frames = heart_motion_frames;
+    mpu_auto_ready = 0;
+    service_step();
+    assert(App_IMU_GetSnapshot(&after));
+    assert(after.yaw_deg == before.yaw_deg && memcmp(&after.raw, &before.raw, sizeof(after.raw)) == 0);
+    assert(heart_motion_frames == motion_frames);
+    mpu_auto_ready = 1;
+    service_step();
+    assert(App_IMU_GetSnapshot(&after));
+    assert(heart_motion_frames == motion_frames + 1U);
+    assert(angle_error(after.yaw_deg, before.yaw_deg + 4.0f) < 0.1f);
+    mpu_auto_ready = 0;
+    for (unsigned i = 0; i < 5U; ++i)
+    {
+        service_step();
+    }
+    assert(!App_IMU_GetSnapshot(&after));
+    mpu_auto_ready = 1;
+    service_step();
+    assert(App_IMU_GetSnapshot(&after));
+    fail_dev = -1;
+    word(MPU6050_ADDR, 0x47, 0);
+    puts("PASS: no-ready frame neither publishes nor integrates; next fresh frame uses elapsed time; stale MPU goes offline and recovers.");
+}
+
 static void service_tests(uint8_t fail_save)
 {
     app_imu_struct imu;
@@ -1325,6 +1458,7 @@ int main(int argc, char **argv)
     imu_eeprom_tests();
     imu_save_diagnostic_tests();
     driver_tests();
+    missing_frame_tests();
     calibration_tests();
     incremental_calibration_tests();
     calibration_diag_tests();
@@ -1332,5 +1466,6 @@ int main(int argc, char **argv)
     calibration_negative_gravity_tests();
     fusion_tests();
     service_tests(argc > 1);
+    service_missing_frame_tests();
     return 0;
 }

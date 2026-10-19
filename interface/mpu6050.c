@@ -318,13 +318,9 @@ mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t va
     {
         timeout_ms = 2000U;
     }
-    if (valid == 0 || raw == NULL || (uint32_t)(now_ms - s_cal.phase_ms) >= timeout_ms)
+    if ((uint32_t)(now_ms - s_cal.phase_ms) >= timeout_ms)
     {
-        if (valid == 0 || raw == NULL)
-        {
-            s_cal.diag[MPU_CAL_DIAG_REJECT] = MPU_CAL_REJECT_READ;
-        }
-        else if (s_cal.state == MPU6050_CAL_WAIT_STILL)
+        if (s_cal.state == MPU6050_CAL_WAIT_STILL)
         {
             s_cal.diag[MPU_CAL_DIAG_REJECT] = MPU_CAL_REJECT_WAIT_TIMEOUT;
         }
@@ -334,6 +330,13 @@ mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t va
         }
         s_cal.diag[MPU_CAL_DIAG_REJECT_SEEN] |= s_cal.diag[MPU_CAL_DIAG_REJECT];
         s_cal.state = MPU6050_CAL_FAILED;
+        return s_cal.state;
+    }
+    if (valid == 0 || raw == NULL)
+    {
+        /* 丢帧不计入有效样本，原墙钟窗口仍继续计时，不覆盖已生效零偏。 */
+        s_cal.diag[MPU_CAL_DIAG_REJECT] = MPU_CAL_REJECT_READ;
+        s_cal.diag[MPU_CAL_DIAG_REJECT_SEEN] |= MPU_CAL_REJECT_READ;
         return s_cal.state;
     }
     if (s_cal.have_sample == 0)
@@ -509,7 +512,7 @@ uint8_t my_mpu6050_get_accel(Accel_struct *accel)
 
 /**
  * @brief 一次突发读取15字节：INT_STATUS + 加速度6 + 温度2 + 陀螺仪6 (0x3A~0x48)
- * @return 0=成功, 1=总线失败(数据未更新)
+ * @return 0=新帧, 1=通信/配置失败, 2=未就绪(输出不变)
  */
 uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
 {
@@ -529,6 +532,10 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
     }
 
     mpu6050_int_status = packet[0];
+    if ((packet[0] & 0x01U) == 0)
+    {
+        return MPU6050_DATA_NOT_READY;
+    }
     data->Accel.Accel_x = (int16_t)(((buf[0] << 8) | buf[1]) - offset_accel_x);
     data->Accel.Accel_y = (int16_t)(((buf[2] << 8) | buf[3]) - offset_accel_y);
     data->Accel.Accel_z = (int16_t)(((buf[4] << 8) | buf[5]) - offset_accel_z);

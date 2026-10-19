@@ -175,6 +175,50 @@ static void short_secondary_wave(unsigned duration_ms)
     }
 }
 
+/* 60BPM叠加90ms纹波；七点确认应排除短促局部假峰，跨tick回绕仍按真实时间计拍。 */
+static void window_peak_tests(void)
+{
+    app_heart_struct heart;
+    unsigned elapsed;
+    uint32_t step;
+    tick = UINT32_MAX - 3000U;
+    begin();
+    for (elapsed = 0; elapsed < 72000U; elapsed += 30U)
+    {
+        tick += 30U;
+        raw = (uint16_t)(30000.0f + 100.0f * sinf((float)elapsed * 6.2831853f / 1000.0f) +
+                         160.0f * sinf((float)elapsed * 6.2831853f / 90.0f));
+        app_heart_service();
+        app_heart_get_snapshot(&heart);
+        if (elapsed >= 8000U)
+        {
+            assert(heart.state == APP_HEART_VALID && heart.bpm >= 57U && heart.bpm <= 63U);
+            assert(heart.interval_ms >= 930U && heart.interval_ms <= 1080U);
+        }
+    }
+    /* 非固定采样间隔使用实际HAL tick，不能按样本下标估算心率。 */
+    begin();
+    elapsed = 0;
+    while (elapsed < 18000U)
+    {
+        step = 30U;
+        if (elapsed % 70U == 30U)
+        {
+            step = 40U;
+        }
+        elapsed += step;
+        tick += step;
+        raw = (uint16_t)(30000.0f + 100.0f * sinf((float)elapsed * 90.0f * 6.2831853f / 60000.0f));
+        app_heart_service();
+        app_heart_get_snapshot(&heart);
+        if (elapsed >= 8000U)
+        {
+            assert(heart.state == APP_HEART_VALID && heart.bpm >= 87U && heart.bpm <= 93U);
+        }
+    }
+    puts("PASS: seven-point peaks retain 60BPM with 90ms ripple, 72s/tick wrap and timestamped uneven sampling.");
+}
+
 /* 峰间隔适度延长时保持连续识别；持续不相近的间隔仍须重新测量。 */
 static void continuity_tests(void)
 {
@@ -243,6 +287,57 @@ static void continuity_tests(void)
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_VALID && heart.bpm >= 57 && heart.bpm <= 63);
     puts("PASS: 810->1080ms intervals stay continuous, irregular intervals rejected, cumulative contact ramp resets/reacquires.");
+}
+
+/* 已建立周期后，较迟且较弱的一拍应更新真实峰间隔，不能只延长旧BPM的显示。 */
+static void delayed_weak_beat_tests(void)
+{
+    app_heart_struct heart;
+    unsigned amplitude, elapsed, mode;
+    float strength, phase;
+    for (amplitude = 80; amplitude <= 90; amplitude += 10)
+    {
+        begin();
+        pulse_wave(60, 12000, 800.0f, 30000);
+        for (elapsed = 0; elapsed < 7000; elapsed += 30)
+        {
+            strength = 800.0f;
+            if (elapsed < 1000U)
+            {
+                strength = (float)amplitude;
+            }
+            /* 下一拍从200ms延后到400ms，只有这一拍的幅度下降到原来的约1/10。 */
+            phase = fmodf((float)elapsed, 1000.0f);
+            tick += 30;
+            raw = (uint16_t)(30000.0f + strength * expf(-powf((phase - 400.0f) / 65.0f, 2.0f)));
+            app_heart_service();
+            app_heart_get_snapshot(&heart);
+            assert(heart.state == APP_HEART_VALID && heart.bpm >= 55 && heart.bpm <= 63);
+        }
+        assert(heart.interval_ms >= 970U && heart.interval_ms <= 1030U);
+    }
+    /* 门限降低后，平直信号和持续高频波也必须在旧波峰超时后撤销输出。 */
+    for (mode = 0; mode < 2; ++mode)
+    {
+        begin();
+        pulse_wave(60, 12000, 800.0f, 30000);
+        for (elapsed = 0; elapsed < 8000; elapsed += 30)
+        {
+            tick += 30;
+            raw = 30000;
+            if (mode != 0)
+            {
+                raw = (uint16_t)(30000.0f + 80.0f * sinf((float)elapsed * 6.2831853f / 120.0f));
+            }
+            app_heart_service();
+            app_heart_get_snapshot(&heart);
+            if (elapsed >= 2700U)
+            {
+                assert(heart.state != APP_HEART_VALID && heart.bpm == 0);
+            }
+        }
+    }
+    puts("PASS: delayed weak beat updates RR without dropout; flat/high-frequency input expires after a valid train.");
 }
 
 static void recovery_tests(void)
@@ -373,6 +468,8 @@ int main(void)
     puts("PASS: raw sample queue, ordering, overflow, unsuccessful read and STOP flush.");
     recovery_tests();
     continuity_tests();
+    delayed_weak_beat_tests();
+    window_peak_tests();
 
     for (i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i)
     {
@@ -474,7 +571,7 @@ int main(void)
     }
     app_heart_get_snapshot(&heart);
     assert(heart.state != APP_HEART_VALID && heart.bpm == 0);
-    assert(heart.interval_ms == 60U);
+    assert(heart.interval_ms == 0U); /* 60ms高频波不再通过七点波峰确认。 */
     begin();
     pulse_wave(90, 16000, 1200.0f, 30000);
     app_heart_get_snapshot(&heart);
