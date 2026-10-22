@@ -26,7 +26,7 @@ typedef struct
     uint32_t sample_ms;   /* HAL tick，毫秒 */
     app_heart_state state;
     em7028_fault fault; /* 故障时由 sensor 任务复制；UI 不查询驱动私有状态 */
-    uint8_t enabled;    /* UI 请求状态，不直接操作 I2C */
+    uint8_t enabled;    /* 亮屏为手动请求，熄屏为自动测量窗口；不直接操作I2C。 */
 } app_heart_struct;
 
 typedef struct
@@ -45,6 +45,11 @@ typedef struct
 void app_heart_init(void);
 /* 现有 sensor 任务每轮调用；内部限速为 30ms，不创建新任务。 */
 void app_heart_service(void);
+/* 仅sensor任务：熄屏每10分钟自动测一次，有效BPM即停，最多10秒；保留亮屏手动请求。 */
+void app_heart_set_sleep_mode(uint8_t sleeping);
+/* sensor任务：运动模式强制连续测量，停止运动后恢复原手动请求，不发送原始蓝牙波形。 */
+void app_heart_set_sport_mode(uint8_t enabled);
+uint8_t app_heart_sleep_pending(void);
 /* 仅sensor任务在取得新MPU帧后调用；加速度单位为当前MPU配置的LSB。
  * 不读I2C、不跨任务访问；超过50ms未更新时退回原PPG处理。 */
 void app_heart_motion_update(int16_t accel_x, int16_t accel_y, int16_t accel_z, uint32_t sample_ms);

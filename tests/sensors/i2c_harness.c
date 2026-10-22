@@ -13,6 +13,7 @@ static unsigned input_pos, read_edges, response_edges;
 static uint8_t read_data, slave_low, check_stop, nack_pending;
 static uint8_t expected_ack;
 static unsigned sda_init_calls, redundant_sda_inits;
+static unsigned analog_pins;
 
 void host_i2c_nop(void)
 {
@@ -42,6 +43,17 @@ void __set_PRIMASK(uint32_t mask)
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
     assert(port == GPIOB && primask == 1);
+    if (config->Mode == GPIO_MODE_ANALOG)
+    {
+        assert(config->Pull == GPIO_NOPULL);
+        assert(config->Pin == SENSOR_SCL_Pin || config->Pin == SENSOR_SDA_Pin);
+        if (config->Pin == SENSOR_SDA_Pin)
+        {
+            sda_mode = config->Mode;
+        }
+        ++analog_pins;
+        return;
+    }
     if (config->Pin == SENSOR_SDA_Pin)
     {
         assert(config->Mode == GPIO_MODE_INPUT || config->Mode == GPIO_MODE_OUTPUT_OD);
@@ -167,6 +179,16 @@ static void read_pid(uint8_t pid, uint8_t ack)
 int main(int argc, char **argv)
 {
     my_i2c_init(MY_I2C_BUS_SENSOR);
+    if (argc > 1 && strcmp(argv[1], "suspend") == 0)
+    {
+        my_i2c_suspend(MY_I2C_BUS_SENSOR);
+        assert(analog_pins == 2U && primask == 0 && scl == GPIO_PIN_SET && sda_latch == GPIO_PIN_SET);
+        my_i2c_init(MY_I2C_BUS_SENSOR);
+        assert(sda_mode == GPIO_MODE_OUTPUT_OD);
+        read_pid(0x36, 1);
+        puts("PASS: only SENSOR SCL/SDA enter analog/no-pull, direction cache restores and real transaction resumes.");
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "stop") == 0)
     {
         my_i2c_start(MY_I2C_BUS_SENSOR);

@@ -229,6 +229,28 @@ uint8_t my_i2c_prepare(my_i2c_bus_t bus)
  * @note  需在 HAL_Init()/时钟配置完成后调用; 会覆盖 MX_GPIO_Init 中对应引脚
  *        的推挽初始配置。重复调用无害(幂等)。
  */
+void my_i2c_suspend(my_i2c_bus_t bus)
+{
+    GPIO_InitTypeDef gpio = {0};
+    uint32_t primask;
+    if (bus >= MY_I2C_BUS_COUNT)
+    {
+        return;
+    }
+    scl_hi(bus);
+    sda_hi(bus);
+    gpio.Mode = GPIO_MODE_ANALOG;
+    gpio.Pull = GPIO_NOPULL;
+    primask = __get_PRIMASK();
+    __disable_irq();
+    gpio.Pin = my_i2c_pin[bus].scl_pin;
+    HAL_GPIO_Init(my_i2c_pin[bus].scl_port, &gpio);
+    gpio.Pin = my_i2c_pin[bus].sda_pin;
+    HAL_GPIO_Init(my_i2c_pin[bus].sda_port, &gpio);
+    s_sda_direction[bus] = 0;
+    __set_PRIMASK(primask);
+}
+
 void my_i2c_init(my_i2c_bus_t bus)
 {
     GPIO_InitTypeDef gpio = {0};

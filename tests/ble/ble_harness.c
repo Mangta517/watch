@@ -24,6 +24,8 @@ static uint16_t tx_size;
 static uint32_t tx_aborts;
 static HAL_StatusTypeDef async_start_result = HAL_OK;
 static uint32_t uart_gpio_mode;
+static uint8_t uart_clock_enabled = 1;
+static unsigned uart_stops, uart_starts;
 static char saved_name[31] = "F411-Watch-SPP", current_name[31];
 static char saved_ble_name[31] = "KT6368A-BLE", current_ble_name[31];
 static char saved_ble[3] = "00", saved_spp[3] = TEST_INITIAL_SPP;
@@ -118,6 +120,7 @@ GPIO_PinState HAL_GPIO_ReadPin(void *port, uint16_t pin)
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size)
 {
     assert(uart == &huart1 && size == 1);
+    assert(uart_clock_enabled != 0);
     if (fail_rx)
     {
         return HAL_ERROR;
@@ -134,6 +137,20 @@ HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *uart)
 {
     assert(uart == &huart1);
     rx_armed = 0;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_UART_Init(UART_HandleTypeDef *uart)
+{
+    assert(uart == &huart1 && uart_clock_enabled == 0);
+    uart_clock_enabled = 1;
+    ++uart_starts;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_UART_DeInit(UART_HandleTypeDef *uart)
+{
+    assert(uart == &huart1 && uart_clock_enabled != 0 && !rx_armed);
+    uart_clock_enabled = 0;
+    ++uart_stops;
     return HAL_OK;
 }
 HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size)
@@ -365,6 +382,49 @@ static void staged_startup_tests(void)
     puts("PASS: staged Bluetooth boot/config/reboot, pending TX gate, wrap, no HAL_Delay, failures and recovery");
 }
 
+static void screen_power_tests(void)
+{
+    uint32_t before, delays = delay_calls;
+    unsigned stops = uart_stops;
+    int old_boots;
+    uint8_t frame[] = "screen-off TX";
+    HAL_StatusTypeDef result;
+    assert(kt6368a_write_async(frame, sizeof(frame), 100) == HAL_OK);
+    kt6368a_set_enabled(0);
+    assert(!powered && !rx_armed && tx_target == NULL && !uart_clock_enabled);
+    assert(uart_stops == stops + 1U && uart_gpio_mode == GPIO_MODE_ANALOG && !kt6368a_init_is_pending());
+    assert(kt6368a_take_tx_result(&result) && result == HAL_ERROR);
+    old_boots = boots;
+    tick += 5000U;
+    assert(kt6368a_init_service() == HAL_ERROR && boots == old_boots && !powered);
+    kt6368a_set_enabled(1);
+    assert(kt6368a_init_is_pending() && !powered);
+    tick += 20U;
+    assert(kt6368a_init_service() == HAL_BUSY && powered && uart_clock_enabled && rx_armed);
+    /* 上电等待中再次熄屏：取消启动，后续service不得拉起模块。 */
+    kt6368a_set_enabled(0);
+    old_boots = boots;
+    tick += 2000U;
+    (void)kt6368a_init_service();
+    assert(!powered && !uart_clock_enabled && !rx_armed && boots == old_boots);
+    tick = UINT32_MAX - 600U;
+    before = tick;
+    kt6368a_set_enabled(1);
+    for (unsigned i = 0; i < 1200U && kt6368a_init_is_pending(); ++i)
+    {
+        (void)kt6368a_init_service();
+        for (unsigned j = 0; j < 5U; ++j)
+        {
+            advance();
+        }
+    }
+    assert(kt6368a_get_init_status() == HAL_OK && !kt6368a_init_is_pending());
+    assert((uint32_t)(tick - before) >= 1200U && powered && rx_armed && uart_clock_enabled);
+    assert(delay_calls == delays && uart_starts != 0U);
+    assert(kt6368a_write((const uint8_t *)"hello", 5, 10) == HAL_OK);
+    puts("PASS: screen off cuts power/UART/GPIO, aborts TX, cancels startup; wake restores UART/RX nonblocking across tick wrap.");
+}
+
 int main(void)
 {
     uint8_t buffer[1024];
@@ -466,7 +526,7 @@ int main(void)
     assert(kt6368a_configure("Rejected-Name") == HAL_ERROR);
     reject_setting = 0;
     kt6368a_power_off();
-    assert(!powered && !rx_armed && uart_gpio_mode == GPIO_MODE_INPUT);
+    assert(!powered && !rx_armed && uart_gpio_mode == GPIO_MODE_ANALOG && uart_clock_enabled == 0);
     assert(kt6368a_write(buffer, 1, 100) == HAL_BUSY);
     assert(!kt6368a_is_connected() && kt6368a_read(buffer, sizeof(buffer)) == 0);
     fail_rx = 1;
@@ -483,5 +543,6 @@ int main(void)
     assert(kt6368a_get_init_status() == HAL_TIMEOUT);
     puts("KT6368A: config persistence, RX wrap/overflow, UART error recovery, AT framing/timeouts, power gating and absence of status GPIO checks passed.");
     staged_startup_tests();
+    screen_power_tests();
     return 0;
 }

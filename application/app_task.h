@@ -8,9 +8,11 @@
   *          当前任务清单:
   *            lvgl     prio 3, 4KB 栈 — 首帧提交后创建sensor/touch，UI循环分步推进RTC/蓝牙启动
   *            sensor   prio 2, 2KB 栈 — SENSOR 总线 (MPU6050+SPL006+LSM303DLHC+EM7028+AHT21) owner:
-  *                       sensor按使用状态20/40ms调度，MPU50/25Hz、磁力计30/7.5Hz、气压1s(器件1Hz); 数据经
+  *                       sensor普通20/40ms调度，心率/运动模式10ms；MPU100/50/25Hz、磁力计75/30/7.5Hz。
+  *                       亮屏气压1s(器件1Hz)，运动模式暂停气压和校准保存；数据经
+  *                       熄屏后环境每10分钟短采样，心率每10分钟最多10s；其余时间100ms检查进度。
   *                       App_IMU_GetSnapshot() / App_Baro_GetSnapshot() 供 UI 消费
-  *                       EEPROM(PA11/PA12)同由sensor任务读写，只在开机恢复/校准成功时访问
+  *                       EEPROM(PA11/PA12)同由sensor任务读写，开机恢复/校准保存及每10分钟记录开机秒数。
   *            touch    prio 1, 1KB 栈 — 首帧后初始化触摸，活跃5ms/待机20ms采集；LVGL读取缓存事件
   ******************************************************************************
 ***/
@@ -36,8 +38,8 @@ extern "C"
  * @brief 启动 FreeRTOS 调度器 (正常情况永不返回)
  */
     void App_Task_Start(void);
-    /* UI单写、任务只读：发布待机和运动页需求，不操作硬件。 */
-    void app_task_set_power_state(uint8_t idle, uint8_t motion);
+    /* UI单写、任务只读：发布待机、运动页、全熄屏和独立运动模式，不操作硬件。 */
+    void app_task_set_power_state(uint8_t idle, uint8_t motion, uint8_t screen_off, uint8_t sport);
 
 #ifdef __cplusplus
 }

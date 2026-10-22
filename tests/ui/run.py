@@ -79,8 +79,8 @@ def make_preview(names, titles, columns, filename):
 
 make_preview(["watch", "settings", "settings_scrolled"], ["WATCH / HOME", "APPS / TOP", "APPS / SCROLLED"],
              3, "watch-ui-preview.png")
-make_preview(["heart", "motion", "environment", "aht21", "phone_weather", "bluetooth", "display"],
-             ["HEART RATE", "MOTION", "BAROMETER", "CLIMATE", "PHONE WEATHER", "BLUETOOTH", "DISPLAY"],
+make_preview(["heart", "motion", "environment", "aht21", "phone_weather", "bluetooth", "display", "sport_mode"],
+             ["HEART RATE", "MOTION", "BAROMETER", "CLIMATE", "PHONE WEATHER", "BLUETOOTH", "DISPLAY", "SPORT MODE"],
              4, "watch-ui-details.png")
 make_preview(["altitude_history", "heart_history", "compass"],
              ["ALTITUDE HISTORY", "HEART RATE HISTORY", "FUSED COMPASS / +X AXIS"],

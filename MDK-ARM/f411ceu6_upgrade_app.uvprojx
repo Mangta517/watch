@@ -1091,6 +1091,11 @@
               <FilePath>..\application\app_mag_store.c</FilePath>
             </File>
             <File>
+              <FileName>app_uptime.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_uptime.c</FilePath>
+            </File>
+            <File>
               <FileName>app_mag_store.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\application\app_mag_store.h</FilePath>

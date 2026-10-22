@@ -6,7 +6,7 @@
   *          App_IMU_Init()/App_IMU_Service() 由 sensor 任务体调用,
   *          App_IMU_GetSnapshot() 供 UI 等消费方在自己的任务上下文取数。
   *          并发模式: 单生产者(sensor 任务)写 → 互斥锁保护快照 → 消费者加锁取。
-  *          MPU6050按使用状态50/25Hz轮询并递推四元数，欧拉角最多50Hz。
+  *          MPU6050按使用状态100/50/25Hz轮询并递推四元数，运动模式欧拉角100Hz，普通最多50Hz。
   ******************************************************************************
 ***/
 #include "app_imu.h"
@@ -33,7 +33,7 @@
 
 /* 初始化断采门限50ms；运行时为当前周期的5倍，恢复首帧按标称周期积分。 */
 #define APP_IMU_MAX_GAP_MS 50U
-#define APP_IMU_EULER_PERIOD_MS 20U /* 每帧递推四元数，显示角度最多50Hz。 */
+#define APP_IMU_EULER_PERIOD_MS 20U /* 普通档欧拉角最多50Hz；运动档同步改为10ms。 */
 
 /* ---- 陀螺仪残余零漂抑制 ----
  * 上电 zero_offset 只吃掉初始零偏；温漂仍可能引起姿态误差，
@@ -73,6 +73,7 @@ static uint8_t s_err_streak;        /* 连续读失败计数 (仅 Service 读写
 static uint32_t s_last_sample_ms;   /* 最近有效MPU帧的HAL读取时刻 */
 static uint8_t s_have_sample;      /* 是否可用上一帧时刻计算解算间隔 */
 static uint32_t s_euler_ms;
+static uint32_t s_euler_period_ms = APP_IMU_EULER_PERIOD_MS;
 static uint8_t s_have_euler;
 static uint32_t s_sample_period_ms = MPU6050_SAMPLE_PERIOD_MS;
 static uint32_t s_max_gap_ms = APP_IMU_MAX_GAP_MS;
@@ -300,6 +301,7 @@ void App_IMU_Init(void)
 
     /* EEPROM与传感器均由sensor任务访问；读取在快照锁外执行。 */
     s_sample_period_ms = MPU6050_SAMPLE_PERIOD_MS;
+    s_euler_period_ms = APP_IMU_EULER_PERIOD_MS;
     s_max_gap_ms = APP_IMU_MAX_GAP_MS;
     s_mag_poll_ms = APP_MAG_POLL_MS;
     s_mag_max_age_ms = APP_MAG_MAX_AGE_MS;
@@ -329,6 +331,27 @@ void App_IMU_Init(void)
     }
 }
 
+uint8_t app_imu_is_calibrating(void)
+{
+    uint8_t calibrating;
+    imu_lock();
+    calibrating = s_mag_cal_state == APP_MAG_CAL_RUNNING || s_mag_cal_request != 0 || s_mag_save_pending != 0 || s_mag_saving != 0;
+    imu_unlock();
+    return calibrating;
+}
+
+void app_imu_set_sleep(uint8_t sleeping)
+{
+    app_diag_sensor_init(APP_DIAG_MPU, my_mpu6050_set_sleep(sleeping));
+    app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_set_sleep(sleeping));
+    if (sleeping == 0)
+    {
+        Common_IMU_Reset();
+        s_have_sample = s_have_euler = s_mag_valid = 0;
+        s_mag_poll_tick = xTaskGetTickCount() - pdMS_TO_TICKS(s_mag_poll_ms);
+    }
+}
+
 uint32_t app_imu_set_sample_period(uint32_t period_ms)
 {
     uint8_t calibrating;
@@ -336,7 +359,7 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
     imu_lock();
     calibrating = s_mag_cal_state == APP_MAG_CAL_RUNNING || s_mag_cal_request == APP_MAG_CMD_START;
     imu_unlock();
-    if (calibrating != 0 || period_ms != 40U)
+    if (calibrating != 0 || (period_ms != 10U && period_ms != 40U))
     {
         period_ms = 20U;
     }
@@ -350,15 +373,29 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
         s_max_gap_ms = period_ms * 5U;
         s_have_sample = s_have_euler = 0;
     }
-    if (period_ms == 40U)
+    if (period_ms == 10U)
     {
-        mag_rate = 75U;
+        s_euler_period_ms = 10U;
+        mag_rate = 750U;
+    }
+    else
+    {
+        s_euler_period_ms = APP_IMU_EULER_PERIOD_MS;
+        if (period_ms == 40U)
+        {
+            mag_rate = 75U;
+        }
     }
     if (lsm303dlhc_mag_set_rate(mag_rate) == 0)
     {
         s_mag_poll_ms = 40U;
         s_mag_max_age_ms = 120U;
-        if (mag_rate == 75U)
+        if (mag_rate == 750U)
+        {
+            s_mag_poll_ms = APP_MAG_POLL_MS;
+            s_mag_max_age_ms = APP_MAG_MAX_AGE_MS;
+        }
+        else if (mag_rate == 75U)
         {
             s_mag_poll_ms = 160U;
             s_mag_max_age_ms = 400U;
@@ -443,7 +480,7 @@ void App_IMU_Service(void)
         {
             mag_reference = mag_body;
         }
-        if (s_have_euler == 0 || (uint32_t)(sample_ms - s_euler_ms) >= APP_IMU_EULER_PERIOD_MS)
+        if (s_have_euler == 0 || (uint32_t)(sample_ms - s_euler_ms) >= s_euler_period_ms)
         {
             euler_output = &s_euler;
             s_euler_ms = sample_ms;

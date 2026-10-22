@@ -21,6 +21,7 @@ typedef enum
     BL24C02_ERROR_WRITE_NACK
 } bl24c02_error;
 
+/* 初始化后即释放PA11/PA12；每次读写/异步step恢复GPIO，返回前重新设为模拟无上下拉。 */
 void bl24c02_init(void);
 /* 返回0=成功、1=参数/通信/写周期超时；read可跨页，write自动按页边界拆分。 */
 uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length);

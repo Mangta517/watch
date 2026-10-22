@@ -12,7 +12,7 @@ if not gcc:
     raise SystemExit("Desktop GCC is required.")
 sources = ["tests/sensors/sensor_harness.c", "interface/lsm303dlhc.c",
            "interface/mpu6050.c", "interface/spl006.c",
-           "interface/bl24c02.c", "application/app_mag_store.c", "application/app_imu_store.c",
+           "interface/bl24c02.c", "application/app_mag_store.c", "application/app_imu_store.c", "application/app_uptime.c",
            "common/common_imu.c", "application/app_imu.c", "application/app_baro.c"]
 with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     battery_exe = str(Path(out) / "battery.exe")
@@ -30,6 +30,7 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
                     "tests/sensors/i2c_harness.c", "common/my_i2c.c",
                     "-o", i2c_exe], cwd=root, check=True)
     subprocess.run([i2c_exe, "stop"], cwd=root, check=True)
+    subprocess.run([i2c_exe, "suspend"], cwd=root, check=True)
     subprocess.run([i2c_exe], cwd=root, check=True)
     bus_exe = str(Path(out) / "bus-recovery.exe")
     subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -37,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
                     "-Itests/sensors/host", "-ICore/Inc", "-Icommon",
                     "tests/sensors/bus_recovery_harness.c", "common/my_i2c.c",
                     "-o", bus_exe], cwd=root, check=True)
-    for mode in ["normal", "sda_release", "sda_stuck", "scl_stuck", "eeprom_nack", "tp_cache"]:
+    for mode in ["normal", "sda_release", "sda_stuck", "scl_stuck", "eeprom_nack", "eeprom_suspend", "tp_cache"]:
         subprocess.run([bus_exe, mode], cwd=root, check=True)
     aht21_exe = str(Path(out) / "aht21.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -50,6 +51,7 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
             "-include", "tests/sensors/host/platform.h"]
     args += ["-I" + p for p in ["tests/sensors/host", "Core/Inc", "application", "interface", "common"]]
     subprocess.run(args + sources + ["-lm", "-o", exe], cwd=root, check=True)
+    subprocess.run([exe, "uptime"], cwd=root, check=True)
     subprocess.run([exe, "async_save"], cwd=root, check=True)
     subprocess.run([exe, "polling"], cwd=root, check=True)
     subprocess.run([exe, "power_profile"], cwd=root, check=True)

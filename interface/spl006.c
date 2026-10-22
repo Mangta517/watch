@@ -229,6 +229,33 @@ uint8_t spl006_recover_step(uint32_t now_ms)
     }
 }
 
+uint8_t spl006_set_sleep(uint8_t sleeping)
+{
+    uint8_t mode = SPL06_MEAS_BG_PRSTMP;
+    uint8_t discard[6];
+    if (sleeping != 0)
+    {
+        mode = 0; /* MEAS_CFG: standby，停止背景转换，保留出厂系数。 */
+    }
+    else
+    {
+        /* 清掉休眠前的P/T就绪标志，调用方等待新的1Hz转换后再读取。 */
+        if (spl006_bus_read(SPL06_PRS_B2, discard, sizeof(discard)) != 0)
+        {
+            spl006_recover_begin();
+            return 1;
+        }
+    }
+    if (spl006_write_reg(SPL06_MEAS_CFG, mode) != 0)
+    {
+        spl006_recover_begin();
+        return 1;
+    }
+    spl_recovery.sample_ms = HAL_GetTick();
+    spl_recovery.faults = 0;
+    return 0;
+}
+
 uint8_t spl006_init(void)
 {
     uint8_t result;

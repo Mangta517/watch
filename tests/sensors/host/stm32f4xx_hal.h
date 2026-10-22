@@ -41,6 +41,7 @@ extern GPIO_TypeDef host_gpio_a, host_gpio_b;
 #define GPIO_PIN_14          (1U << 14)
 #define GPIO_PIN_15          (1U << 15)
 #define GPIO_MODE_INPUT      0U
+#define GPIO_MODE_ANALOG     3U
 #define GPIO_MODE_OUTPUT_PP  1U
 #define GPIO_NOPULL          0U
 #define GPIO_SPEED_FREQ_LOW  0U
@@ -109,6 +110,7 @@ void __disable_irq(void);
 void __set_PRIMASK(uint32_t mask);
 void HAL_Delay(uint32_t ms);
 uint32_t HAL_GetTick(void);
+void __DMB(void);
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config);
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
 void HAL_GPIO_TogglePin(GPIO_TypeDef *port, uint16_t pin);

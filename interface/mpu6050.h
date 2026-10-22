@@ -115,8 +115,9 @@ extern "C"
 
     /* 初始化 MPU6050 (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR)) */
     uint8_t my_mpu6050_init(void);
-    /* 仅sensor任务：20ms/50Hz或40ms/25Hz；失败进入原恢复流程，相同档位不重复写。 */
+    /* 仅sensor任务：10/20/40ms对应100/50/25Hz；失败进入原恢复流程，相同档位不重复写。 */
     uint8_t my_mpu6050_set_sample_period(uint32_t period_ms);
+    uint8_t my_mpu6050_set_sleep(uint8_t sleeping);
     /* 仅sensor任务：begin使数据无效，step每拍至多一笔事务；0=就绪，1=失败冷却，2=推进中。 */
     void my_mpu6050_recover_begin(void);
     uint8_t my_mpu6050_recover_step(uint32_t now_ms);

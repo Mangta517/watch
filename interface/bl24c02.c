@@ -33,7 +33,7 @@ void bl24c02_transfer_begin(bl24c02_transfer_struct *transfer, uint16_t address,
     }
 }
 
-uint8_t bl24c02_transfer_step(bl24c02_transfer_struct *transfer)
+static uint8_t bl24c02_transfer_step_active(bl24c02_transfer_struct *transfer)
 {
     uint16_t chunk;
     uint8_t result;
@@ -109,6 +109,15 @@ uint8_t bl24c02_transfer_step(bl24c02_transfer_struct *transfer)
     return 2;
 }
 
+uint8_t bl24c02_transfer_step(bl24c02_transfer_struct *transfer)
+{
+    uint8_t result;
+    my_i2c_init(MY_I2C_BUS_EEPROM);
+    result = bl24c02_transfer_step_active(transfer);
+    my_i2c_suspend(MY_I2C_BUS_EEPROM);
+    return result;
+}
+
 bl24c02_error bl24c02_get_error(uint16_t *address)
 {
     if (address != NULL)
@@ -135,9 +144,10 @@ static uint8_t bl24c02_wait_ready(void)
 void bl24c02_init(void)
 {
     my_i2c_init(MY_I2C_BUS_EEPROM);
+    my_i2c_suspend(MY_I2C_BUS_EEPROM);
 }
 
-uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
+static uint8_t bl24c02_read_active(uint16_t address, uint8_t *data, uint16_t length)
 {
     s_error = BL24C02_ERROR_NONE;
     s_address = address;
@@ -163,7 +173,7 @@ uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
     return 0;
 }
 
-uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length)
+static uint8_t bl24c02_write_active(uint16_t address, const uint8_t *data, uint16_t length)
 {
     uint16_t chunk;
     s_error = BL24C02_ERROR_NONE;
@@ -205,4 +215,22 @@ uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length)
         }
     }
     return 0;
+}
+
+uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
+{
+    uint8_t result;
+    my_i2c_init(MY_I2C_BUS_EEPROM);
+    result = bl24c02_read_active(address, data, length);
+    my_i2c_suspend(MY_I2C_BUS_EEPROM);
+    return result;
+}
+
+uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length)
+{
+    uint8_t result;
+    my_i2c_init(MY_I2C_BUS_EEPROM);
+    result = bl24c02_write_active(address, data, length);
+    my_i2c_suspend(MY_I2C_BUS_EEPROM);
+    return result;
 }

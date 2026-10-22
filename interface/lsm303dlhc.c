@@ -124,10 +124,27 @@ uint8_t lsm303dlhc_mag_init(void)
     return result;
 }
 
+uint8_t lsm303dlhc_mag_set_sleep(uint8_t sleeping)
+{
+    uint8_t mode = 0;
+    if (sleeping != 0)
+    {
+        mode = 0x03; /* MR_REG_M: sleep；唤醒恢复连续转换。 */
+    }
+    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_MAG_ADDR, MAG_MODE, &mode, 1) != 0)
+    {
+        lsm303dlhc_mag_recover_begin();
+        return 1;
+    }
+    mag_recovery.sample_ms = HAL_GetTick();
+    mag_recovery.no_data = mag_recovery.faults = 0;
+    return 0;
+}
+
 uint8_t lsm303dlhc_mag_set_rate(uint16_t rate_hz_x10)
 {
     uint8_t config;
-    if (rate_hz_x10 != 300U && rate_hz_x10 != 75U)
+    if (rate_hz_x10 != 750U && rate_hz_x10 != 300U && rate_hz_x10 != 75U)
     {
         return 1;
     }
@@ -140,7 +157,11 @@ uint8_t lsm303dlhc_mag_set_rate(uint16_t rate_hz_x10)
         return 0;
     }
     config = 0x14; /* 30Hz，保留温度关闭。 */
-    if (rate_hz_x10 == 75U)
+    if (rate_hz_x10 == 750U)
+    {
+        config = 0x18; /* 运动模式恢复75Hz。 */
+    }
+    else if (rate_hz_x10 == 75U)
     {
         config = 0x0C; /* 7.5Hz。 */
     }

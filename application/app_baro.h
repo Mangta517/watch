@@ -19,6 +19,16 @@ extern "C"
 
 #include <stdint.h>
 
+#define APP_BARO_HISTORY_POINTS 24U
+#define APP_BARO_HISTORY_PERIOD_MS 600000U
+#define APP_BARO_HISTORY_NONE INT16_MIN
+
+    typedef struct
+    {
+        int16_t altitude_m[APP_BARO_HISTORY_POINTS]; /* 由气压换算，最旧在左；缺测为NONE。 */
+        uint32_t sequence;
+    } app_baro_history_struct;
+
     /* 一次快照的三件套: 补偿后气压 + 两个原始计数 (原始值留给高度换算/滤波复用) */
     typedef struct
     {
@@ -35,9 +45,12 @@ extern "C"
 
     /**
  * @brief 周期服务一轮: 读压力/温度原始值并补偿, 更新快照, 维护在线状态
- *        仅由sensor任务体经分频调用(1s)，其他上下文勿调
+ *        仅sensor调用：亮屏约1s，熄屏在十分钟窗口结束时读取新转换。
  */
     void App_Baro_Service(void);
+    /* sensor在采样尝试完成后调用；十分钟一柱，失败保留空位，独立于页面生命周期。 */
+    void app_baro_record_history(void);
+    void app_baro_get_history(app_baro_history_struct *history);
 
     /**
  * @brief 取最新数据的一致快照 (加锁, 防多字段撕裂)

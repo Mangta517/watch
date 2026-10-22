@@ -12,7 +12,7 @@
 #include <math.h>
 #include <string.h>
 
-#define APP_HEART_POLL_MS      30U /* 保留30ms读取下限；sensor每20ms服务，实际约40ms读一次。 */
+#define APP_HEART_POLL_MS      30U /* 测量时sensor每10ms服务，普通/运动模式均约30ms读取。 */
 #define APP_HEART_WARMUP_MS    1000U
 #define APP_HEART_MAX_GAP_MS   120U /* 长时间缺采样后重新建立滤波与周期 */
 #define APP_HEART_STALE_MS     250U
@@ -97,6 +97,11 @@ static app_heart_struct heart_data;
 static heart_detector_struct detector;
 static uint8_t requested;
 static uint8_t running;
+#define APP_HEART_SLEEP_PERIOD_MS 600000U
+#define APP_HEART_SLEEP_TIMEOUT_MS 10000U
+static uint8_t s_sleep_mode, s_sleep_active;
+static uint8_t s_sport_mode, s_sport_failed;
+static uint32_t s_sleep_cycle_ms, s_sleep_started_ms;
 static uint32_t poll_tick;
 static uint32_t good_tick;
 static app_heart_sample_struct heart_samples[APP_HEART_SAMPLE_COUNT];
@@ -120,7 +125,12 @@ static void heart_fail(app_heart_struct *data)
     data->bpm = 0;
     data->state = APP_HEART_ERROR;
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
-    requested = 0;
+    if (s_sleep_mode == 0 && s_sport_mode == 0)
+    {
+        requested = 0;
+    }
+    s_sleep_active = 0;
+    s_sport_failed = s_sport_mode; /* 运动期间故障停测，重新切换模式后才重试。 */
     sample_head = sample_count = 0;
     heart_data = *data;
     xSemaphoreGive(heart_mutex);
@@ -535,6 +545,60 @@ void app_heart_init(void)
     heart_mutex = xSemaphoreCreateMutex();
 }
 
+void app_heart_set_sleep_mode(uint8_t sleeping)
+{
+    if (heart_mutex == NULL)
+    {
+        return;
+    }
+    xSemaphoreTake(heart_mutex, portMAX_DELAY);
+    s_sleep_mode = sleeping;
+    s_sleep_active = 0;
+    s_sleep_cycle_ms = HAL_GetTick();
+    sample_head = sample_count = 0;
+    xSemaphoreGive(heart_mutex);
+}
+
+uint8_t app_heart_sleep_pending(void)
+{
+    return running != 0 || s_sleep_active != 0 ||
+           (s_sleep_mode != 0 && (uint32_t)(HAL_GetTick() - s_sleep_cycle_ms) >= APP_HEART_SLEEP_PERIOD_MS);
+}
+
+void app_heart_set_sport_mode(uint8_t enabled)
+{
+    if (heart_mutex == NULL)
+    {
+        return;
+    }
+    xSemaphoreTake(heart_mutex, portMAX_DELAY);
+    s_sport_mode = enabled;
+    s_sport_failed = 0;
+    sample_head = sample_count = 0;
+    xSemaphoreGive(heart_mutex);
+}
+
+static void heart_finish_sleep(app_heart_struct *data)
+{
+    em7028_result result = em7028_stop(); /* 同一拍关闭照明和HRS，不等下次采样。 */
+    running = 0;
+    xSemaphoreTake(heart_mutex, portMAX_DELAY);
+    s_sleep_active = 0;
+    xSemaphoreGive(heart_mutex);
+    if (result != EM7028_OK)
+    {
+        data->bpm = 0;
+        data->state = APP_HEART_ERROR;
+        em7028_get_fault(&data->fault);
+    }
+    else if (data->state != APP_HEART_VALID)
+    {
+        data->bpm = 0;
+        data->state = APP_HEART_NO_SIGNAL;
+    }
+    heart_publish(data);
+}
+
 void app_heart_set_enabled(uint8_t enabled)
 {
     if (heart_mutex == NULL)
@@ -549,6 +613,7 @@ void app_heart_set_enabled(uint8_t enabled)
 
 void app_heart_get_snapshot(app_heart_struct *heart)
 {
+    uint8_t sleeping;
     if (heart == NULL)
     {
         return;
@@ -562,17 +627,27 @@ void app_heart_get_snapshot(app_heart_struct *heart)
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
     *heart = heart_data;
     heart->enabled = requested;
+    if (s_sport_mode != 0)
+    {
+        heart->enabled = s_sport_failed == 0;
+    }
+    else if (s_sleep_mode != 0)
+    {
+        heart->enabled = s_sleep_active;
+    }
+    sleeping = s_sleep_mode != 0 && s_sport_mode == 0;
     xSemaphoreGive(heart_mutex);
     if (heart->enabled != 0 && (heart->state == APP_HEART_OFF || heart->state == APP_HEART_ERROR))
     {
         heart->state = APP_HEART_MEASURING; /* 启动请求可能正在等待 sensor 任务处理 */
     }
-    if (heart->enabled == 0 && heart->state != APP_HEART_ERROR)
+    if (sleeping == 0 && heart->enabled == 0 && heart->state != APP_HEART_ERROR)
     {
         heart->bpm = 0;
         heart->state = APP_HEART_OFF;
     }
-    if (heart->state == APP_HEART_VALID && (uint32_t)(HAL_GetTick() - heart->sample_ms) > APP_HEART_STALE_MS)
+    if ((sleeping == 0 || heart->enabled != 0) && heart->state == APP_HEART_VALID &&
+        (uint32_t)(HAL_GetTick() - heart->sample_ms) > APP_HEART_STALE_MS)
     {
         heart->bpm = 0;
         heart->state = APP_HEART_NO_SIGNAL;
@@ -613,8 +688,26 @@ void app_heart_service(void)
     }
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
     enabled = requested;
+    if (s_sport_mode != 0)
+    {
+        enabled = s_sport_failed == 0;
+    }
+    else if (s_sleep_mode != 0)
+    {
+        if (s_sleep_active == 0 && (uint32_t)(now - s_sleep_cycle_ms) >= APP_HEART_SLEEP_PERIOD_MS)
+        {
+            s_sleep_cycle_ms = s_sleep_started_ms = now;
+            s_sleep_active = 1;
+        }
+        enabled = s_sleep_active;
+    }
     data = heart_data;
     xSemaphoreGive(heart_mutex);
+    if (s_sleep_active != 0 && (uint32_t)(now - s_sleep_started_ms) >= APP_HEART_SLEEP_TIMEOUT_MS)
+    {
+        heart_finish_sleep(&data);
+        return;
+    }
     if (enabled == 0)
     {
         if (running != 0)
@@ -699,7 +792,7 @@ void app_heart_service(void)
         sample.sequence = sample_sequence++;
         /* 仅成功读数入队；与UI共用快照锁，UART发送时不占此锁。 */
         xSemaphoreTake(heart_mutex, portMAX_DELAY);
-        if (requested != 0)
+        if (requested != 0 && s_sleep_mode == 0 && s_sport_mode == 0)
         {
             if (sample_count == APP_HEART_SAMPLE_COUNT)
             {
@@ -711,6 +804,11 @@ void app_heart_service(void)
             ++sample_count;
         }
         xSemaphoreGive(heart_mutex);
+    }
+    if (s_sleep_active != 0 && data.state == APP_HEART_VALID)
+    {
+        heart_finish_sleep(&data);
+        return;
     }
     heart_publish(&data);
 }

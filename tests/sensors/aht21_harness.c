@@ -433,6 +433,27 @@ static void check_service_recovery(void)
     app_aht21_get_snapshot(&snapshot);
     assert(snapshot.valid && snapshot.sample_count == 2U && delay_calls == waits);
     puts("PASS: failed boot and lost calibration recover through the service after cooldown without blocking other sensors.");
+    app_aht21_set_period(600000U);
+    now_ms += 599999U;
+    app_aht21_service();
+    ++now_ms;
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms += 80U;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 3U);
+    app_aht21_set_period(APP_AHT21_PERIOD_MS);
+    now_ms += APP_AHT21_PERIOD_MS;
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms += 80U;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 4U);
+    puts("PASS: AHT21 switches to 10min sleep sampling and resumes the normal 2s trigger/read cycle.");
 }
 
 int main(void)

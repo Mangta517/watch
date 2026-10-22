@@ -246,10 +246,27 @@ uint8_t my_mpu6050_init(void)
     return result;
 }
 
+uint8_t my_mpu6050_set_sleep(uint8_t sleeping)
+{
+    uint8_t config = 0x01;
+    if (sleeping != 0)
+    {
+        config = 0x41; /* 保留PLL时钟选择，置SLEEP，不复位零偏及采样配置。 */
+    }
+    if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, config) != 0)
+    {
+        my_mpu6050_recover_begin();
+        return 1;
+    }
+    mpu_recovery.sample_ms = HAL_GetTick();
+    mpu_recovery.no_data = mpu_recovery.faults = 0;
+    return 0;
+}
+
 uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
 {
     uint8_t filter;
-    if (period_ms != 20U && period_ms != 40U)
+    if (period_ms != 10U && period_ms != 20U && period_ms != 40U)
     {
         return 1;
     }
@@ -262,7 +279,11 @@ uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
         return 0;
     }
     filter = 4U; /* 50Hz采样：陀螺仪20Hz、加速度21Hz带宽。 */
-    if (period_ms == 40U)
+    if (period_ms == 10U)
+    {
+        filter = MPU6050_DLPF_CFG; /* 运动模式恢复100Hz/42Hz带宽。 */
+    }
+    else if (period_ms == 40U)
     {
         filter = 5U; /* 25Hz采样：10Hz带宽。 */
     }

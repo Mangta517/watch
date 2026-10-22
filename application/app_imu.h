@@ -80,8 +80,12 @@ extern "C"
  *        仅由 app_task 的 sensor 任务体按周期调用, 其他上下文勿调
  */
     void App_IMU_Service(void);
-    /* 仅sensor任务：选择20/40ms档位；磁校准请求/进行中强制20ms，返回本轮调度周期。 */
+    /* 仅sensor任务：运动10ms，普通20/40ms；磁校准强制20ms，返回本轮调度周期。 */
     uint32_t app_imu_set_sample_period(uint32_t period_ms);
+    /* sensor任务控制器件休眠；唤醒后丢弃旧磁参考，重新从重力建立姿态。 */
+    void app_imu_set_sleep(uint8_t sleeping);
+    /* 校准命令、采集或校准记录保存尚未完成时返回1。 */
+    uint8_t app_imu_is_calibrating(void);
     /* 仅sensor任务调用；与MPU零偏保存串行，返回1表示磁记录仍在保存。 */
     uint8_t App_IMU_SaveService(void);
 

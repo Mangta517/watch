@@ -14,6 +14,7 @@
 #include "bl24c02.h"
 #include "app_mag_store.h"
 #include "app_imu_store.h"
+#include "app_uptime.h"
 #include "task.h"
 
 #ifdef _WIN32
@@ -102,6 +103,10 @@ uint32_t HAL_GetTick(void)
 {
     return tick;
 }
+
+void __DMB(void)
+{
+}
 TickType_t xTaskGetTickCount(void)
 {
     return tick;
@@ -135,9 +140,16 @@ int xSemaphoreGive(SemaphoreHandle_t mutex)
     return 1;
 }
 
+static uint8_t eeprom_parked;
+static unsigned eeprom_parks, eeprom_resumes;
+
 static void bus_enter(my_i2c_bus_t bus)
 {
     assert((bus == MY_I2C_BUS_SENSOR || bus == MY_I2C_BUS_EEPROM) && !bus_active);
+    if (bus == MY_I2C_BUS_EEPROM)
+    {
+        assert(eeprom_parked == 0);
+    }
     assert(!primask && !mutex_taken); /* No whole-transfer IRQ mask or snapshot mutex. */
     tick += transfer_ms;
     ++bus_transactions;
@@ -148,6 +160,14 @@ static void bus_enter(my_i2c_bus_t bus)
 void my_i2c_init(my_i2c_bus_t bus)
 {
     assert(bus == MY_I2C_BUS_EEPROM);
+    eeprom_parked = 0;
+    ++eeprom_resumes;
+}
+void my_i2c_suspend(my_i2c_bus_t bus)
+{
+    assert(bus == MY_I2C_BUS_EEPROM && !bus_active && !primask);
+    eeprom_parked = 1;
+    ++eeprom_parks;
 }
 uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev)
 {
@@ -1076,18 +1096,22 @@ static void eeprom_tests(void)
     TickType_t start;
     memset(eeprom, 0xFF, sizeof(eeprom));
     bl24c02_init();
+    assert(eeprom_parked != 0 && eeprom_parks == eeprom_resumes);
     for (i = 0; i < sizeof(data); ++i)
     {
         data[i] = (uint8_t)(i + 1);
     }
     before = eeprom_writes;
     assert(bl24c02_write(14, data, sizeof(data)) == 0 && eeprom_writes == before + 3);
+    assert(eeprom_parked != 0 && eeprom_parks == eeprom_resumes);
     assert(bl24c02_read(14, readback, sizeof(readback)) == 0 && memcmp(data, readback, sizeof(data)) == 0);
+    assert(eeprom_parked != 0 && eeprom_parks == eeprom_resumes);
     assert(bl24c02_write(250, data, 20) == 1 && bl24c02_read(255, readback, 2) == 1);
     assert(bl24c02_write(256, NULL, 0) == 0 && bl24c02_read(0, NULL, 1) == 1);
     fail_dev = BL24C02_ADDR;
     start = tick;
     assert(bl24c02_read(0, readback, 1) == 1 && tick - start == 10);
+    assert(eeprom_parked != 0 && eeprom_parks == eeprom_resumes);
     fail_dev = -1;
     memset(eeprom, 0xFF, sizeof(eeprom));
     assert(app_mag_store_load(&loaded) == APP_MAG_STORE_EMPTY);
@@ -1446,11 +1470,19 @@ static void spl006_sample_tests(void)
 static void baro_service_tests(void)
 {
     app_baro_struct sample;
+    app_baro_history_struct history;
     App_Baro_Init();
     memset(regs[SPL006_ADDR], 0, 6);
     regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
     App_Baro_Service();
     assert(App_Baro_GetSnapshot(&sample) && sample.pressure_pa == 100000 && isfinite(sample.alt_m));
+    app_baro_record_history();
+    app_baro_get_history(&history);
+    assert(history.sequence == 1U && history.altitude_m[23] == (int16_t)roundf(sample.alt_m));
+    assert(history.altitude_m[22] == APP_BARO_HISTORY_NONE);
+    app_baro_record_history();
+    app_baro_get_history(&history);
+    assert(history.sequence == 1U);
     regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY;
     App_Baro_Service();
     assert(App_Baro_GetSnapshot(&sample) && sample.pressure_pa == 100000);
@@ -1496,6 +1528,41 @@ static void baro_service_tests(void)
         assert(spl006_init() == 0);
     }
     puts("PASS: real barometer service preserves compensation, partial-readiness snapshots, three-error offline threshold and recovery.");
+    App_Baro_Init();
+    tick = UINT32_MAX - 1000U;
+    regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
+    App_Baro_Service();
+    app_baro_record_history();
+    tick += APP_BARO_HISTORY_PERIOD_MS - 1U;
+    app_baro_record_history();
+    app_baro_get_history(&history);
+    assert(history.sequence == 1U);
+    ++tick;
+    regs[SPL006_ADDR][SPL06_MEAS_CFG] = 0;
+    App_Baro_Service();
+    app_baro_record_history();
+    app_baro_get_history(&history);
+    assert(history.sequence == 2U && history.altitude_m[23] == APP_BARO_HISTORY_NONE);
+    assert(history.altitude_m[22] != APP_BARO_HISTORY_NONE);
+    puts("PASS: background 10min barometer history records once per slot, retains missing slots and survives tick wrap.");
+    tick += APP_BARO_HISTORY_PERIOD_MS * 3U;
+    regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
+    App_Baro_Service();
+    app_baro_record_history();
+    app_baro_get_history(&history);
+    assert(history.altitude_m[23] != APP_BARO_HISTORY_NONE);
+    assert(history.altitude_m[22] == APP_BARO_HISTORY_NONE && history.altitude_m[21] == APP_BARO_HISTORY_NONE);
+    assert(history.altitude_m[19] != APP_BARO_HISTORY_NONE);
+    tick += APP_BARO_HISTORY_PERIOD_MS * 25U;
+    App_Baro_Service();
+    app_baro_record_history();
+    app_baro_get_history(&history);
+    for (unsigned i = 0; i < 23U; ++i)
+    {
+        assert(history.altitude_m[i] == APP_BARO_HISTORY_NONE);
+    }
+    assert(history.altitude_m[23] != APP_BARO_HISTORY_NONE);
+    puts("PASS: sport barometer pause leaves elapsed slots empty, including pauses longer than the history window.");
 }
 
 static void mpu_init_error_tests(void)
@@ -1975,10 +2042,126 @@ static void power_profile_tests(void)
         assert(App_IMU_GetSnapshot(&snapshot) != 0);
         assert(heart_motion_ms == tick);
     }
+    assert(spl006_init() == 0);
+    assert(app_imu_set_sample_period(10U) == 10U);
+    assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 9U && regs[MPU6050_ADDR][MPU6050_CONFIG] == MPU6050_DLPF_CFG);
+    assert(regs[0x1E][0x00] == 0x18U);
+    writes = mpu_writes;
+    assert(app_imu_set_sample_period(10U) == 10U && mpu_writes == writes);
+    assert(app_imu_set_sample_period(40U) == 40U);
+    app_imu_set_sleep(1);
+    assert(spl006_set_sleep(1) == 0);
+    assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x41U);
+    assert(regs[0x1E][0x02] == 0x03U && regs[SPL006_ADDR][SPL06_MEAS_CFG] == 0);
+    tick += 300000U;
+    app_imu_set_sleep(0);
+    assert(spl006_set_sleep(0) == 0);
+    assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x01U);
+    assert(regs[0x1E][0x02] == 0 && regs[SPL006_ADDR][SPL06_MEAS_CFG] == 7U);
+    assert(my_mpu6050_recover_step(tick) == 0 && lsm303dlhc_mag_recover_step(tick) == 0 && spl006_recover_step(tick) == 0);
+    assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 39U && regs[0x1E][0x00] == 0x0CU);
+    assert(app_imu_is_calibrating() == 0);
     App_IMU_MagCalibrate(1);
+    assert(app_imu_is_calibrating() != 0);
     assert(app_imu_set_sample_period(40U) == 20U);
     assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 19U && regs[0x1E][0x00] == 0x14U);
     puts("PASS: 50/25Hz rate registers, no repeated reconfiguration, 50Hz 100+100-frame calibration, 25Hz fusion and pending magnetic calibration.");
+}
+
+static void uptime_finish(void)
+{
+    unsigned steps = 0, transactions;
+    uint8_t busy;
+    do
+    {
+        tick += 20U;
+        transactions = bus_transactions;
+        busy = app_uptime_service(0); /* 校准请求到来后，已开始的事务仍必须收尾。 */
+        assert(eeprom_parked != 0 && bus_transactions - transactions <= 1U);
+        assert(++steps < 20U);
+    } while (busy != 0);
+}
+
+static void uptime_tests(void)
+{
+    uint32_t saved, expected;
+    uint8_t calibration[0xA0];
+    unsigned writes;
+    memset(eeprom, 0xFF, sizeof(eeprom));
+    memset(eeprom, 0x5A, sizeof(calibration));
+    memcpy(calibration, eeprom, sizeof(calibration));
+    tick = 1234U; /* 包括任务初始化前的开机时间。 */
+    app_uptime_init();
+    assert(!app_uptime_get_saved(&saved));
+    assert(!app_uptime_get_previous(&saved));
+    tick = 599999U;
+    assert(!app_uptime_service(1) && eeprom_writes == 0U);
+    tick = 600000U;
+    assert(app_uptime_service(1));
+    uptime_finish();
+    assert(app_uptime_get_saved(&saved) && saved == 600U && eeprom_writes == 1U);
+    assert(memcmp(eeprom + 0xA0, "UPT1", 4) == 0 && eeprom[0xB0] == 0xFF);
+    tick = 1200000U;
+    assert(!app_uptime_service(0) && eeprom_writes == 1U);
+    tick += 2000U;
+    assert(app_uptime_service(1));
+    uptime_finish();
+    assert(app_uptime_get_saved(&saved) && saved == 1202U && eeprom_writes == 2U);
+    assert(!app_uptime_get_previous(&saved));
+    assert(memcmp(calibration, eeprom, sizeof(calibration)) == 0);
+
+    tick = eeprom_busy_until = 0;
+    app_uptime_init();
+    assert(app_uptime_get_saved(&saved) && saved == 1202U);
+    assert(app_uptime_get_previous(&saved) && saved == 1202U);
+    tick = 600000U;
+    eeprom_fail_write_after = 0;
+    assert(app_uptime_service(1));
+    uptime_finish();
+    assert(app_uptime_get_saved(&saved) && saved == 1202U);
+    writes = eeprom_writes;
+    tick += 1000U;
+    assert(!app_uptime_service(1) && eeprom_writes == writes);
+    eeprom_fail_write_after = -1;
+    tick = 1200000U;
+    eeprom_write_protected = 1;
+    assert(app_uptime_service(1));
+    uptime_finish();
+    assert(app_uptime_get_saved(&saved) && saved == 1202U);
+    eeprom_write_protected = 0;
+    tick = 1800000U;
+    assert(app_uptime_service(1));
+    uptime_finish();
+    assert(app_uptime_get_saved(&saved) && saved == 1800U); /* 不叠加上次开机的1202秒。 */
+    assert(app_uptime_get_previous(&saved) && saved == 1202U);
+    eeprom[0xA8] ^= 1U; /* 模拟断电/坏记录，重启仍可回退到另一份。 */
+    tick = eeprom_busy_until = 0;
+    app_uptime_init();
+    assert(app_uptime_get_saved(&saved) && saved == 1202U);
+
+    eeprom_read_fail_after = 0;
+    app_uptime_init();
+    assert(!app_uptime_get_previous(&saved));
+    eeprom_read_fail_after = -1;
+    tick = 600000U;
+    assert(app_uptime_service(1));
+    uptime_finish();
+    assert(app_uptime_get_saved(&saved) && saved == 600U);
+    assert(app_uptime_get_previous(&saved) && saved == 1202U);
+
+    tick = UINT32_MAX - 100U;
+    eeprom_busy_until = tick;
+    app_uptime_init();
+    assert(app_uptime_service(1));
+    uptime_finish();
+    tick += 600000U; /* HAL tick越界；时间仍按差值递增。 */
+    expected = (uint32_t)(((uint64_t)UINT32_MAX - 100U + (uint32_t)(tick - (UINT32_MAX - 100U))) / 1000U);
+    assert(app_uptime_service(1));
+    uptime_finish();
+    assert(app_uptime_get_saved(&saved) && saved == expected);
+    assert(memcmp(calibration, eeprom, sizeof(calibration)) == 0);
+    assert(!app_uptime_get_saved(NULL) && eeprom_parked != 0);
+    puts("PASS: 10min uptime records, calibration deferral/isolation, reboot reset, CRC fallback, write/WP/read failure, GPIO parking and tick wrap.");
 }
 
 int main(int argc, char **argv)
@@ -1986,6 +2169,11 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "power_profile") == 0)
     {
         power_profile_tests();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "uptime") == 0)
+    {
+        uptime_tests();
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "async_save") == 0)

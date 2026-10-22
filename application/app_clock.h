@@ -18,4 +18,6 @@ void app_clock_receive(const uint8_t *data, uint16_t size, uint32_t now_ms);
 void app_clock_service(uint32_t now_ms);
 void app_clock_reset_receive(void); /* 丢字节时仅废弃残帧，保留已完成的校时结果。 */
 app_clock_result app_clock_get_result(void);
+/* LVGL上下文读取合法校时消息计数；用于无连接状态脚时确认手机通信就绪。 */
+uint32_t app_clock_get_received_count(void);
 #endif

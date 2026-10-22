@@ -41,6 +41,8 @@ extern "C"
 
     /* ---------------------------------------------------------------- 底层时序 */
     void my_i2c_init(my_i2c_bus_t bus); /* 初始化该总线 GPIO 并释放总线 */
+    /* owner完成器件休眠后调用：释放SCL/SDA并设为模拟无上下拉；使用前重新init。 */
+    void my_i2c_suspend(my_i2c_bus_t bus);
     /* 仅一笔事务首次START前调用：线路非空闲时最多恢复一次；0=可开始，1=总线仍故障。 */
     uint8_t my_i2c_prepare(my_i2c_bus_t bus);
     /* 释放SDA，最多9个时钟+STOP；每次等待SCL拉高均有界。TP调用前后失效方向缓存。 */

@@ -64,6 +64,7 @@ typedef struct
 static kt6368a_start_struct s_start;
 /* 0空闲、1发送中、2结果待取；ISR只发布完成结果，不调用RTOS接口。 */
 static volatile uint8_t s_tx_state;
+static uint8_t s_uart_disabled;
 static volatile HAL_StatusTypeDef s_tx_result;
 static uint32_t s_tx_started_ms, s_tx_timeout_ms;
 
@@ -125,11 +126,17 @@ void kt6368a_power_off(void)
         s_tx_state = 2U;
     }
     __set_PRIMASK(mask);
-    (void)HAL_UART_AbortReceive(&huart1);
+    if (s_uart_disabled == 0)
+    {
+        (void)HAL_UART_AbortReceive(&huart1);
+        /* MSP DeInit关闭USART1时钟和中断；PA3/PA4仍使用GPIOA，不能关闭整口时钟。 */
+        (void)HAL_UART_DeInit(&huart1);
+        s_uart_disabled = 1;
+    }
     /* BL1551B关断时将蓝牙电源接地；UART闲置高电平不能继续驱动模块。 */
     gpio.Pin = BLE_TX_Pin | BLE_RX_Pin;
-    gpio.Mode = GPIO_MODE_INPUT;
-    gpio.Pull = GPIO_PULLDOWN;
+    gpio.Mode = GPIO_MODE_ANALOG;
+    gpio.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &gpio);
     HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_RESET);
     kt6368a_flush_rx();
@@ -147,6 +154,16 @@ static HAL_StatusTypeDef kt6368a_power_enable(void)
     if ((huart1.Instance != USART1) || (huart1.Init.BaudRate != 115200U))
     {
         return HAL_ERROR;
+    }
+    if (s_uart_disabled != 0)
+    {
+        status = HAL_UART_Init(&huart1);
+        if (status != HAL_OK)
+        {
+            (void)HAL_UART_DeInit(&huart1);
+            return status;
+        }
+        s_uart_disabled = 0;
     }
     HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_SET);
     ble.power_on_tick = HAL_GetTick();
@@ -460,6 +477,21 @@ void kt6368a_init_begin(void)
     s_start.phase = KT_START_DISCHARGE;
     s_start.phase_ms = HAL_GetTick();
     init_status = HAL_BUSY;
+}
+
+void kt6368a_set_enabled(uint8_t enabled)
+{
+    if (enabled != 0)
+    {
+        kt6368a_init_begin();
+    }
+    else
+    {
+        /* 取消未完成的启动，熄屏后的service不得重新上电。 */
+        s_start.phase = KT_START_OFF;
+        init_status = HAL_ERROR;
+        kt6368a_power_off();
+    }
 }
 
 uint8_t kt6368a_init_is_pending(void)

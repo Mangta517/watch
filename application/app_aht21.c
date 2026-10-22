@@ -16,6 +16,22 @@ static app_aht21_struct s_aht21_data;
 static uint32_t s_attempt_ms;
 static uint8_t s_pending;
 static uint8_t s_recover_needed, s_recovering;
+static uint32_t s_period_ms = APP_AHT21_PERIOD_MS;
+
+void app_aht21_set_period(uint32_t period_ms)
+{
+    s_period_ms = period_ms;
+    s_attempt_ms = HAL_GetTick();
+    s_pending = 0;
+    if (s_recovering != 0)
+    {
+        s_recovering = 0;
+        s_recover_needed = 1;
+    }
+    xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
+    s_aht21_data.measuring = 0;
+    xSemaphoreGive(s_aht21_mux);
+}
 
 void app_aht21_init(void)
 {
@@ -35,10 +51,11 @@ void app_aht21_init(void)
     s_pending = 0;
     s_recover_needed = result != AHT21_OK;
     s_recovering = 0;
+    s_period_ms = APP_AHT21_PERIOD_MS;
     s_attempt_ms = HAL_GetTick();
     if (s_recover_needed == 0)
     {
-        s_attempt_ms -= APP_AHT21_PERIOD_MS;
+        s_attempt_ms -= s_period_ms;
     }
 }
 
@@ -65,7 +82,7 @@ void app_aht21_service(void)
         s_attempt_ms = now;
         if (result == AHT21_OK)
         {
-            s_attempt_ms -= APP_AHT21_PERIOD_MS;
+            s_attempt_ms -= s_period_ms;
         }
         app_diag_sensor_init(APP_DIAG_AHT, (uint32_t)result);
         xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
@@ -76,7 +93,7 @@ void app_aht21_service(void)
     }
     if (s_recover_needed != 0)
     {
-        if (elapsed >= APP_AHT21_PERIOD_MS)
+        if (elapsed >= s_period_ms)
         {
             aht21_recover_begin(now);
             s_recovering = 1;
@@ -126,7 +143,7 @@ void app_aht21_service(void)
         }
         xSemaphoreGive(s_aht21_mux);
     }
-    else if (elapsed >= APP_AHT21_PERIOD_MS)
+    else if (elapsed >= s_period_ms)
     {
         read_started = app_diag_clock_count();
         result = aht21_trigger();

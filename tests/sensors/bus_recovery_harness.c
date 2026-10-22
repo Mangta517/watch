@@ -14,6 +14,7 @@ static uint8_t stuck_sda, stuck_scl, in_transaction, release_after;
 static unsigned clocks, starts, stops, response_pos, scl_reads;
 static const uint8_t read_responses[] = {0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1};
 static uint8_t nack_only;
+static unsigned analog_pins;
 
 void host_i2c_nop(void)
 {
@@ -34,6 +35,16 @@ void __set_PRIMASK(uint32_t value)
 void HAL_GPIO_Init(GPIO_TypeDef *gpio, GPIO_InitTypeDef *config)
 {
     assert(gpio == port && primask == 1);
+    if (config->Mode == GPIO_MODE_ANALOG)
+    {
+        assert(config->Pull == GPIO_NOPULL && (config->Pin == scl_pin || config->Pin == sda_pin));
+        ++analog_pins;
+        if (config->Pin == sda_pin)
+        {
+            sda_mode = config->Mode;
+        }
+        return;
+    }
     if (config->Pin == sda_pin)
     {
         sda_mode = config->Mode;
@@ -118,7 +129,7 @@ int main(int argc, char **argv)
 {
     uint8_t value = 0x5A;
     assert(argc == 2);
-    if (strcmp(argv[1], "eeprom_nack") == 0)
+    if (strcmp(argv[1], "eeprom_nack") == 0 || strcmp(argv[1], "eeprom_suspend") == 0)
     {
         selected_bus = MY_I2C_BUS_EEPROM;
         port = GPIOA;
@@ -133,6 +144,16 @@ int main(int argc, char **argv)
         sda_pin = TP_SDA_Pin;
     }
     my_i2c_init(selected_bus);
+    if (strcmp(argv[1], "eeprom_suspend") == 0)
+    {
+        my_i2c_suspend(selected_bus);
+        assert(analog_pins == 2U && sda_mode == GPIO_MODE_ANALOG && scl == GPIO_PIN_SET && sda == GPIO_PIN_SET);
+        my_i2c_init(selected_bus);
+        assert(sda_mode == GPIO_MODE_OUTPUT_OD && primask == 0);
+        assert(my_i2c_probe(selected_bus, 0x50) == 1);
+        puts("PASS: EEPROM PA11/PA12 release to analog/no-pull and restore open-drain before the next probe.");
+        return 0;
+    }
     if (strcmp(argv[1], "sda_release") == 0)
     {
         stuck_sda = 1;
