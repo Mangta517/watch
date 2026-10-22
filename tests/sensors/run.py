@@ -21,6 +21,7 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
                     "tests/sensors/battery_harness.c", "application/app_battery.c",
                     "-o", battery_exe], cwd=root, check=True)
     subprocess.run([battery_exe], cwd=root, check=True)
+    subprocess.run([battery_exe, "percentage"], cwd=root, check=True)
     subprocess.run([battery_exe, "allocation_failed"], cwd=root, check=True)
     i2c_exe = str(Path(out) / "i2c.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",

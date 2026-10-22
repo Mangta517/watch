@@ -10,10 +10,38 @@
 #include <string.h>
 
 #define APP_BATTERY_ADC_TIMEOUT_MS 2U
+#define APP_BATTERY_STARTUP_SAMPLES 8U
+#define APP_BATTERY_STARTUP_AVERAGE_SAMPLES 4U
 
 static SemaphoreHandle_t s_battery_mux;
 static app_battery_struct s_battery_data;
 static uint32_t s_attempt_ms;
+static int32_t s_filtered_mv_q8;
+static uint32_t s_startup_sum_mv;
+static uint8_t s_startup_samples;
+static uint8_t s_last_percent;
+
+static uint8_t battery_percent(uint32_t voltage_mv)
+{
+    /* 初始曲线匹配板上TP4056的4.2V上限；电芯规格未知，须按实际放电曲线校准。 */
+    static const uint16_t voltage_points_mv[] = {3300, 3500, 3600, 3700, 3750, 3800, 3850, 3900, 4000, 4100, 4200};
+    static const uint8_t percent_points[] = {0, 5, 10, 20, 30, 40, 50, 60, 75, 90, 100};
+    uint32_t i;
+    if (voltage_mv <= voltage_points_mv[0])
+    {
+        return 0;
+    }
+    for (i = 1; i < sizeof(voltage_points_mv) / sizeof(voltage_points_mv[0]); ++i)
+    {
+        if (voltage_mv < voltage_points_mv[i])
+        {
+            uint32_t span_mv = voltage_points_mv[i] - voltage_points_mv[i - 1];
+            uint32_t rise = (voltage_mv - voltage_points_mv[i - 1]) * (percent_points[i] - percent_points[i - 1]);
+            return (uint8_t)(percent_points[i - 1] + (rise + span_mv / 2U) / span_mv);
+        }
+    }
+    return 100;
+}
 
 void app_battery_init(void)
 {
@@ -27,6 +55,9 @@ void app_battery_init(void)
     memset(&s_battery_data, 0, sizeof(s_battery_data));
     xSemaphoreGive(s_battery_mux);
     s_attempt_ms = HAL_GetTick() - APP_BATTERY_PERIOD_MS;
+    s_startup_samples = 0;
+    s_startup_sum_mv = 0;
+    s_last_percent = 0;
     app_diag_sensor_init(APP_DIAG_BATTERY, 0);
 }
 
@@ -62,7 +93,41 @@ void app_battery_service(void)
     {
         sample.adc_raw = (uint16_t)raw;
         sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2U + 2047U) / 4095U;
-        sample.valid = 1;
+        /* 启动前4次不入均值，后4次均值作为初值；沿用每秒调度，不阻塞sensor任务。 */
+        if (s_startup_samples < APP_BATTERY_STARTUP_SAMPLES)
+        {
+            ++s_startup_samples;
+            if (s_startup_samples > APP_BATTERY_STARTUP_SAMPLES - APP_BATTERY_STARTUP_AVERAGE_SAMPLES)
+            {
+                s_startup_sum_mv += sample.voltage_mv;
+            }
+            if (s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
+            {
+                s_filtered_mv_q8 = (int32_t)(s_startup_sum_mv * 256U / APP_BATTERY_STARTUP_AVERAGE_SAMPLES);
+                s_last_percent = battery_percent((uint32_t)(s_filtered_mv_q8 + 128) / 256U);
+            }
+        }
+        else
+        {
+            /* Q8保留小数，避免1/8低通因整数取整停在旧值。 */
+            s_filtered_mv_q8 += ((int32_t)sample.voltage_mv * 256 - s_filtered_mv_q8) / 8;
+        }
+        if (s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
+        {
+            sample.voltage_mv = (uint32_t)(s_filtered_mv_q8 + 128) / 256U;
+            sample.percent = battery_percent(sample.voltage_mv);
+            /* 尚无充电状态输入：本次开机电量只降不升，电压回弹不代表补充了电荷。 */
+            if (sample.percent < s_last_percent)
+            {
+                s_last_percent = sample.percent;
+            }
+            sample.percent = s_last_percent;
+            sample.valid = 1;
+        }
+        else
+        {
+            sample.voltage_mv = 0;
+        }
     }
     if (sample.result == HAL_OK)
     {

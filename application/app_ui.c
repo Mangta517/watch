@@ -32,6 +32,7 @@
 #define UI_BLUE             0x70C5E8
 #define UI_ORANGE           0xCE7438
 #define UI_GREEN            0x398B70
+#define UI_BATTERY_GREEN    0x45D483
 #define UI_RED              0xBA5057
 #define UI_POLL_MS          10
 #define UI_REFRESH_MS       100
@@ -66,7 +67,7 @@ typedef struct
 /* 两张主页面只在左右切换时驻留；进入详情释放，保持原详情页内存预算。 */
 typedef struct
 {
-    lv_obj_t *screen, *body, *battery;
+    lv_obj_t *screen, *body, *battery, *battery_bar;
     lv_obj_t *time, *hint, *heart, *temperature;
     lv_obj_t *hour_hand, *minute_hand, *second_hand;
 } ui_main_page_struct;
@@ -75,6 +76,7 @@ static ui_main_page_struct s_main_pages[2];
 
 static lv_obj_t *s_screen;
 static lv_obj_t *s_battery_label;
+static lv_obj_t *s_battery_bar;
 static lv_obj_t *s_weather_label;
 static lv_obj_t *s_weather_value;
 static lv_obj_t *s_weather_condition;
@@ -204,6 +206,30 @@ static lv_obj_t *label(lv_obj_t *parent, const char *text, int x, int y, const l
     lv_obj_set_pos(obj, x, y);
     lv_label_set_text(obj, text);
     return obj;
+}
+
+static void create_battery_bar(lv_obj_t *parent, int x, int y)
+{
+    lv_obj_t *terminal;
+    s_battery_bar = lv_bar_create(parent);
+    lv_obj_remove_style_all(s_battery_bar);
+    lv_obj_set_pos(s_battery_bar, x, y);
+    lv_obj_set_size(s_battery_bar, 30, 12);
+    lv_obj_set_style_bg_color(s_battery_bar, lv_color_hex(UI_CARD), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_battery_bar, lv_color_hex(UI_MUTED), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_battery_bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_battery_bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_battery_bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_battery_bar, lv_color_hex(UI_BATTERY_GREEN), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s_battery_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s_battery_bar, 1, LV_PART_INDICATOR);
+    lv_obj_clear_flag(s_battery_bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_battery_bar, LV_OBJ_FLAG_OVERFLOW_VISIBLE | LV_OBJ_FLAG_HIDDEN);
+    lv_bar_set_range(s_battery_bar, 0, 100);
+    terminal = panel(s_battery_bar, 28, 1, 3, 6, UI_MUTED);
+    lv_obj_set_style_radius(terminal, 1, 0);
+    lv_obj_clear_flag(terminal, LV_OBJ_FLAG_CLICKABLE);
 }
 
 static lv_obj_t *note(lv_obj_t *parent, const char *text, int y)
@@ -554,10 +580,12 @@ static void watch_page(void)
     s_watch_temperature = label(entry, "--", 0, 3, &lv_font_montserrat_14, UI_TEXT);
     make_entry(entry, &weather);
     lv_obj_set_parent(s_battery_label, s_body);
-    lv_obj_set_pos(s_battery_label, 40, 254);
-    lv_obj_set_width(s_battery_label, 160);
+    lv_obj_set_pos(s_battery_label, 78, 254);
+    lv_obj_set_width(s_battery_label, 130);
     lv_obj_set_style_text_font(s_battery_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_parent(s_battery_bar, s_body);
+    lv_obj_set_pos(s_battery_bar, 34, 257);
 }
 
 /* 表盘按RTC秒值更新；触摸/动画保持原节拍，不给秒针另建动画。 */
@@ -1312,6 +1340,7 @@ static void back_cb(lv_event_t *event)
 static void clear_page_refs(void)
 {
     s_battery_label = NULL;
+    s_battery_bar = NULL;
     s_weather_label = s_weather_value = s_weather_condition = NULL;
     s_weather_icon = NULL;
     s_weather_icon_code = 255;
@@ -1344,6 +1373,7 @@ static void main_page_save(ui_main_page_struct *page)
     page->screen = s_screen;
     page->body = s_body;
     page->battery = s_battery_label;
+    page->battery_bar = s_battery_bar;
     page->time = s_time;
     page->hint = s_clock_hint;
     page->heart = s_watch_heart;
@@ -1358,6 +1388,7 @@ static void main_page_restore(const ui_main_page_struct *page)
     s_screen = page->screen;
     s_body = page->body;
     s_battery_label = page->battery;
+    s_battery_bar = page->battery_bar;
     s_time = page->time;
     s_clock_hint = page->hint;
     s_watch_heart = page->heart;
@@ -1427,8 +1458,9 @@ static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
                 lv_obj_add_event_cb(navigation, back_cb, LV_EVENT_CLICKED, NULL);
             }
         }
-        s_battery_label = label(s_screen, "BAT --.--V", width - 94, 15, &lv_font_montserrat_10, UI_MUTED);
-        lv_obj_set_width(s_battery_label, 80);
+        create_battery_bar(s_screen, width - 106, 15);
+        s_battery_label = label(s_screen, "--%", width - 66, 15, &lv_font_montserrat_10, UI_MUTED);
+        lv_obj_set_width(s_battery_label, 52);
         lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
         s_body = panel(s_screen, (width - 212) / 2, 38, 212, height - 62, UI_BG);
         lv_obj_set_style_radius(s_body, 0, 0);
@@ -1795,6 +1827,7 @@ static void refresh_weather(void)
 static void refresh_battery(void)
 {
     app_battery_struct battery;
+    uint32_t color = UI_BATTERY_GREEN;
     if (s_battery_label == NULL)
     {
         return;
@@ -1802,20 +1835,49 @@ static void refresh_battery(void)
     app_battery_get_snapshot(&battery);
     if (battery.valid)
     {
-        set_label_text_fmt(s_battery_label, "BAT %lu.%02luV", (unsigned long)(battery.voltage_mv / 1000U),
-                           (unsigned long)(battery.voltage_mv % 1000U / 10U));
-        set_text_color(s_battery_label, UI_TEXT);
+        if (lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN))
+        {
+            lv_obj_clear_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_bar_set_value(s_battery_bar, battery.percent, LV_ANIM_OFF);
+        if (s_page == PAGE_WATCH)
+        {
+            set_label_text_fmt(s_battery_label, "~%u%% %lu.%02luV", (unsigned int)battery.percent,
+                               (unsigned long)(battery.voltage_mv / 1000U), (unsigned long)(battery.voltage_mv % 1000U / 10U));
+        }
+        else
+        {
+            set_label_text_fmt(s_battery_label, "~%u%%", (unsigned int)battery.percent);
+        }
+        if (battery.percent <= 20U)
+        {
+            color = UI_RED;
+            set_text_color(s_battery_label, UI_RED);
+        }
+        else
+        {
+            set_text_color(s_battery_label, UI_TEXT);
+        }
+        /* 仅颜色变化时设置样式，保持电量不变时不重复刷屏。 */
+        if (lv_obj_get_style_bg_color(s_battery_bar, LV_PART_INDICATOR).full != lv_color_hex(color).full)
+        {
+            lv_obj_set_style_bg_color(s_battery_bar, lv_color_hex(color), LV_PART_INDICATOR);
+        }
     }
     else
     {
+        if (!lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN))
+        {
+            lv_obj_add_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN);
+        }
         if (battery.result == HAL_OK)
         {
-            set_label_text(s_battery_label, "BAT --.--V");
+            set_label_text(s_battery_label, "--%");
             set_text_color(s_battery_label, UI_MUTED);
         }
         else
         {
-            set_label_text(s_battery_label, "BAT ADC ERR");
+            set_label_text(s_battery_label, "ADC ERR");
             set_text_color(s_battery_label, UI_RED);
         }
     }

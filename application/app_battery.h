@@ -13,10 +13,11 @@
 
 typedef struct
 {
-    uint32_t voltage_mv;
-    uint16_t adc_raw;
+    uint32_t voltage_mv; /* 1/8低通后的电池电压，单位mV。 */
+    uint16_t adc_raw;    /* 本次转换的原始ADC值，供诊断使用。 */
     HAL_StatusTypeDef result;
     uint8_t valid;
+    uint8_t percent; /* 稳定采样后估算0～100%；本次开机只降不升，仅valid时可用。 */
 } app_battery_struct;
 
 /* ADC1 已由 MX_ADC1_Init 配置；以下初始化和采样只在 sensor 任务调用。 */

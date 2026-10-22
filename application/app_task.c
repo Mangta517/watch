@@ -153,7 +153,7 @@ static void app_sensor_task(void *pvParameters)
     App_Baro_Init();
     app_heart_init();
     app_battery_init();
-    app_battery_service(); /* 首次电池读数在零偏校准等待前发布。 */
+    app_battery_service(); /* 零偏校准前启动采样；后续按秒完成电池启动均值。 */
 
     app_aht21_init();
     app_diag_boot_set(APP_BOOT_SENSOR_READY_MS, HAL_GetTick());

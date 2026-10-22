@@ -47,7 +47,7 @@ static app_heart_struct host_heart;
 static app_heart_sample_struct host_heart_samples[4];
 static uint16_t host_heart_samples_count;
 static app_aht21_struct host_aht21;
-static app_battery_struct host_battery = {.voltage_mv = 3850, .valid = 1};
+static app_battery_struct host_battery = {.voltage_mv = 3850, .valid = 1, .percent = 50};
 
 void app_battery_get_snapshot(app_battery_struct *snapshot)
 {
@@ -429,7 +429,9 @@ static void open_feature(ui_page_t page)
     tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
     assert(s_page == page);
     assert(s_main_pages[PAGE_WATCH].screen == NULL && s_main_pages[PAGE_SETTINGS].screen == NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~50%") == 0);
+    assert(s_battery_bar != NULL && lv_bar_get_value(s_battery_bar) == 50);
+    assert(!lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
 }
 
 static void screenshot(const char *name)
@@ -553,7 +555,7 @@ int main(void)
         assert(s_second_points[1].x == previous.x && s_second_points[1].y == previous.y);
         advance(250);
         assert(host_battery_reads == reads + 1 && host_heart_reads == heart_reads + 1);
-        assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.86V") == 0);
+        assert(strcmp(lv_label_get_text(s_battery_label), "~50% 3.86V") == 0);
         assert(s_second_points[1].x != previous.x || s_second_points[1].y != previous.y);
         host_battery.voltage_mv = 3851;
         advance(1000);
@@ -561,14 +563,15 @@ int main(void)
     host_battery.valid = 0;
     refresh_battery();
     lv_refr_now(NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT --.--V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "--%") == 0);
+    assert(lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
     screenshot("battery_waiting");
     /* 毫伏变化但显示仍相同时不重绘；显示值变化、ADC故障和恢复必须更新。 */
     host_battery.valid = 1;
     host_battery.voltage_mv = 3851;
     refresh_battery();
     lv_refr_now(NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~50% 3.85V") == 0);
     assert_static_refresh();
     {
         uint32_t calls = host_flush_calls;
@@ -579,13 +582,14 @@ int main(void)
         host_battery.voltage_mv = 3860;
         refresh_battery();
         lv_refr_now(NULL);
-        assert(host_flush_calls > calls && strcmp(lv_label_get_text(s_battery_label), "BAT 3.86V") == 0);
+        assert(host_flush_calls > calls && strcmp(lv_label_get_text(s_battery_label), "~50% 3.86V") == 0);
     }
     host_battery.valid = 0;
     host_battery.result = HAL_TIMEOUT;
     refresh_battery();
     lv_refr_now(NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT ADC ERR") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "ADC ERR") == 0);
+    assert(lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
     assert(lv_obj_get_style_text_color(s_battery_label, LV_PART_MAIN).full == lv_color_hex(UI_RED).full);
     assert_static_refresh();
     screenshot("battery_error");
@@ -594,8 +598,47 @@ int main(void)
     host_battery.voltage_mv = 3851;
     refresh_battery();
     lv_refr_now(NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~50% 3.85V") == 0);
     assert(lv_obj_get_style_text_color(s_battery_label, LV_PART_MAIN).full == lv_color_hex(UI_TEXT).full);
+    assert(!lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
+    assert(lv_bar_get_value(s_battery_bar) == 50);
+    {
+        lv_area_t area;
+        lv_obj_get_coords(s_battery_bar, &area);
+        assert(framebuffer[(area.y1 + 6) * 240 + area.x1 + 6].full == lv_color_hex(UI_BATTERY_GREEN).full);
+        assert(framebuffer[(area.y1 + 6) * 240 + area.x2 - 5].full == lv_color_hex(UI_CARD).full);
+    }
+    /* 百分比变化必须刷新；0/100%单行显示，低电量及恢复使用正确颜色。 */
+    {
+        uint32_t calls = host_flush_calls;
+        host_battery.percent = 20;
+        refresh_battery();
+        lv_refr_now(NULL);
+        assert(host_flush_calls > calls);
+        assert(strcmp(lv_label_get_text(s_battery_label), "~20% 3.85V") == 0);
+        assert(lv_obj_get_style_text_color(s_battery_label, LV_PART_MAIN).full == lv_color_hex(UI_RED).full);
+        assert(lv_bar_get_value(s_battery_bar) == 20);
+        assert(lv_obj_get_style_bg_color(s_battery_bar, LV_PART_INDICATOR).full == lv_color_hex(UI_RED).full);
+        screenshot("battery_low");
+        host_battery.percent = 0;
+        refresh_battery();
+        assert(strcmp(lv_label_get_text(s_battery_label), "~0% 3.85V") == 0);
+        assert(lv_bar_get_value(s_battery_bar) == 0);
+        screenshot("battery_empty");
+        host_battery.percent = 100;
+        refresh_battery();
+        lv_obj_update_layout(s_screen);
+        assert(strcmp(lv_label_get_text(s_battery_label), "~100% 3.85V") == 0);
+        assert(lv_obj_get_height(s_battery_label) == lv_font_montserrat_14.line_height);
+        assert(lv_obj_get_style_text_color(s_battery_label, LV_PART_MAIN).full == lv_color_hex(UI_TEXT).full);
+        assert(lv_bar_get_value(s_battery_bar) == 100);
+        assert(!lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
+        assert(lv_obj_get_style_bg_color(s_battery_bar, LV_PART_INDICATOR).full == lv_color_hex(UI_BATTERY_GREEN).full);
+        screenshot("battery_full");
+        host_battery.percent = 50;
+        refresh_battery();
+        lv_refr_now(NULL);
+    }
     /* 真实按下及拖动刻度盘：背景保持透明，纵向滑动不误入校时页。 */
     host_point.x = 120;
     host_point.y = 80;
@@ -616,7 +659,15 @@ int main(void)
     assert(lv_obj_get_child_cnt(s_body) == 7);
     assert(!s_brightness_label && !s_angles[0] && !s_pressure && !s_altitude && !s_heart_card && !s_aht21_card);
     open_feature(PAGE_HEART);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~50%") == 0);
+    host_battery.percent = 100;
+    refresh_battery();
+    lv_obj_update_layout(s_screen);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~100%") == 0);
+    assert(lv_obj_get_height(s_battery_label) == lv_font_montserrat_10.line_height);
+    host_battery.percent = 50;
+    refresh_battery();
+
     assert_static_refresh();
     /* 真实心率卡片的按钮、有效值和异常状态，不让旧 BPM 留在无效状态。 */
     {
@@ -1050,7 +1101,7 @@ int main(void)
         assert(s_page == PAGE_SETTINGS);
         open_feature(PAGE_BLUETOOTH);
         assert(s_page == PAGE_BLUETOOTH);
-        assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+        assert(strcmp(lv_label_get_text(s_battery_label), "~50%") == 0);
         assert(strcmp(lv_label_get_text(s_bt_log), s_bt_text) == 0);
         assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE + SPP") == 0);
         assert_static_refresh();
@@ -1365,7 +1416,7 @@ int main(void)
     bluetooth_rx_error_tests();
     printf("PASS: seven feature entries, full-screen watch, shortcuts, swipe entry, and detail return/scroll restoration.\n");
     printf("PASS: phone weather UART parsing, watch/weather display, age and unchanged redraw.\n");
-    printf("PASS: battery voltage on all pages, waiting/error/recovery, precision-aware redraw and navigation.\n");
+    printf("PASS: battery fill pixels, percentage, low/empty/full states, cached pages, waiting/error/recovery and unchanged redraw.\n");
     printf("PASS: unchanged UI produces no pixel transfers; displayed decimal and color changes still redraw.\n");
     printf("PASS: BLE receive page entry/back, off-page reception, clear, split CRLF, binary bytes, bounded log and initialization states.\n");
     printf("PASS: heart card START/STOP, BPM display, measuring/no-signal/unavailable states and preserved navigation.\n");
