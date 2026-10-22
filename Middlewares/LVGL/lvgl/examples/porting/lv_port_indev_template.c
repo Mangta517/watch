@@ -4,16 +4,16 @@
   * @brief   LVGL v8 输入移植层 — 接 interface/touch.c (CST816, 软件 I2C)
   *          移植自 Watch 工程同名文件 (源头 FryPi OV_Watch lv_port_indev.c,
   *          GPL-3.0)。本工程无 TP_INT 引脚, 驱动纯轮询; 其余接法不变。
+  *          touch任务采集硬件；本层只在LVGL任务读取缓存事件，不访问I2C。
   ******************************************************************************
 ***/
 #include "lv_port_indev_template.h"
 #include "lvgl.h"
-#include "touch.h"
+#include "app_touch.h"
 
 /**********************
  *  STATIC PROTOTYPES
  **********************/
-static void touchpad_init(void);
 static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data);
 
 /**********************
@@ -28,8 +28,6 @@ void lv_port_indev_init(void)
 {
     static lv_indev_drv_t indev_drv;
 
-    touchpad_init();
-
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = touchpad_read;
@@ -43,28 +41,25 @@ void lv_port_indev_init(void)
 /**********************
  *   STATIC FUNCTIONS
  **********************/
-static void touchpad_init(void)
-{
-    (void)Touch_Init(); /* 返回 ChipID (CST816S≈0xB5); 0 表示总线未见器件 */
-}
-
 static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 {
-    static lv_coord_t last_x = 0;
-    static lv_coord_t last_y = 0;
-    uint16_t tx = 0, ty = 0;
+    app_touch_struct sample;
 
     (void)indev_drv;
-    if (Touch_GetPoint(&tx, &ty))
-    { /* 一次调用即判压+取坐标 */
-        last_x = (lv_coord_t)tx;
-        last_y = (lv_coord_t)ty;
+    app_touch_read(&sample);
+    if (sample.canceled != 0)
+    {
+        lv_indev_wait_release(indev_touchpad);
+    }
+    if (sample.pressed != 0)
+    {
         data->state = LV_INDEV_STATE_PRESSED;
     }
     else
     {
-        data->state = LV_INDEV_STATE_RELEASED; /* 坐标保持 last_x/y 不变 */
+        data->state = LV_INDEV_STATE_RELEASED;
     }
-    data->point.x = last_x;
-    data->point.y = last_y;
+    data->point.x = (lv_coord_t)sample.x;
+    data->point.y = (lv_coord_t)sample.y;
+    data->continue_reading = sample.more != 0;
 }

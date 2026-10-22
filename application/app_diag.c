@@ -1,4 +1,5 @@
 #include "app_diag.h"
+#include "app_touch.h"
 #include "main.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -35,6 +36,8 @@ typedef struct
     uint32_t work_last_us;
     uint32_t work_max_us;
     uint32_t init_result;
+    uint32_t recovery_attempts;
+    uint8_t recovery_state;
 } app_diag_sensor_struct;
 
 static app_diag_task_struct s_tasks[APP_DIAG_TASK_COUNT];
@@ -172,6 +175,22 @@ void app_diag_sensor_init(uint8_t id, uint32_t result)
     taskEXIT_CRITICAL();
 }
 
+void app_diag_sensor_recovery(uint8_t id, uint8_t state)
+{
+    app_diag_sensor_struct *stats = &s_sensors[id];
+    taskENTER_CRITICAL();
+    if (state == 2U && stats->recovery_state != 2U)
+    {
+        ++stats->recovery_attempts;
+    }
+    if (stats->recovery_state == 2U && state != 2U)
+    {
+        stats->init_result = state;
+    }
+    stats->recovery_state = state;
+    taskEXIT_CRITICAL();
+}
+
 void app_diag_sensor_record(uint8_t id, uint8_t outcome, uint32_t result, uint32_t started)
 {
     app_diag_sensor_struct *stats = &s_sensors[id];
@@ -228,6 +247,14 @@ void app_diag_heart_tx(uint16_t count, uint8_t success)
 }
 
 static uint8_t s_imu_cal_requested;
+static char s_rx_command[16];
+static uint8_t s_rx_length, s_rx_overflow;
+
+void app_diag_reset_receive(void)
+{
+    s_rx_length = 0;
+    s_rx_overflow = 0;
+}
 
 uint8_t app_diag_take_imu_calibration(void)
 {
@@ -241,39 +268,37 @@ uint8_t app_diag_take_imu_calibration(void)
 
 void app_diag_receive(const uint8_t *data, uint16_t size)
 {
-    static char command[16];
-    static uint8_t length, overflow;
     uint16_t i;
     for (i = 0; i < size; ++i)
     {
         if (data[i] == '\n' || data[i] == '\r')
         {
-            command[length] = '\0';
-            if (overflow == 0 && strcmp(command, "DIAG,0") == 0)
+            s_rx_command[s_rx_length] = '\0';
+            if (s_rx_overflow == 0 && strcmp(s_rx_command, "DIAG,0") == 0)
             {
                 s_enabled = 0;
             }
-            else if (overflow == 0 && strcmp(command, "DIAG,1") == 0)
+            else if (s_rx_overflow == 0 && strcmp(s_rx_command, "DIAG,1") == 0)
             {
                 s_enabled = APP_DEBUG_TELEMETRY;
                 s_row = 0;
                 s_snapshot_ready = 0;
             }
-            else if (overflow == 0 && strcmp(command, "IMU,CAL") == 0)
+            else if (s_rx_overflow == 0 && strcmp(s_rx_command, "IMU,CAL") == 0)
             {
                 taskENTER_CRITICAL();
                 s_imu_cal_requested = 1;
                 taskEXIT_CRITICAL();
             }
-            length = overflow = 0;
+            app_diag_reset_receive();
         }
-        else if (length < sizeof(command) - 1U)
+        else if (s_rx_length < sizeof(s_rx_command) - 1U)
         {
-            command[length++] = (char)data[i];
+            s_rx_command[s_rx_length++] = (char)data[i];
         }
         else
         {
-            overflow = 1;
+            s_rx_overflow = 1;
         }
     }
 }
@@ -325,6 +350,10 @@ static void diag_snapshot(void)
         else if (id == 2)
         {
             words[2] = configMINIMAL_STACK_SIZE * sizeof(StackType_t);
+        }
+        else if (strcmp(s_task_status[i].pcTaskName, "touch") == 0)
+        {
+            words[2] = APP_TOUCH_STACK_WORDS * sizeof(StackType_t);
         }
         words[3] = s_task_status[i].usStackHighWaterMark * sizeof(StackType_t);
         runtime = s_task_status[i].ulRunTimeCounter - s_previous_runtime[id];

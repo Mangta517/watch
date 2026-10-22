@@ -9,6 +9,7 @@
   ******************************************************************************
 ***/
 #include "app_display.h"
+#include "main.h"
 
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -31,12 +32,17 @@ void App_Display_Init(void)
      * (CM4F port 的 uxCriticalNesting 以 0xaaaaaaaa 哨兵初值, 调度器前的
      *  enter/exit 不解除 BASEPRI, 属设计行为, 见 SVC 启动时统一清零) */
     s_lvgl_mux = xSemaphoreCreateMutex();
+    if (s_lvgl_mux == NULL)
+    {
+        Error_Handler();
+        return;
+    }
 
     lv_init();
 
     /* 硬件拉起 + LVGL 注册 + 建树, 全程跑在调用方(lvgl)任务栈上 */
     lv_port_disp_init();  /* → LCD_Init: ST7789 序列+刷黑+背光 80%      */
-    lv_port_indev_init(); /* → Touch_Init: CST816 复位+配置 (软件I2C轮询) */
+    lv_port_indev_init(); /* 只注册缓存输入；触摸硬件由独立任务初始化/轮询。 */
     App_UI_Create();      /* 屏幕/触摸测试页                             */
 }
 
@@ -44,7 +50,14 @@ void App_Display_Service(void)
 {
     App_Display_Lock();
     lv_port_disp_service();
-    lv_timer_handler();
+    if (App_UI_IsScreenOn() != 0)
+    {
+        lv_timer_handler();
+    }
+    else
+    {
+        App_UI_ServiceSleeping();
+    }
     App_Display_Unlock();
 }
 

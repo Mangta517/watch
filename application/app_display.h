@@ -21,13 +21,13 @@ extern "C"
 
     /**
  * @brief 显示服务初始化 —— 必须在 FreeRTOS 任务上下文里调用一次:
- *        创建 LVGL 互斥锁 → lv_init → 显示/触摸移植层初始化(拉起 LCD 与 CST816)
+ *        创建 LVGL 互斥锁 → lv_init → 初始化LCD并注册缓存输入(CST816由touch任务初始化)
  *        → 构建屏幕/触摸测试 UI。完成后返回。
  */
     void App_Display_Init(void);
 
     /**
- * @brief 显示服务心跳 —— 任务循环里周期调用: 加锁 → lv_timer_handler → 解锁
+ * @brief 显示服务心跳：亮屏运行LVGL；熄屏只处理业务/按键并收尾在途DMA。
  */
     void App_Display_Service(void);
 

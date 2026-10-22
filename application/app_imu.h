@@ -60,7 +60,7 @@ extern "C"
         float yaw_deg;             /* 偏航角 (-180..180°)，磁北参考；失效时六轴相对递推 */
         lsm303dlhc_mag_struct mag; /* 芯片坐标下磁场，未做安装校准 */
         float mag_body_uT[3];      /* 校准并映射到 MPU6050 机体坐标后的磁场 */
-        uint8_t mag_online;        /* 有不超过50ms的有效磁场帧 */
+        uint8_t mag_online;        /* 有当前档位新鲜度窗口内的有效磁场帧。 */
         uint8_t mag_fused;         /* 本轮磁场参与航向修正 */
         uint8_t mag_calibrated;    /* 已校准，或已从EEPROM恢复有效校准 */
         app_mag_cal_state mag_cal_state;
@@ -80,6 +80,10 @@ extern "C"
  *        仅由 app_task 的 sensor 任务体按周期调用, 其他上下文勿调
  */
     void App_IMU_Service(void);
+    /* 仅sensor任务：选择20/40ms档位；磁校准请求/进行中强制20ms，返回本轮调度周期。 */
+    uint32_t app_imu_set_sample_period(uint32_t period_ms);
+    /* 仅sensor任务调用；与MPU零偏保存串行，返回1表示磁记录仍在保存。 */
+    uint8_t App_IMU_SaveService(void);
 
     /**
  * @brief 取最新数据的一致快照 (加锁, 防多字段撕裂)

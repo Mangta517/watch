@@ -70,6 +70,10 @@ void Error_Handler(void);
 #define KEY_1_GPIO_Port GPIOA
 #define LCD_BLK_Pin GPIO_PIN_0
 #define LCD_BLK_GPIO_Port GPIOB
+#define WDG_EN_Pin GPIO_PIN_1
+#define WDG_EN_GPIO_Port GPIOB
+#define WDI_Pin GPIO_PIN_2
+#define WDI_GPIO_Port GPIOB
 #define MPU6050_INT_Pin GPIO_PIN_12
 #define MPU6050_INT_GPIO_Port GPIOB
 #define MPU6050_INT_EXTI_IRQn EXTI15_10_IRQn

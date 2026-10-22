@@ -21,7 +21,9 @@
 #include "app_heart.h"
 #include "app_aht21.h"
 #include "app_battery.h"
+#include "app_touch.h"
 #include "lvgl.h"
+#include "lv_port_disp_template.h"
 #include "my_i2c.h"
 #include "mpu6050.h"
 #include "spl006.h"
@@ -29,30 +31,86 @@
 #include "em7028.h"
 #include "kt6368a.h"
 #include "watch_rtc.h"
+#include "tps3823.h"
 
 /*********************
  *  任务配置
  *********************/
+/* LVGL优先级3、sensor优先级2；显示分块主动让出CPU，MPU每轮只取最新一帧。 */
 #define APP_LVGL_TASK_PRIO   3    /* configMAX_PRIORITIES=5 */
 #define APP_LVGL_TASK_STK    1024 /* 字 = 4KB (Watch 工程实测足够跑 UI+刷新) */
 #define APP_LVGL_TASK_PERIOD 5    /* 保留原LVGL服务周期(ms) */
 
-#define APP_SENSOR_TASK_PRIO   2                        /* 低于 lvgl: UI 响应优先, 采样是后台生产 */
+#define APP_SENSOR_TASK_PRIO   2                        /* 低于LVGL，优先响应触摸和显示 */
 #define APP_SENSOR_TASK_STK    512                      /* 字 = 2KB (IMU 读 + 零偏校准 + 气压读路径) */
-#define APP_SENSOR_TASK_PERIOD MPU6050_SAMPLE_PERIOD_MS /* 与MPU100Hz输出一致 */
-#define APP_SENSOR_BARO_DIV    25                       /* 气压250ms轮询，器件1Hz */
+#define APP_SENSOR_TASK_PERIOD 20U /* 运动、心率和校准均为50Hz。 */
+#define APP_SENSOR_IDLE_PERIOD_MS 40U /* 后台姿态25Hz。 */
+#define APP_IDLE_POLL_MS 20U
+#define APP_POWER_IDLE 1U
+#define APP_POWER_MOTION 2U
+#define APP_TOUCH_TASK_PRIO    1 /* 触摸采集低于sensor；LVGL只消费缓存。 */
+#define APP_WATCHDOG_FEED_PERIOD_MS 100U
+#define APP_WATCHDOG_SENSOR_STARTUP_MS 5000U
+#define APP_WATCHDOG_RENDER_TIMEOUT_MS 5000U
+
+/* sensor 单写、LVGL 单读；Cortex-M4 对齐的 32 位访问不会撕裂，不共享复合快照。 */
+static volatile uint32_t app_sensor_watchdog_progress;
+/* UI单写；Cortex-M4对齐32位读写保持这两个状态的一致快照。 */
+static volatile uint32_t s_power_state;
+
+void app_task_set_power_state(uint8_t idle, uint8_t motion)
+{
+    uint32_t state = 0;
+    if (idle != 0)
+    {
+        state |= APP_POWER_IDLE;
+    }
+    if (motion != 0)
+    {
+        state |= APP_POWER_MOTION;
+    }
+    s_power_state = state;
+}
+static struct
+{
+    uint32_t started_ms;
+    uint32_t render_started_ms;
+    uint32_t last_feed_ms;
+    uint32_t last_sensor_progress;
+    uint8_t sensor_started;
+} app_watchdog;
 
 /**********************
  *  STATIC PROTOTYPES
  **********************/
 static void app_lvgl_task(void *pvParameters);
 static void app_sensor_task(void *pvParameters);
+static void app_touch_task(void *pvParameters);
+static void app_watchdog_begin(void);
+static void app_watchdog_service(void);
+static void app_watchdog_render_progress(void);
 
 /**********************
  *   GLOBAL FUNCTIONS
  **********************/
+/* 独立于HAL tick和主时钟启动；最大分频/重装在LSI=17~47kHz时约22.3~61.7s。
+ * 不在ISR或独立定时器喂狗；外部TPS3823启用后，两只狗共用任务进度条件。 */
+void app_boot_watchdog_start(void)
+{
+    WRITE_REG(IWDG->KR, 0xCCCCU);
+    WRITE_REG(IWDG->KR, 0x5555U);
+    WRITE_REG(IWDG->PR, 6U); /* 256分频。 */
+    WRITE_REG(IWDG->RLR, 0x0FFFU);
+    while (IWDG->SR != 0U)
+    {
+        /* 配置无法同步时也不刷新，已启动的IWDG负责复位。 */
+    }
+    WRITE_REG(IWDG->KR, 0xAAAAU);
+}
+
 void App_Task_Create(void)
 {
+    tps3823_init();
     if (xTaskCreate(app_lvgl_task, "lvgl", APP_LVGL_TASK_STK, NULL, APP_LVGL_TASK_PRIO, NULL) != pdPASS)
     {
         Error_Handler(); /* FreeRTOS 堆不足 */
@@ -67,25 +125,89 @@ void App_Task_Start(void)
     } /* 调度器异常返回时死守 */
 }
 
+/* 仅IDLE任务执行：CPU空闲时Sleep；SysTick/UART/DMA中断唤醒，喂狗仍由任务进度决定。 */
+void vApplicationIdleHook(void)
+{
+    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+}
+
 /**********************
  *   STATIC FUNCTIONS
  **********************/
+static void app_watchdog_begin(void)
+{
+    tps3823_enable();
+    app_watchdog.started_ms = HAL_GetTick();
+    app_watchdog.last_feed_ms = app_watchdog.started_ms;
+}
+
+static void app_watchdog_service(void)
+{
+    uint32_t now_ms = HAL_GetTick();
+    uint32_t progress = app_sensor_watchdog_progress;
+
+    if (app_watchdog.sensor_started == 0)
+    {
+        if (progress != 0)
+        {
+            app_watchdog.sensor_started = 1;
+        }
+        else if ((uint32_t)(now_ms - app_watchdog.started_ms) >= APP_WATCHDOG_SENSOR_STARTUP_MS)
+        {
+            return;
+        }
+    }
+    if (app_watchdog.sensor_started != 0 && progress == app_watchdog.last_sensor_progress)
+    {
+        return;
+    }
+    if ((uint32_t)(now_ms - app_watchdog.last_feed_ms) >= APP_WATCHDOG_FEED_PERIOD_MS)
+    {
+        tps3823_feed();
+        WRITE_REG(IWDG->KR, 0xAAAAU);
+        app_watchdog.last_sensor_progress = progress;
+        app_watchdog.last_feed_ms = now_ms;
+    }
+}
+
+static void app_watchdog_render_progress(void)
+{
+    if ((uint32_t)(HAL_GetTick() - app_watchdog.render_started_ms) >= APP_WATCHDOG_RENDER_TIMEOUT_MS)
+    {
+        return;
+    }
+    /* DMA可能已在渲染期间完成；阻塞一拍，让低优先级sensor推进后再检查喂狗。 */
+    vTaskDelay(1U);
+    app_watchdog_service();
+}
+
 /* LVGL 测试任务: 屏幕+触摸测试 UI 全部跑在本任务栈上 */
 static void app_lvgl_task(void *pvParameters)
 {
     HAL_StatusTypeDef status;
     uint8_t rtc_finished = 0;
     uint8_t bt_finished = 0;
+    uint32_t period_ms;
     (void)pvParameters;
 
     /* 硬件拉起 + LVGL 注册 + 建测试界面, 在本任务上下文一次性完成 */
     App_Display_Init();
+    /* 首帧按新分块推进喂狗，卡在同一分块时不喂；总宽限仍限制为5s。 */
+    app_watchdog_begin();
+    lv_port_disp_set_progress_callback(app_watchdog_service);
     lv_refr_now(NULL); /* 先提交首帧；DMA完成中断继续工作，不等待其他模块。 */
+    lv_port_disp_set_progress_callback(app_watchdog_render_progress);
+    /* 首帧渲染时间不占用sensor初始化的5s窗口；进入主循环后恢复双任务检查。 */
+    app_watchdog.started_ms = HAL_GetTick();
     app_diag_boot_set(APP_BOOT_FIRST_FRAME_MS, HAL_GetTick());
 
     if (xTaskCreate(app_sensor_task, "sensor", APP_SENSOR_TASK_STK, NULL, APP_SENSOR_TASK_PRIO, NULL) != pdPASS)
     {
         Error_Handler(); /* FreeRTOS 堆不足 */
+    }
+    if (xTaskCreate(app_touch_task, "touch", APP_TOUCH_STACK_WORDS, NULL, APP_TOUCH_TASK_PRIO, NULL) != pdPASS)
+    {
+        Error_Handler();
     }
 
     /* 两种启动等待由本任务分阶段推进，sensor可在等待期间独立初始化/采集。 */
@@ -117,16 +239,48 @@ static void app_lvgl_task(void *pvParameters)
                 app_diag_boot_set(APP_BOOT_BT_RESULT, (uint32_t)status);
             }
         }
+        app_watchdog.render_started_ms = HAL_GetTick();
         App_Display_Service(); /* 锁 → lv_timer_handler → 解锁 */
         app_diag_service();
-        app_diag_task_end(APP_DIAG_LVGL, APP_LVGL_TASK_PERIOD);
-        vTaskDelay(pdMS_TO_TICKS(APP_LVGL_TASK_PERIOD));
+        period_ms = APP_LVGL_TASK_PERIOD;
+        if ((s_power_state & APP_POWER_IDLE) != 0)
+        {
+            period_ms = APP_IDLE_POLL_MS;
+        }
+        app_diag_task_end(APP_DIAG_LVGL, period_ms);
+        app_watchdog_service();
+        vTaskDelay(pdMS_TO_TICKS(period_ms));
+    }
+}
+
+/* 触摸总线由低优先级任务独占；初始化/恢复等待不会阻塞LVGL。 */
+static void app_touch_task(void *pvParameters)
+{
+    TickType_t last_wake;
+    uint32_t period_ms;
+    (void)pvParameters;
+
+    app_touch_init();
+    last_wake = xTaskGetTickCount();
+    for (;;)
+    {
+        app_touch_service();
+        period_ms = APP_TOUCH_PERIOD_MS;
+        if ((s_power_state & APP_POWER_IDLE) != 0)
+        {
+            period_ms = APP_IDLE_POLL_MS;
+        }
+        if ((TickType_t)(xTaskGetTickCount() - last_wake) >= pdMS_TO_TICKS(period_ms))
+        {
+            last_wake = xTaskGetTickCount(); /* 超时不连续补跑旧轮询。 */
+        }
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(period_ms));
     }
 }
 
 /* 传感器采样任务: SENSOR 总线 (PB13/PB14) 唯一 owner, MPU6050+SPL006+LSM303DLHC+EM7028+AHT21
  * 都只在本任务读写 —— 与 flight 端 flight_task 独占 I2C1 的约定同构。
- * 低频器件不新建任务, 用static计数器在本任务内分频 (气压250ms)。
+ * 低频器件不新建任务，按墙钟错峰；EEPROM每轮至多一笔短事务。
  * EXTI 只记标志；GPIOB 的方向寄存器 RMW 保留短 PRIMASK 临界区。 */
 static void app_sensor_task(void *pvParameters)
 {
@@ -136,6 +290,10 @@ static void app_sensor_task(void *pvParameters)
     app_imu_store_result store_result;
     uint16_t cal_stable, cal_frames;
     uint8_t cal_finished = 0;
+    uint8_t imu_saving = 0, mag_saving = 0;
+    uint32_t baro_ms, battery_ms, now_ms;
+    uint32_t period_ms = APP_SENSOR_TASK_PERIOD;
+    app_heart_struct heart;
 
     (void)pvParameters;
     app_diag_boot_set(APP_BOOT_SENSOR_BEGIN_MS, HAL_GetTick());
@@ -153,7 +311,7 @@ static void app_sensor_task(void *pvParameters)
     App_Baro_Init();
     app_heart_init();
     app_battery_init();
-    app_battery_service(); /* 首次电池读数在零偏校准等待前发布。 */
+    app_battery_service(); /* 零偏校准前启动采样；后续按秒完成电池启动均值。 */
 
     app_aht21_init();
     app_diag_boot_set(APP_BOOT_SENSOR_READY_MS, HAL_GetTick());
@@ -173,14 +331,18 @@ static void app_sensor_task(void *pvParameters)
         app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_WAIT_STILL);
     }
     xLastWakeTime = xTaskGetTickCount();
+    battery_ms = HAL_GetTick();
+    baro_ms = battery_ms - 500U; /* 气压先在半秒点读取，电池在整秒点读取。 */
     app_diag_boot_set(APP_BOOT_SAMPLING_BEGIN_MS, HAL_GetTick());
 
     for (;;)
     {
-        static uint8_t baro_cnt = 0;
-
         app_diag_task_begin(APP_DIAG_SENSOR_TASK);
-        if (app_diag_take_imu_calibration() != 0)
+        /* 非阻塞恢复：每个器件每拍至多推进一笔事务，失败冷却期间仍完成其他服务。 */
+        app_diag_sensor_recovery(APP_DIAG_MPU, my_mpu6050_recover_step(HAL_GetTick()));
+        app_diag_sensor_recovery(APP_DIAG_BARO, spl006_recover_step(HAL_GetTick()));
+        app_diag_sensor_recovery(APP_DIAG_MAG, lsm303dlhc_mag_recover_step(HAL_GetTick()));
+        if (imu_saving == 0 && app_diag_take_imu_calibration() != 0)
         {
             cal_finished = 0;
             app_diag_imu_save_record(APP_IMU_SAVE_NONE, 0, UINT32_MAX, UINT32_MAX);
@@ -189,6 +351,13 @@ static void app_sensor_task(void *pvParameters)
             app_diag_boot_set(APP_BOOT_CAL_END_MS, UINT32_MAX);
             app_diag_boot_set(APP_BOOT_CAL_RESULT, UINT32_MAX);
         }
+        app_heart_get_snapshot(&heart);
+        period_ms = APP_SENSOR_IDLE_PERIOD_MS;
+        if (cal_finished == 0 || heart.enabled != 0 || (s_power_state & APP_POWER_MOTION) != 0 || imu_saving != 0 || mag_saving != 0)
+        {
+            period_ms = APP_SENSOR_TASK_PERIOD;
+        }
+        period_ms = app_imu_set_sample_period(period_ms);
         App_IMU_Service();
         if (cal_finished == 0)
         {
@@ -204,14 +373,7 @@ static void app_sensor_task(void *pvParameters)
                 if (cal_state == MPU6050_CAL_DONE)
                 {
                     my_mpu6050_get_offset(&offset);
-                    if (app_imu_store_save(&offset) == APP_IMU_STORE_OK)
-                    {
-                        app_diag_boot_set(APP_BOOT_CAL_RESULT, 0);
-                    }
-                    else
-                    {
-                        app_diag_boot_set(APP_BOOT_CAL_RESULT, 2); /* RAM校准成功，掉电保存失败。 */
-                    }
+                    imu_saving = 1; /* 已提交RAM偏移，EEPROM在后续各拍推进。 */
                 }
                 else
                 {
@@ -220,20 +382,54 @@ static void app_sensor_task(void *pvParameters)
             }
         }
         app_heart_service();
-        app_aht21_service();
-        app_battery_service();
-        if (++baro_cnt >= APP_SENSOR_BARO_DIV) /* 每25拍轮询一次气压 */
+        now_ms = HAL_GetTick();
+        if ((uint32_t)(now_ms - baro_ms) >= 1000U)
         {
+            baro_ms = now_ms;
             App_Baro_Service();
-            baro_cnt = 0;
         }
-        app_diag_task_end(APP_DIAG_SENSOR_TASK, APP_SENSOR_TASK_PERIOD);
-        /* 校准保存会等待EEPROM写周期；错过周期后重新计时，避免连续补跑旧帧。 */
-        if ((TickType_t)(xTaskGetTickCount() - xLastWakeTime) > pdMS_TO_TICKS(APP_SENSOR_TASK_PERIOD))
+        else if ((uint32_t)(now_ms - battery_ms) >= 1000U)
+        {
+            battery_ms = now_ms;
+            app_battery_service();
+        }
+        else
+        {
+            app_aht21_service(); /* 转换等待仍分步检查，避开气压/电池读取轮次。 */
+        }
+        if (imu_saving == 1 && mag_saving == 0)
+        {
+            store_result = app_imu_store_save_begin(&offset);
+            imu_saving = 2;
+        }
+        if (imu_saving == 2)
+        {
+            store_result = app_imu_store_save_step();
+            if (store_result != APP_IMU_STORE_BUSY)
+            {
+                imu_saving = 0;
+                if (store_result == APP_IMU_STORE_OK)
+                {
+                    app_diag_boot_set(APP_BOOT_CAL_RESULT, 0);
+                }
+                else
+                {
+                    app_diag_boot_set(APP_BOOT_CAL_RESULT, 2); /* RAM成功，掉电保存失败。 */
+                }
+            }
+        }
+        else
+        {
+            mag_saving = App_IMU_SaveService();
+        }
+        app_diag_task_end(APP_DIAG_SENSOR_TASK, period_ms);
+        ++app_sensor_watchdog_progress;
+        /* 被显示抢占或事务超期后重新计时，避免连续补跑旧轮询。 */
+        if ((TickType_t)(xTaskGetTickCount() - xLastWakeTime) > pdMS_TO_TICKS(period_ms))
         {
             xLastWakeTime = xTaskGetTickCount();
         }
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(APP_SENSOR_TASK_PERIOD));
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(period_ms));
     }
 }
 

@@ -1,5 +1,7 @@
 # ---- Keil MDK 构建产物 ----
 MDK-ARM/f411ceu6/
+MDK-ARM/f411ceu6_upgrade_app/
+MDK-ARM/bootloader/
 MDK-ARM/Objects/
 MDK-ARM/Listings/
 MDK-ARM/_f411ceu6/

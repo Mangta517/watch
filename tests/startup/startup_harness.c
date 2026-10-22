@@ -1,4 +1,7 @@
 /* 执行真实任务入口，模拟等待期间sensor获得调度，验证首帧和采集不等RTC/蓝牙。 */
+#include <stdint.h>
+static void startup_write_reg(uint32_t *reg, uint32_t value);
+#define WRITE_REG(reg, value)         startup_write_reg(&(reg), (value))
 #define app_diag_boot_set startup_boot_set
 #define app_diag_take_imu_calibration startup_take_imu_calibration
 #include "../../application/app_task.c"
@@ -7,11 +10,20 @@
 #include <stdio.h>
 #include <string.h>
 
-static TaskFunction_t entries[2];
+IWDG_TypeDef host_iwdg;
+static TaskFunction_t entries[3];
+static jmp_buf touch_stop;
+static unsigned int touch_inits, touch_samples;
+static uint32_t touch_work_ms;
 static unsigned int task_count, fail_task;
 static uint8_t fail_devices, displayed, frame, rtc_done, ble_done, sensor_ran;
 static unsigned int hardware_count, service_count, battery_samples;
-static unsigned int cal_begins, restores, saves, sensor_rounds;
+static unsigned int cal_begins, restores, saves, sensor_rounds, recovery_steps;
+static unsigned int baro_calls;
+static uint32_t sensor_elapsed_ms;
+static uint8_t low_rate_mask;
+static uint8_t baro_cadence;
+static uint8_t power_profile, heart_enabled;
 static uint8_t restored_mode, load_error, save_error, manual_request, complete_cal, fail_cal;
 static mpu6050_cal_state mock_cal_state;
 static const mpu6050_offset_struct stored_offset = {{20, -10, 30}, {66, -33, 99}};
@@ -35,15 +47,23 @@ app_imu_store_result app_imu_store_load(mpu6050_offset_struct *offset)
     }
     return APP_IMU_STORE_EMPTY;
 }
-app_imu_store_result app_imu_store_save(const mpu6050_offset_struct *offset)
+app_imu_store_result app_imu_store_save_begin(const mpu6050_offset_struct *offset)
 {
     assert(memcmp(offset, &stored_offset, sizeof(*offset)) == 0);
     ++saves;
+    return APP_IMU_STORE_BUSY;
+}
+app_imu_store_result app_imu_store_save_step(void)
+{
     if (save_error != 0)
     {
         return APP_IMU_STORE_ERROR;
     }
     return APP_IMU_STORE_OK;
+}
+uint8_t App_IMU_SaveService(void)
+{
+    return 0;
 }
 void my_mpu6050_restore_offset(const mpu6050_offset_struct *offset)
 {
@@ -57,7 +77,134 @@ void my_mpu6050_get_offset(mpu6050_offset_struct *offset)
 }
 static uint32_t milestones[APP_BOOT_FIELD_COUNT];
 static TickType_t tick;
+static TickType_t rtc_begin_tick, ble_begin_tick;
 static jmp_buf stop, sensor_stop;
+static unsigned int watchdog_inits, watchdog_enables, watchdog_feeds;
+static unsigned int idle_sleep_calls;
+static unsigned int iwdg_config_writes, iwdg_feeds;
+static uint32_t watchdog_enable_delay;
+static uint8_t first_frame_stall;
+static uint8_t first_frame_slow, first_frame_deadline;
+static uint32_t first_frame_chunk_ms = 150U;
+static unsigned int first_frame_chunks = 10U;
+static void (*display_progress_callback)(void);
+static uint32_t watchdog_last_falling_ms;
+static uint8_t runtime_render, runtime_sensor_stalled;
+static uint32_t runtime_chunk_ms = 150U;
+static unsigned int runtime_chunks = 10U, render_yields;
+
+static void startup_write_reg(uint32_t *reg, uint32_t value)
+{
+    if (reg == &host_iwdg.KR && value == 0xAAAAU)
+    {
+        assert(iwdg_config_writes == 4U && iwdg_feeds == watchdog_feeds);
+        ++iwdg_feeds;
+    }
+    else
+    {
+        const uint32_t values[] = {0xCCCCU, 0x5555U, 6U, 0x0FFFU};
+        uint32_t *registers[] = {&host_iwdg.KR, &host_iwdg.KR, &host_iwdg.PR, &host_iwdg.RLR};
+        assert(iwdg_config_writes < 4U && reg == registers[iwdg_config_writes]);
+        assert(value == values[iwdg_config_writes]);
+        ++iwdg_config_writes;
+    }
+    *reg = value;
+}
+
+void tps3823_init(void)
+{
+    ++watchdog_inits;
+}
+void tps3823_enable(void)
+{
+    assert(displayed && !frame && app_sensor_watchdog_progress == 0);
+    ++watchdog_enables;
+    tick += watchdog_enable_delay;
+    watchdog_last_falling_ms = tick;
+}
+void tps3823_feed(void)
+{
+    assert(watchdog_enables == 1);
+    if (runtime_render != 0)
+    {
+        /* 在喂狗前检查，不能让一个迟到的脉冲掩盖已经跨过的硬件超时。 */
+        assert((uint32_t)(tick - watchdog_last_falling_ms) < 900U);
+    }
+    ++watchdog_feeds;
+    watchdog_last_falling_ms = tick;
+}
+
+static void test_watchdog_progress(uint8_t wrap)
+{
+    displayed = 1;
+    watchdog_enable_delay = 302;
+    tick = 1000;
+    if (wrap != 0)
+    {
+        tick = UINT32_MAX - 350U;
+    }
+    app_watchdog_begin();
+    assert(watchdog_enables == 1 && watchdog_feeds == 0);
+    tick += 100;
+    app_watchdog_service();
+    assert(watchdog_feeds == 1);
+    ++app_sensor_watchdog_progress;
+    app_watchdog_service();
+    assert(watchdog_feeds == 1);
+    tick += 99;
+    ++app_sensor_watchdog_progress;
+    app_watchdog_service();
+    assert(watchdog_feeds == 1);
+    ++tick;
+    app_watchdog_service();
+    assert(watchdog_feeds == 2);
+    /* sensor 卡住时，即使 LVGL 继续执行，也不再喂狗。 */
+    tick += 2000;
+    app_watchdog_service();
+    assert(watchdog_feeds == 2);
+    ++app_sensor_watchdog_progress;
+    app_watchdog_service();
+    assert(watchdog_feeds == 3);
+    /* LVGL 卡住时，sensor 的计数更新本身不会触发喂狗。 */
+    tick += 2000;
+    ++app_sensor_watchdog_progress;
+    assert(watchdog_feeds == 3);
+    app_sensor_watchdog_progress = UINT32_MAX;
+    app_watchdog_service();
+    ++app_sensor_watchdog_progress;
+    tick += 100;
+    app_watchdog_service();
+    assert(watchdog_feeds == 5 && app_watchdog.sensor_started != 0);
+    tick += 100;
+    app_watchdog_service();
+    assert(watchdog_feeds == 5);
+    puts("Watchdog: protection before first frame, 100ms cadence, task stalls and tick/progress wrap: PASS");
+}
+
+static void test_watchdog_startup(uint8_t wrap)
+{
+    unsigned int i;
+    displayed = 1;
+    tick = 1000;
+    if (wrap != 0)
+    {
+        tick = UINT32_MAX - 350U;
+    }
+    app_watchdog_begin();
+    for (i = 0; i < 49U; ++i)
+    {
+        tick += 100U;
+        app_watchdog_service();
+    }
+    assert(watchdog_enables == 1 && watchdog_feeds == 49U);
+    for (i = 0; i < 51U; ++i)
+    {
+        tick += 100U;
+        app_watchdog_service();
+    }
+    assert(watchdog_feeds == 49U && app_watchdog.sensor_started == 0);
+    puts("Watchdog: sensor startup may progress for 5s, then missing first round stops feeding, including tick wrap: PASS");
+}
 
 void startup_boot_set(uint8_t field, uint32_t value)
 {
@@ -69,15 +216,20 @@ uint32_t HAL_GetTick(void)
 }
 BaseType_t xTaskCreate(TaskFunction_t entry, const char *name, uint16_t stack, void *arg, UBaseType_t priority, TaskHandle_t *handle)
 {
-    assert(arg == NULL && handle == NULL && task_count < 2);
+    assert(arg == NULL && handle == NULL && task_count < 3);
     if (task_count == 0)
     {
         assert(strcmp(name, "lvgl") == 0 && stack == 1024 && priority == 3);
         assert(!displayed && hardware_count == 0);
     }
-    else
+    else if (task_count == 1)
     {
         assert(strcmp(name, "sensor") == 0 && stack == 512 && priority == 2);
+        assert(frame && !rtc_done && !ble_done && hardware_count == 0);
+    }
+    else
+    {
+        assert(strcmp(name, "touch") == 0 && stack == 256 && priority == 1);
         assert(frame && !rtc_done && !ble_done && hardware_count == 0);
     }
     if (fail_task == task_count + 1)
@@ -108,8 +260,16 @@ TickType_t xTaskGetTickCount(void)
 }
 void vTaskDelay(TickType_t ticks)
 {
-    assert(ticks == 5 && task_count == 2);
+    unsigned int feeds = watchdog_feeds;
+    unsigned int internal_feeds = iwdg_feeds;
+    assert((ticks == 5 || ticks == 1 || (power_profile != 0 && (s_power_state & APP_POWER_IDLE) != 0 && ticks == 20U)) && task_count == 3);
+    vApplicationIdleHook(); /* 模拟任务阻塞后的空闲窗口，休眠不能替代进度喂狗。 */
+    assert(idle_sleep_calls != 0 && watchdog_feeds == feeds && iwdg_feeds == internal_feeds);
     tick += ticks;
+    if (ticks == 1)
+    {
+        ++render_yields;
+    }
     if (sensor_ran == 0)
     {
         assert(!rtc_done && !ble_done && service_count == 1);
@@ -119,19 +279,61 @@ void vTaskDelay(TickType_t ticks)
             entries[1](NULL);
             assert(0);
         }
+        if (baro_cadence != 0)
+        {
+            longjmp(stop, 5);
+        }
+        if (setjmp(touch_stop) == 0)
+        {
+            entries[2](NULL);
+            assert(0);
+        }
+    }
+    else if (runtime_render != 0 && runtime_sensor_stalled == 0)
+    {
+        ++app_sensor_watchdog_progress;
     }
     if (rtc_done && ble_done)
     {
         longjmp(stop, 1);
     }
 }
+void HAL_PWR_EnterSLEEPMode(uint32_t regulator, uint8_t entry)
+{
+    assert(regulator == PWR_MAINREGULATOR_ON && entry == PWR_SLEEPENTRY_WFI);
+    ++idle_sleep_calls;
+}
 void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
 {
-    assert(last != NULL && ticks == MPU6050_SAMPLE_PERIOD_MS);
-    assert(hardware_count == 5 && battery_samples == sensor_rounds + 2);
+    if (touch_inits != 0)
+    {
+        uint32_t expected = APP_TOUCH_PERIOD_MS;
+        if ((s_power_state & APP_POWER_IDLE) != 0)
+        {
+            expected = APP_IDLE_POLL_MS;
+        }
+        assert(ticks == expected);
+        assert(last != NULL && touch_inits == 1 && touch_samples == 1);
+        if (touch_work_ms >= APP_TOUCH_PERIOD_MS)
+        {
+            assert(*last == tick); /* 读取超期后不补跑。 */
+        }
+        else
+        {
+            assert(*last == tick - touch_work_ms);
+        }
+        longjmp(touch_stop, 1);
+    }
+    assert(last != NULL && (ticks == APP_SENSOR_TASK_PERIOD || ticks == APP_SENSOR_IDLE_PERIOD_MS));
+    assert(hardware_count == 5 && battery_samples == 1U + sensor_elapsed_ms / 1000U);
+    assert(low_rate_mask == 1U || low_rate_mask == 2U || low_rate_mask == 4U);
+    low_rate_mask = 0;
     assert(!rtc_done && !ble_done);
     ++sensor_rounds;
-    if (sensor_rounds < 2)
+    sensor_elapsed_ms += ticks;
+    assert(recovery_steps == sensor_rounds * 3U);
+    assert(app_sensor_watchdog_progress == sensor_rounds);
+    if (sensor_rounds < 2 || (baro_cadence != 0 && sensor_rounds < 150))
     {
         tick += ticks;
         *last = tick;
@@ -147,17 +349,100 @@ void App_Display_Init(void)
 }
 void lv_refr_now(void *display)
 {
+    unsigned int i, feeds;
     assert(display == NULL && displayed && !rtc_done && !ble_done);
+    assert(watchdog_enables == 1 && app_sensor_watchdog_progress == 0);
+    assert(display_progress_callback != NULL);
+    if (first_frame_stall != 0)
+    {
+        tick += 5000U;
+        assert(watchdog_feeds == 0 && task_count == 1);
+        longjmp(stop, 3);
+    }
+    if (first_frame_slow != 0 || first_frame_deadline != 0)
+    {
+        for (i = 0; i < first_frame_chunks; ++i)
+        {
+            tick += first_frame_chunk_ms; /* 模拟长首帧，按最短900ms检查有效下降沿间隔。 */
+            assert((uint32_t)(tick - watchdog_last_falling_ms) < 900U);
+            display_progress_callback();
+        }
+        if (first_frame_deadline != 0)
+        {
+            tick += 3500U;
+            feeds = watchdog_feeds;
+            display_progress_callback();
+            tick += 100U;
+            display_progress_callback();
+            assert(watchdog_feeds == feeds && !frame);
+            longjmp(stop, 4);
+        }
+    }
     frame = 1;
+}
+void lv_port_disp_set_progress_callback(void (*callback)(void))
+{
+    display_progress_callback = callback;
 }
 void App_Display_Service(void)
 {
+    unsigned int i, feeds, yields_before;
+    TickType_t callback_tick;
     assert(frame);
     ++service_count;
+    if (runtime_render != 0)
+    {
+        if (service_count == 2U && runtime_render == 2U)
+        {
+            runtime_sensor_stalled = 1;
+        }
+        if (service_count == 2U && runtime_render == 3U)
+        {
+            runtime_chunks = 40U;
+        }
+        feeds = watchdog_feeds;
+        for (i = 0; i < runtime_chunks; ++i)
+        {
+            tick += runtime_chunk_ms; /* DMA已完成，模拟CPU持续渲染，不走DMA等待。 */
+            yields_before = render_yields;
+            callback_tick = tick;
+            if (display_progress_callback != NULL)
+            {
+                display_progress_callback();
+            }
+            /* 有效分块必须让出一次CPU；超过5s预算后不延时也不再喂狗。 */
+            if ((uint32_t)(callback_tick - app_watchdog.render_started_ms) < APP_WATCHDOG_RENDER_TIMEOUT_MS)
+            {
+                assert(render_yields == yields_before + 1U);
+            }
+            else
+            {
+                assert(render_yields == yields_before);
+            }
+            if (service_count == 1U || runtime_render == 1U)
+            {
+                assert((uint32_t)(tick - watchdog_last_falling_ms) < 900U);
+            }
+        }
+        if (service_count == 2U)
+        {
+            assert(sensor_ran && render_yields != 0 && app_watchdog.sensor_started != 0);
+            if (runtime_render == 1U)
+            {
+                assert(watchdog_feeds > feeds);
+            }
+            else
+            {
+                assert((uint32_t)(tick - watchdog_last_falling_ms) >= 900U);
+            }
+            longjmp(stop, 5);
+        }
+    }
 }
 void watch_rtc_init_begin(void)
 {
-    assert(frame && task_count == 2);
+    assert(frame && task_count == 3);
+    rtc_begin_tick = tick;
 }
 uint8_t watch_rtc_init_is_pending(void)
 {
@@ -165,7 +450,7 @@ uint8_t watch_rtc_init_is_pending(void)
 }
 HAL_StatusTypeDef watch_rtc_init_service(void)
 {
-    if (tick < 5650)
+    if ((uint32_t)(tick - rtc_begin_tick) < 5000U)
     {
         return HAL_BUSY;
     }
@@ -178,7 +463,8 @@ HAL_StatusTypeDef watch_rtc_init_service(void)
 }
 void kt6368a_init_begin(void)
 {
-    assert(frame && task_count == 2);
+    assert(frame && task_count == 3);
+    ble_begin_tick = tick;
 }
 uint8_t kt6368a_init_is_pending(void)
 {
@@ -186,7 +472,7 @@ uint8_t kt6368a_init_is_pending(void)
 }
 HAL_StatusTypeDef kt6368a_init_service(void)
 {
-    if (tick < 2350)
+    if ((uint32_t)(tick - ble_begin_tick) < 1700U)
     {
         return HAL_BUSY;
     }
@@ -244,6 +530,12 @@ void app_battery_init(void)
 }
 void app_battery_service(void)
 {
+    if (battery_samples != 0)
+    {
+        assert(low_rate_mask == 0);
+        low_rate_mask |= 1U;
+        assert(sensor_elapsed_ms == battery_samples * 1000U);
+    }
     ++battery_samples;
 }
 void my_mpu6050_zero_offset_begin(uint32_t now)
@@ -277,9 +569,33 @@ void App_IMU_Service(void)
         mock_cal_state = MPU6050_CAL_FAILED;
     }
 }
+uint32_t app_imu_set_sample_period(uint32_t period_ms)
+{
+    assert(period_ms == 20U || period_ms == 40U);
+    if (power_profile != 0)
+    {
+        uint32_t expected = 40U;
+        if (restored_mode == 0 || heart_enabled != 0 || (s_power_state & APP_POWER_MOTION) != 0)
+        {
+            expected = 20U;
+        }
+        assert(period_ms == expected);
+    }
+    return period_ms;
+}
+void app_heart_get_snapshot(app_heart_struct *heart)
+{
+    memset(heart, 0, sizeof(*heart));
+    heart->enabled = heart_enabled;
+}
 void App_Baro_Service(void)
 {
     assert(hardware_count == 5);
+    assert(low_rate_mask == 0);
+    low_rate_mask |= 2U;
+    ++baro_calls;
+    assert(sensor_elapsed_ms >= 500U + (baro_calls - 1U) * 1000U);
+    assert(sensor_elapsed_ms < 540U + (baro_calls - 1U) * 1000U);
 }
 void app_heart_service(void)
 {
@@ -288,14 +604,76 @@ void app_heart_service(void)
 void app_aht21_service(void)
 {
     assert(hardware_count == 5 && !rtc_done && !ble_done);
+    assert(low_rate_mask == 0);
+    low_rate_mask |= 4U;
+}
+void app_touch_init(void)
+{
+    assert(frame && sensor_ran && hardware_count == 5);
+    ++touch_inits;
+}
+void app_touch_service(void)
+{
+    assert(touch_inits == 1);
+    ++touch_samples;
+    tick += touch_work_ms;
 }
 int main(int argc, char **argv)
 {
     int result;
+    app_boot_watchdog_start();
+    assert(host_iwdg.PR == 6U && host_iwdg.RLR == 0x0FFFU && iwdg_feeds == 1U);
+    if (argc > 1 && (strcmp(argv[1], "watchdog_progress") == 0 || strcmp(argv[1], "watchdog_wrap") == 0))
+    {
+        test_watchdog_progress((uint8_t)(strcmp(argv[1], "watchdog_wrap") == 0));
+        return 0;
+    }
+    if (argc > 1 && (strcmp(argv[1], "watchdog_startup") == 0 || strcmp(argv[1], "watchdog_startup_wrap") == 0))
+    {
+        test_watchdog_startup((uint8_t)(strcmp(argv[1], "watchdog_startup_wrap") == 0));
+        return 0;
+    }
     if (argc > 1)
     {
+        baro_cadence = strcmp(argv[1], "baro_cadence") == 0;
+        if (strcmp(argv[1], "touch_overrun") == 0)
+        {
+            touch_work_ms = 12U;
+        }
+        if (strcmp(argv[1], "runtime_slow") == 0 || strcmp(argv[1], "runtime_sparse") == 0)
+        {
+            runtime_render = 1;
+        }
+        else if (strcmp(argv[1], "runtime_sensor_stalled") == 0)
+        {
+            runtime_render = 2;
+        }
+        else if (strcmp(argv[1], "runtime_deadline") == 0)
+        {
+            runtime_render = 3;
+        }
+        if (strcmp(argv[1], "runtime_sparse") == 0)
+        {
+            runtime_chunk_ms = 500U;
+            runtime_chunks = 6U;
+        }
+        first_frame_stall = strcmp(argv[1], "first_frame_stall") == 0;
+        first_frame_slow = strcmp(argv[1], "first_frame_slow") == 0 || strcmp(argv[1], "first_frame_sparse") == 0;
+        if (strcmp(argv[1], "first_frame_sparse") == 0)
+        {
+            first_frame_chunk_ms = 500U;
+            first_frame_chunks = 6U;
+        }
+        first_frame_deadline = strcmp(argv[1], "first_frame_deadline") == 0;
         fail_devices = strcmp(argv[1], "devices_failed") == 0;
-        restored_mode = strcmp(argv[1], "restored") == 0 || strcmp(argv[1], "manual_cal") == 0;
+        power_profile = strncmp(argv[1], "power_", 6) == 0;
+        heart_enabled = strcmp(argv[1], "power_heart") == 0;
+        restored_mode = strcmp(argv[1], "restored") == 0 || strcmp(argv[1], "manual_cal") == 0 ||
+                        (power_profile != 0 && strcmp(argv[1], "power_calibration") != 0);
+        if (power_profile != 0)
+        {
+            app_task_set_power_state(strcmp(argv[1], "power_idle") == 0, strcmp(argv[1], "power_motion") == 0);
+        }
         load_error = strcmp(argv[1], "load_error") == 0;
         save_error = strcmp(argv[1], "save_error") == 0;
         manual_request = strcmp(argv[1], "manual_cal") == 0;
@@ -309,6 +687,10 @@ int main(int argc, char **argv)
         {
             fail_task = 2;
         }
+        else if (strcmp(argv[1], "touch_alloc_failed") == 0)
+        {
+            fail_task = 3;
+        }
     }
     result = setjmp(stop);
     if (result == 0)
@@ -317,19 +699,74 @@ int main(int argc, char **argv)
         App_Task_Start();
         assert(0);
     }
+    if (baro_cadence != 0)
+    {
+        assert(result == 5 && sensor_rounds == 150U && baro_calls == 3U);
+        assert(recovery_steps == 450U && app_sensor_watchdog_progress == 150U);
+        puts("Sensor cadence: 150 rounds at 20ms retain recovery/watchdog progress and 1Hz barometer polling: PASS");
+        return 0;
+    }
     if (fail_task != 0)
     {
+        assert(watchdog_inits == 1 && watchdog_enables == (fail_task >= 2) && watchdog_feeds == 0);
         assert(result == 2);
-        assert(frame == (fail_task == 2));
+        assert(frame == (fail_task >= 2));
         puts("Startup allocation failure: PASS");
         return 0;
     }
+    if (touch_work_ms != 0)
+    {
+        assert(result == 1 && touch_inits == 1 && touch_samples == 1);
+        puts("Touch task: priority 1, 1KB stack, post-first-frame startup, 5ms cadence and no catch-up after a slow read: PASS");
+        return 0;
+    }
+    if (runtime_render != 0)
+    {
+        assert(result == 5 && frame && watchdog_enables == 1);
+        puts("Watchdog: render chunks yield once for lower-priority sensor progress; feeds stay below 900ms; stalls and render deadline stop feeding: PASS");
+        return 0;
+    }
+    if (first_frame_stall != 0)
+    {
+        assert(result == 3 && watchdog_enables == 1 && watchdog_feeds == 0 && !frame);
+        puts("Startup: stalled first-frame refresh leaves watchdog enabled and never feeds: PASS");
+        return 0;
+    }
+    if (first_frame_deadline != 0)
+    {
+        assert(result == 4 && watchdog_enables == 1 && !frame);
+        puts("Startup: first-frame chunk progress cannot extend the 5s deadline indefinitely: PASS");
+        return 0;
+    }
+    if (power_profile != 0)
+    {
+        assert(result == 1 && frame && sensor_rounds == 2U && touch_samples == 1U);
+        assert(service_count > 200U && watchdog_enables == 1U);
+        assert(milestones[APP_BOOT_RTC_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 5000U);
+        assert(milestones[APP_BOOT_RTC_END_MS] <= milestones[APP_BOOT_FIRST_FRAME_MS] + 5020U);
+        printf("Power policy %s: dynamic sensor period, idle touch/display period and continuing RTC startup: PASS\n", argv[1]);
+        return 0;
+    }
     assert(result == 1 && frame && service_count > 900);
-    assert(hardware_count == 5 && battery_samples == 3 && sensor_ran);
-    assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650);
-    assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == 655);
-    assert(milestones[APP_BOOT_RTC_END_MS] == 5650);
-    assert(milestones[APP_BOOT_BT_END_MS] == 2350);
+    assert(watchdog_inits == 1 && watchdog_enables == 1);
+    assert(hardware_count == 5 && battery_samples == 1 && sensor_ran);
+    assert(touch_inits == 1 && touch_samples == 1 && task_count == 3);
+    if (first_frame_slow != 0)
+    {
+        assert(watchdog_feeds == first_frame_chunks + 1U);
+        assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650U + first_frame_chunks * first_frame_chunk_ms);
+        assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 5U);
+        assert(app_watchdog.started_ms == milestones[APP_BOOT_FIRST_FRAME_MS] && display_progress_callback != NULL);
+        puts("Startup: 1.5s/3s first frames maintain falling-edge intervals below 900ms; startup phases have separate deadlines: PASS");
+    }
+    else
+    {
+        assert(watchdog_feeds == 1);
+        assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650);
+        assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == 655);
+    }
+    assert(milestones[APP_BOOT_RTC_END_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 5000U);
+    assert(milestones[APP_BOOT_BT_END_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);
     if (complete_cal != 0)
     {
         assert(milestones[APP_BOOT_CAL_STATE] == MPU6050_CAL_DONE && saves == 1 && cal_begins == 1);
@@ -359,5 +796,36 @@ int main(int argc, char **argv)
         assert(milestones[APP_BOOT_RTC_RESULT] == HAL_TIMEOUT && milestones[APP_BOOT_BT_RESULT] == HAL_TIMEOUT);
     }
     puts("Startup: first frame, sensor sampling and UI service proceed during RTC/Bluetooth waits: PASS");
+    return 0;
+}
+
+uint8_t my_mpu6050_recover_step(uint32_t now_ms)
+{
+    assert(now_ms == tick);
+    ++recovery_steps;
+    if (fail_devices != 0)
+    {
+        return 2; /* Recovering devices must not stop sensor progress. */
+    }
+    return 0;
+}
+uint8_t spl006_recover_step(uint32_t now_ms)
+{
+    assert(now_ms == tick);
+    ++recovery_steps;
+    if (fail_devices != 0)
+    {
+        return 2; /* Recovering devices must not stop sensor progress. */
+    }
+    return 0;
+}
+uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
+{
+    assert(now_ms == tick);
+    ++recovery_steps;
+    if (fail_devices != 0)
+    {
+        return 2; /* Recovering devices must not stop sensor progress. */
+    }
     return 0;
 }

@@ -3,6 +3,9 @@
 #include "app_imu_store.h"
 #include "app_diag.h"
 #include "bl24c02.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "main.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -158,48 +161,107 @@ static app_imu_store_result imu_store_save_finish(app_imu_save_stage stage, uint
     return APP_IMU_STORE_ERROR;
 }
 
-app_imu_store_result app_imu_store_save(const mpu6050_offset_struct *offset)
+/* sensor串行推进；两份旧记录读完后才选择写入另一槽位。 */
+static struct
 {
+    bl24c02_transfer_struct io;
+    mpu6050_offset_struct value;
     uint8_t record[2][IMU_STORE_RECORD_BYTES], verify[IMU_STORE_RECORD_BYTES], valid[2];
-    uint8_t i, latest, target;
-    uint32_t sequence = 1;
-    uint32_t started_ms = HAL_GetTick();
+    uint32_t started_ms;
     uint16_t address;
-    mpu6050_offset_struct candidate;
+    uint8_t phase, target;
+    app_imu_store_result result;
+} s_save;
+
+app_imu_store_result app_imu_store_save_begin(const mpu6050_offset_struct *offset)
+{
+    if (s_save.result == APP_IMU_STORE_BUSY)
+    {
+        return APP_IMU_STORE_BUSY;
+    }
     if (offset == NULL)
     {
-        return imu_store_save_finish(APP_IMU_SAVE_ARGUMENT, started_ms, UINT32_MAX);
+        return imu_store_save_finish(APP_IMU_SAVE_ARGUMENT, HAL_GetTick(), UINT32_MAX);
     }
-    for (i = 0; i < 2; ++i)
+    s_save.value = *offset;
+    s_save.started_ms = HAL_GetTick();
+    s_save.phase = 0;
+    s_save.result = APP_IMU_STORE_BUSY;
+    bl24c02_transfer_begin(&s_save.io, IMU_STORE_BASE, s_save.record[0], IMU_STORE_RECORD_BYTES, 0);
+    return s_save.result;
+}
+
+app_imu_store_result app_imu_store_save_step(void)
+{
+    mpu6050_offset_struct candidate;
+    uint32_t sequence = 1;
+    uint8_t latest, result;
+    if (s_save.result != APP_IMU_STORE_BUSY)
     {
-        /* 保存前必须读到两个槽位，不能把通信失败误当作空槽而覆盖旧记录。 */
-        if (bl24c02_read(IMU_STORE_BASE + i * IMU_STORE_SLOT_BYTES, record[i], IMU_STORE_RECORD_BYTES) != 0)
+        return s_save.result;
+    }
+    result = bl24c02_transfer_step(&s_save.io);
+    if (result == 2U)
+    {
+        return APP_IMU_STORE_BUSY;
+    }
+    if (result != 0)
+    {
+        static const app_imu_save_stage failures[] = {APP_IMU_SAVE_READ_SLOT0, APP_IMU_SAVE_READ_SLOT1,
+                                                     APP_IMU_SAVE_WRITE, APP_IMU_SAVE_VERIFY_READ};
+        s_save.result = imu_store_save_finish(failures[s_save.phase], s_save.started_ms, s_save.io.address);
+        return s_save.result;
+    }
+    if (s_save.phase < 2U)
+    {
+        s_save.valid[s_save.phase] = imu_store_decode(s_save.record[s_save.phase], &candidate);
+        if (s_save.phase++ == 0)
         {
-            return imu_store_save_finish((app_imu_save_stage)(APP_IMU_SAVE_READ_SLOT0 + i), started_ms,
-                                         IMU_STORE_BASE + i * IMU_STORE_SLOT_BYTES);
+            bl24c02_transfer_begin(&s_save.io, IMU_STORE_BASE + IMU_STORE_SLOT_BYTES, s_save.record[1], IMU_STORE_RECORD_BYTES, 0);
+            return APP_IMU_STORE_BUSY;
         }
-        valid[i] = imu_store_decode(record[i], &candidate);
+        s_save.target = 0;
+        if (s_save.valid[0] || s_save.valid[1])
+        {
+            latest = imu_store_latest(s_save.record[0], s_save.record[1], s_save.valid);
+            sequence = imu_store_get_u32(s_save.record[latest] + 4) + 1U;
+            s_save.target = latest ^ 1U;
+        }
+        imu_store_encode(s_save.record[s_save.target], sequence, &s_save.value);
+        s_save.address = IMU_STORE_BASE + s_save.target * IMU_STORE_SLOT_BYTES;
+        bl24c02_transfer_begin(&s_save.io, s_save.address, s_save.record[s_save.target], IMU_STORE_RECORD_BYTES, 1);
     }
-    target = 0;
-    if (valid[0] || valid[1])
+    else if (s_save.phase == 2U)
     {
-        latest = imu_store_latest(record[0], record[1], valid);
-        sequence = imu_store_get_u32(record[latest] + 4) + 1U;
-        target = latest ^ 1U;
+        s_save.phase = 3;
+        bl24c02_transfer_begin(&s_save.io, s_save.address, s_save.verify, IMU_STORE_RECORD_BYTES, 0);
     }
-    imu_store_encode(record[target], sequence, offset);
-    address = IMU_STORE_BASE + target * IMU_STORE_SLOT_BYTES;
-    if (bl24c02_write(address, record[target], IMU_STORE_RECORD_BYTES) != 0)
+    else
     {
-        return imu_store_save_finish(APP_IMU_SAVE_WRITE, started_ms, address);
+        if (memcmp(s_save.verify, s_save.record[s_save.target], IMU_STORE_RECORD_BYTES) != 0 ||
+            !imu_store_decode(s_save.verify, &candidate))
+        {
+            s_save.result = imu_store_save_finish(APP_IMU_SAVE_VERIFY_DATA, s_save.started_ms, s_save.address);
+        }
+        else
+        {
+            s_save.result = imu_store_save_finish(APP_IMU_SAVE_DONE, s_save.started_ms, s_save.address);
+        }
     }
-    if (bl24c02_read(address, verify, IMU_STORE_RECORD_BYTES) != 0)
+    return s_save.result;
+}
+
+/* 旧调用方兼容入口；运行期保存只使用begin/step。 */
+app_imu_store_result app_imu_store_save(const mpu6050_offset_struct *offset)
+{
+    app_imu_store_result result = app_imu_store_save_begin(offset);
+    while (result == APP_IMU_STORE_BUSY)
     {
-        return imu_store_save_finish(APP_IMU_SAVE_VERIFY_READ, started_ms, address);
+        result = app_imu_store_save_step();
+        if (result == APP_IMU_STORE_BUSY)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1U));
+        }
     }
-    if (memcmp(verify, record[target], IMU_STORE_RECORD_BYTES) != 0 || !imu_store_decode(verify, &candidate))
-    {
-        return imu_store_save_finish(APP_IMU_SAVE_VERIFY_DATA, started_ms, address);
-    }
-    return imu_store_save_finish(APP_IMU_SAVE_DONE, started_ms, address);
+    return result;
 }

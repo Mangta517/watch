@@ -41,9 +41,9 @@
 
 #define configUSE_PREEMPTION		1
 #define configUSE_MUTEXES			1   /* app_display 的 LVGL 互斥锁需要 */
-#define configUSE_IDLE_HOOK			0
+#define configUSE_IDLE_HOOK			1   /* IDLE中进入Sleep，保留1ms节拍和外设中断。 */
 #define configUSE_TICK_HOOK			0
-#define configCPU_CLOCK_HZ			( ( unsigned long ) 100000000 ) /* F411: HSI/8*100/2 = 100MHz */
+#define configCPU_CLOCK_HZ			( ( unsigned long ) 84000000 ) /* F411: HSI/8*84/2 = 84MHz */
 #define configTICK_RATE_HZ			( ( TickType_t ) 1000 )
 #define configMAX_PRIORITIES		( 5 )
 #define configMINIMAL_STACK_SIZE	( ( unsigned short ) 128 )
@@ -59,7 +59,7 @@
 #define configIDLE_SHOULD_YIELD		1
 
 /* 栈溢出检测(方法1: 切换时比对栈顶哨兵值, 开销小):
- * 触发即进入 vApplicationStackOverflowHook(app_display.c) 停死, 便于调试定位越界任务 */
+ * 触发即进入 vApplicationStackOverflowHook(app_task.c) 停死, 便于调试定位越界任务 */
 #define configCHECK_FOR_STACK_OVERFLOW	1
 
 

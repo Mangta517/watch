@@ -18,7 +18,7 @@ typedef struct
     uint8_t nack;
 } expected_transfer;
 
-static expected_transfer transfers[64];
+static expected_transfer transfers[256];
 static unsigned transfer_count, transfer_pos, read_pos, phase, delay_calls;
 static uint32_t now_ms;
 static uint8_t locked;
@@ -335,6 +335,106 @@ static void check_tick_wrap(void)
     assert(snapshot.valid != 0 && snapshot.sample_count == 1);
 }
 
+static aht21_result checked_recover_step(void)
+{
+    unsigned before = transfer_pos, hal_waits = delay_calls, task_waits = task_delay_calls;
+    uint32_t before_ms = now_ms;
+    aht21_result result = aht21_recover_step(now_ms);
+    assert(transfer_pos - before <= 1U && now_ms == before_ms);
+    assert(delay_calls == hal_waits && task_delay_calls == task_waits);
+    return result;
+}
+
+static void check_recovery(void)
+{
+    now_ms = UINT32_MAX - 20U;
+    aht21_recover_begin(now_ms);
+    now_ms += 39U;
+    assert(checked_recover_step() == AHT21_BUSY);
+    ++now_ms;
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_status(0, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_command(0xBE, 0x08, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    now_ms += 9U;
+    assert(checked_recover_step() == AHT21_BUSY);
+    ++now_ms;
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_status(0x08, 0);
+    assert(checked_recover_step() == AHT21_OK);
+    aht21_recover_begin(now_ms);
+    now_ms += 40U;
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_status(0x88, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    now_ms += 160U;
+    assert(checked_recover_step() == AHT21_TIMEOUT);
+    aht21_recover_begin(now_ms);
+    now_ms += 40U;
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_status(0, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_command(0xBE, 0x08, 1);
+    assert(checked_recover_step() == AHT21_I2C_ERROR);
+    puts("PASS: AHT21 recovery has minimum waits, one transaction per step, bounded BUSY and tick-wrap handling.");
+}
+
+static void check_service_recovery(void)
+{
+    app_aht21_struct snapshot;
+    unsigned waits;
+    now_ms = 0;
+    expect_status(0x88, 0);
+    app_aht21_init();
+    waits = delay_calls;
+    now_ms = 2039;
+    app_aht21_service();
+    now_ms = 2040;
+    app_aht21_service();
+    now_ms = 2080;
+    app_aht21_service();
+    expect_status(0, 0);
+    app_aht21_service();
+    expect_command(0xBE, 0x08, 0);
+    app_aht21_service();
+    now_ms = 2090;
+    app_aht21_service();
+    expect_status(0x08, 0);
+    app_aht21_service();
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms = 2170;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 1U);
+    now_ms = 4090;
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms = 4170;
+    expect_frame(0, 0, 0, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(!snapshot.valid && snapshot.result == AHT21_CALIBRATION_ERROR);
+    now_ms = 6169;
+    app_aht21_service();
+    now_ms = 6170;
+    app_aht21_service();
+    now_ms = 6210;
+    app_aht21_service();
+    expect_status(0x08, 0);
+    app_aht21_service();
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms = 6290;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 2U && delay_calls == waits);
+    puts("PASS: failed boot and lost calibration recover through the service after cooldown without blocking other sensors.");
+}
+
 int main(void)
 {
     check_init();
@@ -342,8 +442,16 @@ int main(void)
     check_frames();
     check_service();
     check_tick_wrap();
+    check_recovery();
+    check_service_recovery();
     assert(transfer_pos == transfer_count && phase == 0 && locked == 0);
     puts("PASS: AHT21 direct reads/ACK/STOP, initialization, CRC, 20-bit conversion, 80ms wait, 2s sampling, timeout/recovery and tick "
          "wrap.");
+    return 0;
+}
+
+uint8_t my_i2c_prepare(my_i2c_bus_t bus)
+{
+    assert(bus == MY_I2C_BUS_SENSOR && phase == 0);
     return 0;
 }

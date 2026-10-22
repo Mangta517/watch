@@ -4,11 +4,21 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(F411_BOOTLOADER)
+#define TEST_EXPECTED_SPP "01"
+#define TEST_INITIAL_SPP  "00"
+#else
+#define TEST_EXPECTED_SPP "00"
+#define TEST_INITIAL_SPP  "01"
+#endif
+
 UART_HandleTypeDef huart1 = {USART1, {115200}};
 static uint32_t tick, mask, delay_calls;
 static uint8_t *rx_target;
 static int rx_armed, powered, connected, boots, writes, silent, reject_setting;
 static int fail_tx, fail_rx;
+static unsigned query_count, drop_queries;
+static uint8_t query_uart_error;
 static uint8_t *tx_target;
 static uint16_t tx_size;
 static uint32_t tx_aborts;
@@ -16,7 +26,7 @@ static HAL_StatusTypeDef async_start_result = HAL_OK;
 static uint32_t uart_gpio_mode;
 static char saved_name[31] = "F411-Watch-SPP", current_name[31];
 static char saved_ble_name[31] = "KT6368A-BLE", current_ble_name[31];
-static char saved_ble[3] = "00", saved_spp[3] = "00";
+static char saved_ble[3] = "00", saved_spp[3] = TEST_INITIAL_SPP;
 static char current_ble[3], current_spp[3];
 static char pending[256];
 static size_t pending_pos, pending_size;
@@ -213,9 +223,26 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data, uin
     {
         return HAL_OK;
     }
-    assert(size < sizeof(command));
+    if (size >= sizeof(command))
+    {
+        return HAL_ERROR;
+    }
     memcpy(command, data, size);
     command[size] = '\0';
+    if (size >= 6U && strncmp(command, "AT+T", 4) == 0)
+    {
+        ++query_count;
+        if (drop_queries != 0)
+        {
+            --drop_queries;
+            return HAL_OK;
+        }
+        if (query_uart_error != 0)
+        {
+            query_uart_error = 0;
+            HAL_UART_ErrorCallback(&huart1);
+        }
+    }
     if (silent)
     {
         return HAL_OK;
@@ -301,20 +328,28 @@ static void staged_startup_tests(void)
     custom_reply = NULL;
     strcpy(saved_ble_name, "KT6368A-BLE");
     strcpy(saved_ble, "00");
-    strcpy(saved_spp, "00");
+    strcpy(saved_spp, TEST_INITIAL_SPP);
     old_writes = writes;
     old_boots = boots;
     tick = UINT32_MAX - 500U;
     assert(run_staged_startup() == HAL_OK);
     assert(writes == old_writes + 3 && boots == old_boots + 2);
     assert(strcmp(current_ble_name, KT6368A_BLE_NAME) == 0);
-    assert(strcmp(current_spp, "01") == 0 && strcmp(current_ble, "01") == 0);
+    assert(strcmp(current_spp, TEST_EXPECTED_SPP) == 0 && strcmp(current_ble, "01") == 0);
     old_writes = writes;
     old_boots = boots;
     assert(run_staged_startup() == HAL_OK);
     assert(writes == old_writes && boots == old_boots + 1);
+    query_count = 0;
+    drop_queries = 1;
+    old_boots = boots;
+    assert(run_staged_startup() == HAL_OK && query_count == 4U && boots == old_boots + 1);
+    query_count = 0;
+    query_uart_error = 1;
+    assert(run_staged_startup() == HAL_OK && query_count == 4U);
     silent = 1;
-    assert(run_staged_startup() == HAL_TIMEOUT);
+    query_count = 0;
+    assert(run_staged_startup() == HAL_TIMEOUT && query_count == 3U);
     silent = 0;
     fail_tx = 1;
     assert(run_staged_startup() == HAL_ERROR);
@@ -323,7 +358,7 @@ static void staged_startup_tests(void)
     assert(run_staged_startup() == HAL_ERROR);
     fail_rx = 0;
     reject_setting = 1;
-    strcpy(saved_spp, "00");
+    strcpy(saved_spp, TEST_INITIAL_SPP);
     assert(run_staged_startup() == HAL_ERROR);
     reject_setting = 0;
     assert(run_staged_startup() == HAL_OK);
@@ -338,26 +373,26 @@ int main(void)
     uint32_t errors;
 
     assert(kt6368a_get_init_status() == HAL_ERROR);
-    /* 从仅BLE配置迁移到BLE和SPP都开启，重新上电后生效，SPP名称保持不变。 */
+    /* 从相反SPP配置迁移到当前APP/升级模式，重新上电后生效，SPP名称保持不变。 */
     assert(kt6368a_init() == HAL_OK);
     assert(kt6368a_get_init_status() == HAL_OK);
     assert(strcmp(current_ble_name, KT6368A_BLE_NAME) == 0);
     assert(strcmp(current_name, "F411-Watch-SPP") == 0);
-    assert(strcmp(current_spp, "01") == 0 && strcmp(current_ble, "01") == 0);
+    assert(strcmp(current_spp, TEST_EXPECTED_SPP) == 0 && strcmp(current_ble, "01") == 0);
     assert(boots == 2 && writes == 3 && !kt6368a_is_connected());
     before = writes;
     assert(kt6368a_init() == HAL_OK);
     assert(writes == before); /* 已保存的配置不重复写Flash */
 
-    /* 模块拒绝开启SPP时必须报告失败，后续正常设置可恢复。 */
-    strcpy(saved_spp, "00");
-    strcpy(current_spp, "00");
+    /* 模块拒绝切换SPP时必须报告失败，后续正常设置可恢复。 */
+    strcpy(saved_spp, TEST_INITIAL_SPP);
+    strcpy(current_spp, TEST_INITIAL_SPP);
     reject_setting = 1;
     assert(kt6368a_configure(KT6368A_BLE_NAME) == HAL_ERROR);
-    assert(strcmp(current_spp, "00") == 0);
+    assert(strcmp(current_spp, TEST_INITIAL_SPP) == 0);
     reject_setting = 0;
     assert(kt6368a_configure(KT6368A_BLE_NAME) == HAL_OK);
-    assert(strcmp(current_spp, "01") == 0 && strcmp(current_ble, "01") == 0);
+    assert(strcmp(current_spp, TEST_EXPECTED_SPP) == 0 && strcmp(current_ble, "01") == 0);
 
     /* 实际ISR接收路径：字节顺序、环形回绕、满缓冲丢弃计数。 */
     for (i = 0; i < 900; ++i)

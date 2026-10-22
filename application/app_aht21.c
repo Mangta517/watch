@@ -15,6 +15,7 @@ static SemaphoreHandle_t s_aht21_mux;
 static app_aht21_struct s_aht21_data;
 static uint32_t s_attempt_ms;
 static uint8_t s_pending;
+static uint8_t s_recover_needed, s_recovering;
 
 void app_aht21_init(void)
 {
@@ -32,7 +33,13 @@ void app_aht21_init(void)
     s_aht21_data.result = result;
     xSemaphoreGive(s_aht21_mux);
     s_pending = 0;
-    s_attempt_ms = HAL_GetTick() - APP_AHT21_PERIOD_MS;
+    s_recover_needed = result != AHT21_OK;
+    s_recovering = 0;
+    s_attempt_ms = HAL_GetTick();
+    if (s_recover_needed == 0)
+    {
+        s_attempt_ms -= APP_AHT21_PERIOD_MS;
+    }
 }
 
 void app_aht21_service(void)
@@ -44,6 +51,36 @@ void app_aht21_service(void)
     uint32_t read_started;
     if (s_aht21_mux == NULL)
     {
+        return;
+    }
+    if (s_recovering != 0)
+    {
+        result = aht21_recover_step(now);
+        if (result == AHT21_BUSY)
+        {
+            return;
+        }
+        s_recovering = 0;
+        s_recover_needed = result != AHT21_OK;
+        s_attempt_ms = now;
+        if (result == AHT21_OK)
+        {
+            s_attempt_ms -= APP_AHT21_PERIOD_MS;
+        }
+        app_diag_sensor_init(APP_DIAG_AHT, (uint32_t)result);
+        xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
+        s_aht21_data.result = result;
+        s_aht21_data.valid = 0;
+        xSemaphoreGive(s_aht21_mux);
+        return;
+    }
+    if (s_recover_needed != 0)
+    {
+        if (elapsed >= APP_AHT21_PERIOD_MS)
+        {
+            aht21_recover_begin(now);
+            s_recovering = 1;
+        }
         return;
     }
     if (s_pending != 0)
@@ -72,6 +109,11 @@ void app_aht21_service(void)
             app_diag_sensor_record(APP_DIAG_AHT, APP_DIAG_ERROR, (uint32_t)result, read_started);
         }
         s_pending = 0;
+        if (result == AHT21_CALIBRATION_ERROR)
+        {
+            s_recover_needed = 1;
+            s_attempt_ms = HAL_GetTick();
+        }
         xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
         s_aht21_data.measuring = 0;
         s_aht21_data.result = result;

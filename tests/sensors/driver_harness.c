@@ -37,10 +37,11 @@ static uint32_t sda_mode;
 static GPIO_PinState replies[128];
 static unsigned reply_count, reply_pos;
 static jmp_buf error_jump;
-static uint8_t error_expected, spi_capture;
+static uint8_t error_expected, spi_capture, recovery_sample;
 static int spi_fail_after = -1;
 static HAL_StatusTypeDef spi_error;
 static unsigned spi_payload_calls, spi_payload_bytes;
+static uint16_t spi_expected_color = 0x1234;
 static int spi_command_fail_after = -1;
 static HAL_StatusTypeDef dma_start_result = HAL_OK;
 static unsigned dma_starts, dma_stops, spi_aborts, flush_completions;
@@ -132,6 +133,16 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
 }
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
 {
+    if (port == TP_SCL_GPIO_Port && pin == TP_SCL_Pin)
+    {
+        recovery_sample = 1;
+        return scl_state;
+    }
+    if (recovery_sample != 0)
+    {
+        recovery_sample = 0;
+        return GPIO_PIN_SET; /* 恢复后采样线路空闲，不是下一事务的ACK。 */
+    }
     assert(!primask && port == TP_SDA_GPIO_Port && pin == TP_SDA_Pin);
     assert(sda_mode == GPIO_MODE_INPUT && elapsed_ms >= tp_ready_at);
     if (reply_pos < reply_count)
@@ -142,7 +153,15 @@ GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
 }
 void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority)
 {
-    assert(irq == DMA2_Stream2_IRQn && priority == 12 && subpriority == 0);
+    assert((irq == DMA2_Stream2_IRQn || irq == SPI1_IRQn) && priority == 12 && subpriority == 0);
+}
+void HAL_NVIC_EnableIRQ(int irq)
+{
+    assert(irq == SPI1_IRQn);
+}
+uint32_t HAL_GetTick(void)
+{
+    return elapsed_ms;
 }
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout)
 {
@@ -157,11 +176,11 @@ HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16
     if (spi_capture && size > 1)
     {
         unsigned i;
-        const uint16_t *pixels = (const uint16_t *)data;
         assert(size % 2 == 0);
-        for (i = 0; i < size / 2U; ++i)
+        for (i = 0; i < size; i += 2U)
         {
-            assert(pixels[i] == 0x1234);
+            assert(data[i] == (uint8_t)(spi_expected_color >> 8));
+            assert(data[i + 1U] == (uint8_t)spi_expected_color);
         }
         ++spi_payload_calls;
         spi_payload_bytes += size;
@@ -284,7 +303,7 @@ static void touch_recovery_tests(void)
     assert(tp_resets == 1 && g_tp_chip_id == 0xB7 && elapsed_ms - start >= 410);
     assert(reply_pos == reply_count && hal_waits == 0 && task_waits == 3);
     /* Nine real rising edges before reset, with SDA released throughout. */
-    assert(edges_at_reset == 9 && released_at_reset == 9);
+    assert(edges_at_reset == 10 && released_at_reset == 9);
 
     reset_observations(taskSCHEDULER_RUNNING);
     queue_read(0); /* A successful no-finger sample clears the failure streak. */
@@ -315,7 +334,7 @@ static void touch_recovery_tests(void)
     assert(Touch_GetPoint(&x, &y) == 0 && g_tp_chip_id == 0xB5);
     assert(Touch_GetPoint(&x, &y) == 0);
     assert(task_waits == 0 && hal_waits == 0 && elapsed_ms - start == 310U);
-    assert(edges_at_reset - before_edges == 19 && released_at_reset - before_released == 10);
+    assert(edges_at_reset - before_edges == 20 && released_at_reset - before_released == 10);
     assert(reply_pos == reply_count);
     reply_count = reply_pos = 0;
     queue_read(1);
@@ -352,6 +371,17 @@ static void lcd_fill_tests(void)
         LCD_Fill(0, 0, widths[i] - 1, 0, 0x1234);
         assert(spi_payload_bytes == widths[i] * 2U);
         assert(spi_payload_calls == (widths[i] + 63U) / 64U);
+    }
+    /* RGB565原生色值按线上字节验证，同时覆盖整块和尾块。 */
+    {
+        static const uint16_t colors[] = {LCD_RED, LCD_GREEN, LCD_BLUE, LCD_BLACK, LCD_WHITE};
+        for (i = 0; i < sizeof(colors) / sizeof(colors[0]); ++i)
+        {
+            spi_expected_color = colors[i];
+            LCD_DrawPoint(0, 0, colors[i]);
+            LCD_Fill(0, 0, 64, 0, colors[i]);
+        }
+        spi_expected_color = 0x1234;
     }
     /* Fail the first/second full chunk or the tail, and require the stop path. */
     for (error = 0; error < sizeof(errors) / sizeof(errors[0]); ++error)
@@ -430,6 +460,7 @@ static void lcd_dma_error_tests(void)
     {
         pixels[i] = 0x1234;
     }
+    spi_expected_color = 0x3412; /* 块缓冲已由调用方准备好线上字节序。 */
     spi_capture = 1;
     spi_fail_after = 0;
     spi_error = HAL_TIMEOUT;
@@ -442,9 +473,37 @@ static void lcd_dma_error_tests(void)
     puts("PASS: LCD address/start/transfer errors stop DMA before releasing buffers, ignore late callbacks and allow the next frame.");
 }
 
-uint32_t HAL_GetTick(void)
+static void lcd_dma_timeout_tests(void)
 {
-    return elapsed_ms;
+    static uint16_t pixels[4];
+    unsigned int before, stops, wrap;
+    for (wrap = 0; wrap < 2U; ++wrap)
+    {
+        elapsed_ms = 1000U;
+        if (wrap != 0)
+        {
+            elapsed_ms = UINT32_MAX - 50U;
+        }
+        before = flush_completions;
+        stops = dma_stops;
+        LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+        elapsed_ms += 99U;
+        assert(LCD_Flush_Service() == 0 && dma_stops == stops);
+        ++elapsed_ms;
+        dma_stuck = 1;
+        assert(LCD_Flush_Service() == 0 && flush_completions == before);
+        dma_stuck = 0;
+        assert(LCD_Flush_Service() == 1 && flush_completions == before + 1U);
+        HAL_SPI_TxCpltCallback(&hspi1);
+        assert(flush_completions == before + 1U && LCD_Flush_Service() == 0);
+        LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+        host_dma_stream.CR = 0;
+        HAL_SPI_TxCpltCallback(&hspi1);
+        elapsed_ms += 1000U;
+        assert(LCD_Flush_Service() == 0 && flush_completions == before + 2U);
+    }
+    assert(primask == 0);
+    puts("PASS: lost DMA callbacks time out at 100ms, wait for buffer safety, complete once and handle tick wrap.");
 }
 
 static void touch_coordinate_failure_tests(void)
@@ -530,6 +589,7 @@ int main(void)
 {
     lcd_fill_tests();
     lcd_dma_error_tests();
+    lcd_dma_timeout_tests();
     init_delay_tests(taskSCHEDULER_NOT_STARTED);
     init_delay_tests(taskSCHEDULER_RUNNING);
     init_delay_tests(taskSCHEDULER_SUSPENDED);
@@ -538,4 +598,8 @@ int main(void)
     touch_async_absent_tests();
     puts("PASS: real LCD/touch init and sleep delays, reset/probe recovery, failure threshold and coordinates");
     return 0;
+}
+
+void host_i2c_nop(void)
+{
 }

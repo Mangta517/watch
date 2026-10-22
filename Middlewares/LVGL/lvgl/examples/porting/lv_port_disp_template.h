@@ -17,7 +17,6 @@ extern "C"
 /*********************
  *      INCLUDES
  *********************/
-#include "lvgl/lvgl.h"
 
     /*********************
  *      DEFINES
@@ -32,6 +31,8 @@ extern "C"
  **********************/
     void lv_port_disp_init(void);
     void lv_port_disp_service(void);
+    /* 显示任务内每次提交新分块前调用；传NULL解除，等待同一笔DMA时不调用。 */
+    void lv_port_disp_set_progress_callback(void (*callback)(void));
 
     /**********************
  *      MACROS

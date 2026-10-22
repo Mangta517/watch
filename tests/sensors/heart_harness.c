@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static uint32_t tick;
 static uint16_t raw = 2000;
@@ -625,6 +626,37 @@ int main(void)
     assert(heart.state == APP_HEART_VALID && heart.bpm >= 87 && heart.bpm <= 93);
     assert(app_heart_read_samples(samples, 32) == 32);
     assert(samples[31].elapsed_ms == 12000U && samples[31].sequence == 399U);
+    for (i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i)
+    {
+        unsigned elapsed, initial_reads, valid = 0;
+        begin();
+        initial_reads = reads;
+        for (elapsed = 20U; elapsed <= 24000U; elapsed += 20U)
+        {
+            tick += 20U;
+            raw = (uint16_t)(2000.0f + 80.0f * sinf((float)elapsed * (float)rates[i] * 6.2831853f / 60000.0f));
+            app_heart_service();
+            app_heart_get_snapshot(&heart);
+            if (elapsed >= 8000U && heart.state == APP_HEART_VALID)
+            {
+                assert(abs((int)heart.bpm - (int)rates[i]) <= 4);
+                ++valid;
+            }
+        }
+        assert(reads - initial_reads == 600U);
+        app_heart_get_snapshot(&heart);
+        printf("Low-power synthetic %u BPM: state %u, output %u BPM\n", rates[i], heart.state, heart.bpm);
+        assert(valid > 100U);
+        if (rates[i] != 200U)
+        {
+            assert(heart.state == APP_HEART_VALID && abs((int)heart.bpm - (int)rates[i]) <= 4);
+        }
+        else
+        {
+            /* 40ms量化使200BPM的RR在280/320ms间交替，越界时继续测量而不钳位。 */
+            assert(heart.state == APP_HEART_VALID || heart.state == APP_HEART_MEASURING);
+        }
+    }
     app_heart_set_enabled(0);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_OFF && heart.bpm == 0);

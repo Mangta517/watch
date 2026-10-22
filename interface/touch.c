@@ -18,6 +18,7 @@
   ******************************************************************************
 ***/
 #include "touch.h"
+#include "my_i2c.h"
 #include "stm32f4xx_hal.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -67,11 +68,11 @@ static void tp_delay_ms(uint32_t ms)
 }
 
 /******************************************************************************
- * 位周期延时 (~3µs/半周期 @100MHz, volatile 防 -O3 吞掉)
+ * 位周期延时 (~3µs/半周期 @84MHz, volatile 防 -O3 吞掉)
  *****************************************************************************/
 static void tp_delay(void)
 {
-    volatile uint32_t n = 80;
+    volatile uint32_t n = 67;
     while (n--)
     {
     }
@@ -279,22 +280,6 @@ static uint8_t tp_write_reg(uint8_t reg, uint8_t val)
     return 1;
 }
 
-/* 总线看门狗恢复: 从机卡在应答中间把 SDA 拉死时, 补 9 个 SCL + STOP 释放 */
-static void iic_bus_recover(void)
-{
-    uint8_t i;
-
-    tp_sda_in(); /* 释放SDA，避免与卡在低电平的从机争用 */
-    for (i = 0; i < 9; i++)
-    {
-        TP_SCL_0();
-        tp_delay();
-        TP_SCL_1();
-        tp_delay();
-    }
-    iic_stop();
-}
-
 /******************************************************************************
  * 复位: 拉低10ms, 释放后等 300ms 固件引导就绪 (CST816 RST→I2C 可用需 200ms+)
  *****************************************************************************/
@@ -357,7 +342,7 @@ uint8_t Touch_Init(void)
 
     if (id == 0)
     {
-        iic_bus_recover(); /* 未见器件: 先清一次可能的总线卡死再进运行时自愈 */
+        (void)my_i2c_recover(MY_I2C_BUS_TP); /* 未见器件: 先清一次可能的总线卡死再进运行时自愈 */
     }
     return id;
 }
@@ -370,7 +355,7 @@ uint8_t Touch_Init(void)
  * 做一次 "复位+重新探测地址+重关休眠" 自愈; 没有永久放弃的死角 ——
  * 触摸后来才接好/换料也能自动恢复。
  *****************************************************************************/
-#define TP_FAIL_STREAK_RECOVER 200 /* 5ms/次 约1s，与LVGL输入周期一致 */
+#define TP_FAIL_STREAK_RECOVER 200 /* touch任务目标5ms/次；实际恢复时间随抢占延长。 */
 static uint32_t s_tp_fail_streak = 0;
 
 enum
@@ -390,7 +375,7 @@ static struct
 
 static void tp_recover_begin(void)
 {
-    iic_bus_recover();
+    (void)my_i2c_recover(MY_I2C_BUS_TP);
     TP_RST_0();
     tp_recovery.phase_ms = HAL_GetTick();
     tp_recovery.phase = TP_RECOVER_RESET_WAIT;
@@ -408,7 +393,7 @@ static void tp_read_failed(void)
     }
 }
 
-/* 与输入读取同属显示任务；每次至多一笔事务，毫秒等待只检查墙钟。 */
+/* 与输入读取同属touch任务；每次至多一笔事务，毫秒等待只检查墙钟。 */
 static void tp_recover_step(void)
 {
     static const uint8_t addrs[2] = {CST816_ADDR_1, CST816_ADDR_2};
@@ -519,7 +504,7 @@ void Touch_Sleep(void)
 
 void Touch_Wakeup(void)
 {
-    iic_bus_recover();
+    (void)my_i2c_recover(MY_I2C_BUS_TP);
     Touch_Reset();
     (void)tp_probe(1);                         /* 两个候选地址各探测一次 */
     (void)tp_write_reg(REG_AutoSleepTime, 0x00); /* 复位后配置丢失, 重关休眠 */

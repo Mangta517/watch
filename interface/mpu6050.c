@@ -3,9 +3,9 @@
  * @file    mpu6050.c
  * @brief   MPU6050 驱动实现 —— 软件 I2C (common/my_i2c.c, SENSOR 总线)
  *          移植自旧工程 flight_hal/interface/my_mpu6050.c：
- *          手表运动档：±1000°/s、±4g、100Hz，配置/灵敏度集中在头文件。
+ *          手表±1000°/s、±4g；初始化100Hz，sensor按使用状态切换50/25Hz。
  *          数据就绪中断: 器件 INT_PIN_CFG=0x20 (高有效/推挽/锁存, 读 0x3A 清除),
- *          INT_ENABLE=0x01 (DATA_RDY)；PB12 EXTI 只记事件，任务突发读释放锁存。
+ *          INT_ENABLE=0x01 (DATA_RDY)；PB12 EXTI只记事件，任务轮询最新寄存器。
  ******************************************************************************
  */
 #include "mpu6050.h"
@@ -18,6 +18,8 @@
 
 /* MPU6050 挂在软件 I2C 的传感器总线上 */
 #define MPU6050_I2C_BUS MY_I2C_BUS_SENSOR
+
+static uint32_t mpu_sample_ms; /* 最近有效帧的读取开始时刻，非硬件采样时间戳。 */
 
 static void mpu6050_delay_ms(uint32_t ms)
 {
@@ -36,6 +38,7 @@ static volatile uint8_t mpu6050_int_flag;
 static volatile uint8_t mpu6050_int_status; /* sensor 任务读回的状态 */
 static volatile uint16_t mpu6050_int_edges;
 static uint8_t mpu6050_ready;
+static uint32_t s_mpu_period_ms = MPU6050_SAMPLE_PERIOD_MS;
 
 Gyro_struct gyro_data = {0};
 Accel_struct accel_data = {0};
@@ -86,118 +89,190 @@ uint8_t my_mpu6050_read_reg(uint8_t reg, uint8_t *data)
  * @return 0=成功, 1=复位等待超时或任一配置读写失败
  * @note  调用前需先执行 my_i2c_init(MY_I2C_BUS_SENSOR)
  */
+/* 0=成功，1=失败/冷却，2=推进中；每次step至多一笔I2C事务。 */
+enum
+{
+    MPU_RECOVER_PROBE,
+    MPU_RECOVER_RESET,
+    MPU_RECOVER_WAIT_RESET,
+    MPU_RECOVER_CONFIG,
+    MPU_RECOVER_CLEAR,
+    MPU_RECOVER_FAILED,
+    MPU_RECOVER_DONE
+};
+static struct
+{
+    uint32_t phase_ms;
+    uint32_t fault_ms;
+    uint32_t sample_ms;
+    uint8_t phase, index, probes, faults, no_data;
+} mpu_recovery;
+
+void my_mpu6050_recover_begin(void)
+{
+    mpu6050_ready = 0;
+    s_mpu_period_ms = MPU6050_SAMPLE_PERIOD_MS;
+    mpu_recovery.no_data = 0;
+    mpu_recovery.phase = MPU_RECOVER_PROBE;
+    mpu_recovery.index = mpu_recovery.probes = mpu_recovery.faults = 0;
+    mpu_recovery.phase_ms = HAL_GetTick();
+}
+
+static uint8_t mpu6050_recover_failed(void)
+{
+    mpu6050_ready = 0;
+    mpu_recovery.phase = MPU_RECOVER_FAILED;
+    mpu_recovery.phase_ms = HAL_GetTick();
+    return 1;
+}
+
+static void mpu6050_read_fault(void)
+{
+    if (mpu_recovery.faults < 3U && ++mpu_recovery.faults == 3U)
+    {
+        mpu_recovery.fault_ms = HAL_GetTick();
+    }
+}
+
+uint8_t my_mpu6050_recover_step(uint32_t now_ms)
+{
+    static const uint8_t config[][2] = {
+        {MPU6050_REG_PWR_MGMT_1, 0x00},
+        {MPU6050_GYRO_CONFIG, MPU6050_GYRO_RANGE},
+        {MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE},
+        {MPU6050_INT_PIN_CFG, 0x20},
+        {MPU6050_INT_ENABLE, 0x01},
+        {MPU6050_FIFO_EN, 0x00},
+        {MPU6050_USER_CTRL, 0x00},
+        {MPU6050_SMPLRT_DIV, MPU6050_SAMPLE_PERIOD_MS - 1U},
+        {MPU6050_CONFIG, MPU6050_DLPF_CFG},
+        {MPU6050_PWR_MGMT_1, 0x01},
+        {MPU6050_PWR_MGMT_2, 0x00}};
+    uint8_t data;
+    if (mpu6050_ready != 0)
+    {
+        /* 连续1s无新帧也重配，覆盖器件复位后仍ACK但停采样的情况。 */
+        if ((mpu_recovery.no_data != 0 && (uint32_t)(now_ms - mpu_recovery.sample_ms) >= 1000U) ||
+            (mpu_recovery.faults >= 3U && (uint32_t)(now_ms - mpu_recovery.fault_ms) >= 1000U))
+        {
+            my_mpu6050_recover_begin();
+            return 2;
+        }
+        return 0;
+    }
+    switch (mpu_recovery.phase)
+    {
+    case MPU_RECOVER_FAILED:
+        if ((uint32_t)(now_ms - mpu_recovery.phase_ms) >= 1000U)
+        {
+            my_mpu6050_recover_begin();
+            return 2;
+        }
+        return 1;
+    case MPU_RECOVER_PROBE:
+        if (mpu_recovery.probes != 0 && (uint32_t)(now_ms - mpu_recovery.phase_ms) < 50U)
+        {
+            return 2;
+        }
+        if (my_mpu6050_read_reg(MPU6050_WHO_AM_I, &data) == 0)
+        {
+            mpu_recovery.phase = MPU_RECOVER_RESET;
+        }
+        else if (++mpu_recovery.probes >= 20U)
+        {
+            return mpu6050_recover_failed();
+        }
+        mpu_recovery.phase_ms = HAL_GetTick();
+        return 2;
+    case MPU_RECOVER_RESET:
+        if (my_mpu6050_write_reg(MPU6050_REG_PWR_MGMT_1, 0x80) != 0)
+        {
+            return mpu6050_recover_failed();
+        }
+        mpu_recovery.phase = MPU_RECOVER_WAIT_RESET;
+        mpu_recovery.phase_ms = HAL_GetTick();
+        return 2;
+    case MPU_RECOVER_WAIT_RESET:
+        if ((uint32_t)(now_ms - mpu_recovery.phase_ms) >= 1000U)
+        {
+            return mpu6050_recover_failed();
+        }
+        /* 复位期间NACK/未回到0x40均等下一拍，不在本拍忙等。 */
+        if (my_mpu6050_read_reg(MPU6050_REG_PWR_MGMT_1, &data) == 0 && data == 0x40)
+        {
+            mpu_recovery.phase = MPU_RECOVER_CONFIG;
+        }
+        return 2;
+    case MPU_RECOVER_CONFIG:
+        if (my_mpu6050_write_reg(config[mpu_recovery.index][0], config[mpu_recovery.index][1]) != 0)
+        {
+            return mpu6050_recover_failed();
+        }
+        if (++mpu_recovery.index >= sizeof(config) / sizeof(config[0]))
+        {
+            mpu_recovery.phase = MPU_RECOVER_CLEAR;
+        }
+        return 2;
+    case MPU_RECOVER_CLEAR:
+        if (my_mpu6050_read_reg(MPU6050_INT_STATUS, &data) != 0)
+        {
+            return mpu6050_recover_failed();
+        }
+        mpu_recovery.phase = MPU_RECOVER_DONE;
+        mpu_recovery.sample_ms = HAL_GetTick();
+        mpu6050_ready = 1;
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+/* 仅保留启动/旧调用方的阻塞入口；运行期只调用recover_step。 */
 uint8_t my_mpu6050_init(void)
 {
-    uint8_t data = 0;
-    uint8_t id = 0;
-    uint8_t retry;
-    uint16_t guard;
-
-    mpu6050_ready = 0;
-
-    /* 上电就绪门: MPU6050 POR 后 I2C 接口需要 ~100ms 才能应答。
-     * 本工程 init 由sensor任务启动时调用；若器件还未就绪便首写，
-     * NACK 直接返回, 器件将停留在默认 SLEEP 态 → 输出寄存器全 0、
-     * INT 永远不触发, 表现为"陀螺仪没有数据"。
-     * 以 WHO_AM_I 是否获得 ACK 为准 (不比较数值, 兼容 0x68/0x98/0x69 克隆片);
-     * 调度器运行时重试等待让出CPU；重试次数和50ms等待保持不变，总等待约1s。 */
-    retry = 0;
-    for (;;)
+    uint8_t result;
+    my_mpu6050_recover_begin();
+    while ((result = my_mpu6050_recover_step(HAL_GetTick())) == 2U)
     {
-        if (my_mpu6050_read_reg(MPU6050_WHO_AM_I, &id) == 0)
+        if (mpu_recovery.phase == MPU_RECOVER_PROBE)
         {
-            break; /* 器件已在总线上应答 */
+            mpu6050_delay_ms(50);
         }
-        if (++retry >= 20)
+        else if (mpu_recovery.phase == MPU_RECOVER_WAIT_RESET)
         {
-            return 1; /* 1s 无应答: 未接/供电异常 */
-        }
-        mpu6050_delay_ms(50);
-    }
-
-    /* 重置 MPU6050：对电源管理寄存器 1 的 RESET 位置 1 */
-    if (my_mpu6050_write_reg(MPU6050_REG_PWR_MGMT_1, 0x80) != 0)
-    {
-        return 1;
-    }
-
-    /* 重置后 PWR_MGMT_1 应为 0x40 (Sleep bit 自持)，加超时防总线卡死 */
-    for (guard = 0; guard < 1000; guard++)
-    {
-        if (my_mpu6050_read_reg(MPU6050_REG_PWR_MGMT_1, &data) != 0)
-        {
-            return 1;
-        }
-        if (data == 0x40)
-        {
-            break;
+            mpu6050_delay_ms(1);
         }
     }
-    if (guard >= 1000)
-    {
-        return 1; /* 等待复位完成超时 */
-    }
+    return result;
+}
 
-    /* 唤醒 MPU6050 */
-    if (my_mpu6050_write_reg(MPU6050_REG_PWR_MGMT_1, 0x00) != 0)
+uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
+{
+    uint8_t filter;
+    if (period_ms != 20U && period_ms != 40U)
     {
         return 1;
     }
-    /* 量程同时供公共层换算、1g判断和零偏校准引用。 */
-    if (my_mpu6050_write_reg(MPU6050_GYRO_CONFIG, MPU6050_GYRO_RANGE) != 0)
+    if (mpu6050_ready == 0)
     {
         return 1;
     }
-    if (my_mpu6050_write_reg(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE) != 0)
+    if (period_ms == s_mpu_period_ms)
     {
+        return 0;
+    }
+    filter = 4U; /* 50Hz采样：陀螺仪20Hz、加速度21Hz带宽。 */
+    if (period_ms == 40U)
+    {
+        filter = 5U; /* 25Hz采样：10Hz带宽。 */
+    }
+    if (my_mpu6050_write_reg(MPU6050_CONFIG, filter) != 0 ||
+        my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, (uint8_t)(period_ms - 1U)) != 0)
+    {
+        my_mpu6050_recover_begin();
         return 1;
     }
-    /* 中断引脚配置 (0x37) = 0x20: INT 高有效、推挽输出、中断锁存,
-     * 仅读 INT_STATUS(0x3A) 后清除锁存释放 INT —— 配合 PB12 上升沿 EXTI */
-    if (my_mpu6050_write_reg(MPU6050_INT_PIN_CFG, 0x20) != 0)
-    {
-        return 1;
-    }
-    /* 使能数据就绪中断 (0x38 bit0 DATA_RDY): 采样数据更新时 INT 拉高 */
-    if (my_mpu6050_write_reg(MPU6050_INT_ENABLE, 0x01) != 0)
-    {
-        return 1;
-    }
-    /* 用户控制寄存器：不用 FIFO 和外设 I2C 主机 */
-    if (my_mpu6050_write_reg(MPU6050_USER_CTRL, 0x00) != 0)
-    {
-        return 1;
-    }
-    /* 100Hz输出与sensor任务同步；42/44Hz低通保留转腕响应并抑制高频噪声。 */
-    if (my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, MPU6050_SAMPLE_PERIOD_MS - 1U) != 0)
-    {
-        return 1;
-    }
-    if (my_mpu6050_write_reg(MPU6050_CONFIG, MPU6050_DLPF_CFG) != 0)
-    {
-        return 1;
-    }
-    /* 时钟源选内部 X 轴陀螺仪 */
-    if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x01) != 0)
-    {
-        return 1;
-    }
-    /* 使能加速度计和陀螺仪 (PWR_MGMT_2 全部轴不关断) */
-    if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_2, 0x00) != 0)
-    {
-        return 1;
-    }
-
-    /* 配置过程中可能已产生锁存的 DATA_RDY: 读一次 0x3A 清除锁存，
-     * 确保 INT 初始为低，之后每个数据就绪都产生干净的上升沿 */
-    if (my_mpu6050_read_reg(MPU6050_INT_STATUS, &data) != 0)
-    {
-        return 1;
-    }
-    mpu6050_ready = 1;
-
-    /* 注意: 上电初始化不做零偏校准；应用任务使用begin/step，
-     * 在正常采样中等待静止并累计校准帧。 */
+    s_mpu_period_ms = period_ms;
     return 0;
 }
 
@@ -209,6 +284,7 @@ typedef struct
     int32_t sum[6];
     uint32_t phase_ms;
     uint32_t last_sample_ms;
+    uint32_t started_ms;
     uint16_t stable_count;
     uint16_t average_count;
     uint8_t have_sample;
@@ -255,6 +331,7 @@ void my_mpu6050_zero_offset_begin(uint32_t now_ms)
 {
     memset(&s_cal, 0, sizeof(s_cal));
     s_cal.phase_ms = now_ms;
+    s_cal.started_ms = now_ms;
     s_cal.state = MPU6050_CAL_WAIT_STILL;
 }
 
@@ -305,7 +382,7 @@ static uint8_t mpu6050_cal_still(const Accel_struct *current)
     return reason == 0;
 }
 
-mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t valid, uint32_t now_ms)
+static mpu6050_cal_state mpu6050_zero_offset_update(Accel_Gyro_struct *raw, uint8_t valid, uint32_t now_ms, uint32_t wall_ms)
 {
     uint32_t timeout_ms;
     uint8_t still;
@@ -313,12 +390,12 @@ mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t va
     {
         return s_cal.state;
     }
-    timeout_ms = 3000U;
+    timeout_ms = 3000U * s_mpu_period_ms / MPU6050_SAMPLE_PERIOD_MS;
     if (s_cal.state == MPU6050_CAL_AVERAGING)
     {
-        timeout_ms = 2000U;
+        timeout_ms = 2000U * s_mpu_period_ms / MPU6050_SAMPLE_PERIOD_MS;
     }
-    if ((uint32_t)(now_ms - s_cal.phase_ms) >= timeout_ms)
+    if ((uint32_t)(wall_ms - s_cal.phase_ms) >= timeout_ms)
     {
         if (s_cal.state == MPU6050_CAL_WAIT_STILL)
         {
@@ -330,6 +407,11 @@ mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t va
         }
         s_cal.diag[MPU_CAL_DIAG_REJECT_SEEN] |= s_cal.diag[MPU_CAL_DIAG_REJECT];
         s_cal.state = MPU6050_CAL_FAILED;
+        return s_cal.state;
+    }
+    /* 请求前取得的样本不累计；等待和平均阶段均按墙钟判断超时。 */
+    if (valid != 0 && (int32_t)(now_ms - s_cal.started_ms) < 0)
+    {
         return s_cal.state;
     }
     if (valid == 0 || raw == NULL)
@@ -378,7 +460,7 @@ mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t va
         }
         if (s_cal.stable_count >= 100U)
         {
-            s_cal.phase_ms = now_ms;
+            s_cal.phase_ms = wall_ms;
             s_cal.state = MPU6050_CAL_AVERAGING;
         }
         return s_cal.state;
@@ -414,6 +496,11 @@ mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t va
     return s_cal.state;
 }
 
+mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t valid, uint32_t now_ms)
+{
+    return mpu6050_zero_offset_update(raw, valid, now_ms, now_ms);
+}
+
 mpu6050_cal_state my_mpu6050_zero_offset_state(void)
 {
     return s_cal.state;
@@ -438,7 +525,7 @@ uint8_t my_mpu6050_zero_offset(void)
         state = my_mpu6050_zero_offset_step(&raw, valid, HAL_GetTick());
         if (state == MPU6050_CAL_WAIT_STILL || state == MPU6050_CAL_AVERAGING)
         {
-            vTaskDelay(pdMS_TO_TICKS(MPU6050_SAMPLE_PERIOD_MS));
+            vTaskDelay(pdMS_TO_TICKS(s_mpu_period_ms));
         }
     }
     while (state == MPU6050_CAL_WAIT_STILL || state == MPU6050_CAL_AVERAGING);
@@ -510,39 +597,47 @@ uint8_t my_mpu6050_get_accel(Accel_struct *accel)
     return 0;
 }
 
-/**
- * @brief 一次突发读取15字节：INT_STATUS + 加速度6 + 温度2 + 陀螺仪6 (0x3A~0x48)
- * @return 0=新帧, 1=通信/配置失败, 2=未就绪(输出不变)
- */
+/* 一笔连续读取0x3A..0x48，状态与六轴数据一起取得；无新帧不覆盖输出。 */
 uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
 {
     uint8_t packet[15];
     const uint8_t *buf = packet + 1;
+    uint32_t started_ms;
 
-    /* 初始化失败时，地址仍ACK也不能把配置不完整的输出发布为有效帧。 */
     if (data == NULL || mpu6050_ready == 0)
     {
         return 1;
     }
-
-    /* 0x3A..0x48 同一次事务：先读状态释放 INT 锁存，再取完整六轴帧。 */
-    if (mpu6050_bus_read(MPU6050_INT_STATUS, packet, 15) != 0)
+    started_ms = HAL_GetTick();
+    if (mpu6050_bus_read(MPU6050_INT_STATUS, packet, sizeof(packet)) != 0)
     {
+        mpu6050_read_fault();
         return 1;
     }
-
     mpu6050_int_status = packet[0];
+    mpu_recovery.faults = 0;
     if ((packet[0] & 0x01U) == 0)
     {
+        mpu_recovery.no_data = 1;
         return MPU6050_DATA_NOT_READY;
     }
+
+    /* 跳过0x41/0x42温度；完整读成功且DATA_RDY有效后才发布。 */
     data->Accel.Accel_x = (int16_t)(((buf[0] << 8) | buf[1]) - offset_accel_x);
     data->Accel.Accel_y = (int16_t)(((buf[2] << 8) | buf[3]) - offset_accel_y);
     data->Accel.Accel_z = (int16_t)(((buf[4] << 8) | buf[5]) - offset_accel_z);
     data->Gyro.Gyro_x = (int16_t)(((buf[8] << 8) | buf[9]) - offset_gyro_x);
     data->Gyro.Gyro_y = (int16_t)(((buf[10] << 8) | buf[11]) - offset_gyro_y);
     data->Gyro.Gyro_z = (int16_t)(((buf[12] << 8) | buf[13]) - offset_gyro_z);
+    mpu_sample_ms = started_ms;
+    mpu_recovery.sample_ms = HAL_GetTick();
+    mpu_recovery.no_data = 0;
     return 0;
+}
+
+uint32_t my_mpu6050_sample_ms(void)
+{
+    return mpu_sample_ms;
 }
 
 /* ------------------------------------------------------------ 数据就绪中断 */
@@ -594,7 +689,7 @@ uint8_t my_mpu6050_int_check_clear(void)
 }
 
 /**
- * @brief 取 sensor 任务读回的 INT_STATUS(0x3A) 快照 (bit0=DATA_RDY, bit1=FIFO_OFLOW, *        bit2=I2C_MST_INT, bit7=DMP_INT)
+ * @brief 取任务读回的INT_STATUS快照：bit0=DATA_RDY、bit3=I2C_MST_INT、bit4=FIFO_OFLOW。
  */
 uint8_t my_mpu6050_get_int_status(void)
 {

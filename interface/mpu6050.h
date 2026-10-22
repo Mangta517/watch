@@ -115,6 +115,11 @@ extern "C"
 
     /* 初始化 MPU6050 (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR)) */
     uint8_t my_mpu6050_init(void);
+    /* 仅sensor任务：20ms/50Hz或40ms/25Hz；失败进入原恢复流程，相同档位不重复写。 */
+    uint8_t my_mpu6050_set_sample_period(uint32_t period_ms);
+    /* 仅sensor任务：begin使数据无效，step每拍至多一笔事务；0=就绪，1=失败冷却，2=推进中。 */
+    void my_mpu6050_recover_begin(void);
+    uint8_t my_mpu6050_recover_step(uint32_t now_ms);
 
     typedef enum
     {
@@ -176,10 +181,11 @@ extern "C"
     uint8_t my_mpu6050_get_gyro(Gyro_struct *gyro);
     /* 读取三轴加速度(已减零偏，抖动较大，必要时上层再滤波) */
     uint8_t my_mpu6050_get_accel(Accel_struct *accel);
-    /* 0=新帧，1=通信/配置失败，2=未就绪；未就绪不覆盖输出。 */
+/* 0=新帧，1=通信/配置失败，2=未就绪；失败或无新帧不覆盖输出。 */
 #define MPU6050_DATA_NOT_READY 2U
-    /* 一次突发读取 INT_STATUS+加速度+温度+陀螺仪共 15 字节；仅 sensor 任务调用 */
+    /* 常规轮询：一笔读状态+六轴，DATA_RDY有效才发布，读取时减去当前零偏。 */
     uint8_t my_mpu6050_get_data(Accel_Gyro_struct *accel_gyro);
+    uint32_t my_mpu6050_sample_ms(void); /* 最近有效帧的HAL读取开始时刻，非硬件时间戳。 */
     /* 读片内温度传感器, 输出 0.01℃ 定点 (T = raw/340 + 36.53) */
     uint8_t my_mpu6050_get_temp(int16_t *temp_01c);
 

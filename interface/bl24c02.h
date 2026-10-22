@@ -28,4 +28,17 @@ uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length);
 /* 最近一次读写的错误与页地址；仅sensor任务调用，不增加总线访问。 */
 bl24c02_error bl24c02_get_error(uint16_t *address);
 
+typedef struct
+{
+    uint8_t *data;
+    uint16_t address, remaining, page_address;
+    uint32_t started_ms;
+    uint8_t write, phase;
+} bl24c02_transfer_struct;
+
+/* 调用方保持buffer有效；每步至多一笔事务/16字节，无任务延时。
+ * 返回0完成、1失败、2推进中。写入结束仍需ACK确认内部写周期完成。 */
+void bl24c02_transfer_begin(bl24c02_transfer_struct *transfer, uint16_t address, uint8_t *data, uint16_t length, uint8_t write);
+uint8_t bl24c02_transfer_step(bl24c02_transfer_struct *transfer);
+
 #endif

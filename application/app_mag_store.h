@@ -17,11 +17,15 @@ typedef enum
 {
     APP_MAG_STORE_OK,
     APP_MAG_STORE_EMPTY,
-    APP_MAG_STORE_ERROR
+    APP_MAG_STORE_ERROR,
+    APP_MAG_STORE_BUSY
 } app_mag_store_result;
 
 /* 仅sensor任务调用；EMPTY表示没有通过版本/校验/数值检查的记录。 */
 app_mag_store_result app_mag_store_load(app_mag_calibration_struct *calibration);
+/* begin仅复制数据，step每轮至多一笔短事务；BUSY时继续采样。 */
+app_mag_store_result app_mag_store_save_begin(const app_mag_calibration_struct *calibration);
+app_mag_store_result app_mag_store_save_step(void);
 app_mag_store_result app_mag_store_save(const app_mag_calibration_struct *calibration);
 
 #endif

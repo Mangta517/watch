@@ -28,7 +28,7 @@ extern "C"
 #define LCD_HEIGHT   280
 #define LCD_OFFSET_Y 20
 
-/* 背光: TIM3_CH3 @100MHz/100(PSC+1) = 1MHz 计数, ARR=300 -> 约3.33kHz。
+/* 背光: TIM3_CH3 @84MHz/84(PSC+1) = 1MHz 计数, ARR=300 -> 约3.32kHz。
  * OCPolarity=HIGH 高电平点亮, 占空比 = CCR/ARR, 无需反转映射。 */
 #define LCD_BL_CCR_INVERT 0
 #define LCD_BL_ARR        300
@@ -58,7 +58,7 @@ extern "C"
  * 正常完成从ISR通知，异常收尾及阻塞回退从显示任务通知，回调需区分上下文。 */
     typedef void (*LCD_CallbackFunc_t)(void);
     void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb);
-    /* 显示任务调用；异常时先停止DMA再释放缓冲，返回1要求重绘。 */
+    /* 显示任务调用；错误或DMA回调超时后先停止DMA再释放缓冲，返回1要求重绘。 */
     uint8_t LCD_Flush_Service(void);
     void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p);
 

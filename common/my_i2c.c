@@ -16,9 +16,9 @@
  */
 #include "my_i2c.h"
 
-/* 原有位延时；仅SENSOR总线加倍，不改变触摸和EEPROM的节拍。 */
-#define MY_I2C_DELAY_LOOPS        80U
-#define MY_I2C_SENSOR_DELAY_LOOPS 160U
+/* 按84MHz调整原100MHz位延时；仅SENSOR总线加倍，不改变触摸和EEPROM的节拍。 */
+#define MY_I2C_DELAY_LOOPS        67U
+#define MY_I2C_SENSOR_DELAY_LOOPS 134U
 
 /* ================================================================ 总线表 */
 typedef struct
@@ -131,6 +131,97 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
     __set_PRIMASK(primask);
 }
 
+/* 固定次数等待，SCL持续被拉低时不依赖tick/中断，也不冒充有效恢复时钟。 */
+static uint8_t my_i2c_scl_released(my_i2c_bus_t bus)
+{
+    uint8_t guard;
+    for (guard = 0; guard < 16U; ++guard)
+    {
+        if (HAL_GPIO_ReadPin(my_i2c_pin[bus].scl_port, my_i2c_pin[bus].scl_pin) == GPIO_PIN_SET)
+        {
+            return 1;
+        }
+        my_i2c_delay(bus);
+    }
+    return 0;
+}
+
+uint8_t my_i2c_recover(my_i2c_bus_t bus)
+{
+    uint8_t i;
+    uint8_t result = 1;
+    if (bus >= MY_I2C_BUS_COUNT)
+    {
+        return 1;
+    }
+    /* touch.c自行配置PB4；不能用上次公共调用的缓存跳过本次释放。 */
+    if (bus == MY_I2C_BUS_TP)
+    {
+        s_sda_direction[bus] = 0;
+    }
+    my_i2c_sda_dir(bus, 1);
+    sda_hi(bus);
+    for (i = 0; i < 9U; ++i)
+    {
+        scl_lo(bus);
+        my_i2c_delay(bus);
+        scl_hi(bus);
+        if (my_i2c_scl_released(bus) == 0)
+        {
+            goto release;
+        }
+        my_i2c_delay(bus);
+    }
+    /* STOP：先预置低电平再切输出；结束用输入释放SDA，不与卡低的从机争用。 */
+    scl_lo(bus);
+    sda_lo(bus);
+    my_i2c_sda_dir(bus, 0);
+    my_i2c_delay(bus);
+    scl_hi(bus);
+    if (my_i2c_scl_released(bus) == 0)
+    {
+        goto release;
+    }
+    my_i2c_delay(bus);
+    my_i2c_sda_dir(bus, 1);
+    sda_hi(bus);
+    my_i2c_delay(bus);
+    if (sda_read(bus) != 0)
+    {
+        result = 0;
+    }
+release:
+    my_i2c_sda_dir(bus, 1);
+    sda_hi(bus);
+    scl_hi(bus);
+    if (bus == MY_I2C_BUS_TP)
+    {
+        s_sda_direction[bus] = 0;
+    }
+    return result;
+}
+
+uint8_t my_i2c_prepare(my_i2c_bus_t bus)
+{
+    if (bus >= MY_I2C_BUS_COUNT)
+    {
+        return 1;
+    }
+    if (bus == MY_I2C_BUS_TP)
+    {
+        s_sda_direction[bus] = 0;
+    }
+    my_i2c_sda_dir(bus, 1);
+    sda_hi(bus);
+    scl_hi(bus);
+    my_i2c_delay(bus);
+    if (my_i2c_scl_released(bus) != 0 && sda_read(bus) != 0)
+    {
+        return 0;
+    }
+    return my_i2c_recover(bus);
+}
+
 /* ================================================================ 时序原语 */
 /**
  * @brief 初始化软件I2C：SENSOR/EEPROM开漏，TP推挽，空闲释放为高
@@ -172,8 +263,8 @@ void my_i2c_init(my_i2c_bus_t bus)
 
     scl_hi(bus);
     s_sda_direction[bus] = 0; /* 重新初始化时强制恢复SDA硬件配置。 */
-    my_i2c_sda_dir(bus, 0); /* SDA 配为输出 */
-    sda_hi(bus);            /* 释放总线, 空闲高 */
+    my_i2c_sda_dir(bus, 0);   /* SDA 配为输出 */
+    sda_hi(bus);              /* 释放总线, 空闲高 */
     my_i2c_delay(bus);
 }
 
@@ -226,7 +317,7 @@ void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat)
             sda_lo(bus);
         }
         my_i2c_delay(bus); /* 数据建立 */
-        scl_hi(bus);    /* SCL 上升沿从机采样 */
+        scl_hi(bus);       /* SCL 上升沿从机采样 */
         my_i2c_delay(bus);
         scl_lo(bus); /* 下降沿后再移位 */
         dat <<= 1;
@@ -247,7 +338,7 @@ uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
     {
         scl_lo(bus);
         my_i2c_delay(bus);
-        scl_hi(bus);    /* 从机在 SCL 低期间准备数据，高期间保持稳定 */
+        scl_hi(bus);       /* 从机在 SCL 低期间准备数据，高期间保持稳定 */
         my_i2c_delay(bus); /* 等线路稳定后再采样 (关键!) */
         dat <<= 1;
         if (sda_read(bus))
@@ -273,7 +364,7 @@ uint8_t my_i2c_wait_ack(my_i2c_bus_t bus)
     scl_lo(bus);
     my_i2c_delay(bus);
     scl_hi(bus);
-    my_i2c_delay(bus);      /* 等从机驱动建立 */
+    my_i2c_delay(bus);   /* 等从机驱动建立 */
     ack = sda_read(bus); /* 从机拉低 = ACK */
     scl_lo(bus);
     my_i2c_delay(bus);
@@ -315,6 +406,10 @@ uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev_addr)
     {
         return 1;
     }
+    if (my_i2c_prepare(bus) != 0)
+    {
+        return 1;
+    }
     my_i2c_start(bus);
     my_i2c_write_byte(bus, (uint8_t)(dev_addr << 1));
     result = my_i2c_wait_ack(bus);
@@ -332,6 +427,11 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
     uint16_t i;
 
     if (bus >= MY_I2C_BUS_COUNT || (dat == NULL && len > 0))
+    {
+        return 1;
+    }
+
+    if (my_i2c_prepare(bus) != 0)
     {
         return 1;
     }
@@ -381,6 +481,10 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr, 
     }
 
     /* 第一阶段：写入要读的寄存器地址 */
+    if (my_i2c_prepare(bus) != 0)
+    {
+        return 1;
+    }
     my_i2c_start(bus);
     my_i2c_write_byte(bus, (uint8_t)(dev_addr << 1));
     if (my_i2c_wait_ack(bus))

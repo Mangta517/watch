@@ -28,6 +28,10 @@ static void aht21_delay_ms(uint32_t ms)
 static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
 {
     uint8_t i;
+    if (my_i2c_prepare(MY_I2C_BUS_SENSOR) != 0)
+    {
+        return AHT21_I2C_ERROR;
+    }
     my_i2c_start(MY_I2C_BUS_SENSOR);
     my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)((AHT21_ADDR << 1) | 1U));
     if (my_i2c_wait_ack(MY_I2C_BUS_SENSOR) != 0)
@@ -106,6 +110,96 @@ aht21_result aht21_init(void)
         }
     }
     return AHT21_OK;
+}
+
+enum
+{
+    AHT_RECOVER_WAIT_POWER,
+    AHT_RECOVER_STATUS,
+    AHT_RECOVER_CONFIG,
+    AHT_RECOVER_VERIFY_WAIT,
+    AHT_RECOVER_VERIFY,
+    AHT_RECOVER_DONE
+};
+static struct
+{
+    uint32_t started_ms, phase_ms;
+    uint8_t phase;
+    aht21_result result;
+} aht_recovery;
+
+void aht21_recover_begin(uint32_t now_ms)
+{
+    aht_recovery.phase = AHT_RECOVER_WAIT_POWER;
+    aht_recovery.started_ms = aht_recovery.phase_ms = now_ms;
+    aht_recovery.result = AHT21_BUSY;
+}
+
+aht21_result aht21_recover_step(uint32_t now_ms)
+{
+    static const uint8_t config[2] = {0x08U, 0x00U};
+    uint8_t status;
+    aht21_result result;
+    if (aht_recovery.phase == AHT_RECOVER_DONE)
+    {
+        return aht_recovery.result;
+    }
+    if ((uint32_t)(now_ms - aht_recovery.started_ms) >= 200U)
+    {
+        result = AHT21_TIMEOUT;
+    }
+    else if (aht_recovery.phase == AHT_RECOVER_WAIT_POWER)
+    {
+        if ((uint32_t)(now_ms - aht_recovery.phase_ms) >= 40U)
+        {
+            aht_recovery.phase = AHT_RECOVER_STATUS;
+        }
+        return AHT21_BUSY;
+    }
+    else if (aht_recovery.phase == AHT_RECOVER_CONFIG)
+    {
+        if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, AHT21_ADDR, 0xBEU, config, sizeof(config)) != 0)
+        {
+            result = AHT21_I2C_ERROR;
+        }
+        else
+        {
+            aht_recovery.phase_ms = HAL_GetTick();
+            aht_recovery.phase = AHT_RECOVER_VERIFY_WAIT;
+            return AHT21_BUSY;
+        }
+    }
+    else if (aht_recovery.phase == AHT_RECOVER_VERIFY_WAIT)
+    {
+        if ((uint32_t)(now_ms - aht_recovery.phase_ms) >= 10U)
+        {
+            aht_recovery.phase = AHT_RECOVER_VERIFY;
+        }
+        return AHT21_BUSY;
+    }
+    else
+    {
+        result = aht21_read_bytes(&status, 1);
+        if (result == AHT21_OK)
+        {
+            if ((status & AHT21_STATUS_BUSY) != 0)
+            {
+                return AHT21_BUSY;
+            }
+            if ((status & AHT21_STATUS_CALIBRATED) == 0)
+            {
+                if (aht_recovery.phase == AHT_RECOVER_STATUS)
+                {
+                    aht_recovery.phase = AHT_RECOVER_CONFIG;
+                    return AHT21_BUSY;
+                }
+                result = AHT21_CALIBRATION_ERROR;
+            }
+        }
+    }
+    aht_recovery.phase = AHT_RECOVER_DONE;
+    aht_recovery.result = result;
+    return result;
 }
 
 aht21_result aht21_trigger(void)

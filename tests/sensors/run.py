@@ -21,6 +21,7 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
                     "tests/sensors/battery_harness.c", "application/app_battery.c",
                     "-o", battery_exe], cwd=root, check=True)
     subprocess.run([battery_exe], cwd=root, check=True)
+    subprocess.run([battery_exe, "percentage"], cwd=root, check=True)
     subprocess.run([battery_exe, "allocation_failed"], cwd=root, check=True)
     i2c_exe = str(Path(out) / "i2c.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -30,6 +31,14 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
                     "-o", i2c_exe], cwd=root, check=True)
     subprocess.run([i2c_exe, "stop"], cwd=root, check=True)
     subprocess.run([i2c_exe], cwd=root, check=True)
+    bus_exe = str(Path(out) / "bus-recovery.exe")
+    subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                    "-include", "tests/sensors/host/i2c_platform.h",
+                    "-Itests/sensors/host", "-ICore/Inc", "-Icommon",
+                    "tests/sensors/bus_recovery_harness.c", "common/my_i2c.c",
+                    "-o", bus_exe], cwd=root, check=True)
+    for mode in ["normal", "sda_release", "sda_stuck", "scl_stuck", "eeprom_nack", "tp_cache"]:
+        subprocess.run([bus_exe, mode], cwd=root, check=True)
     aht21_exe = str(Path(out) / "aht21.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Iapplication", "-Icommon",
@@ -41,14 +50,20 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
             "-include", "tests/sensors/host/platform.h"]
     args += ["-I" + p for p in ["tests/sensors/host", "Core/Inc", "application", "interface", "common"]]
     subprocess.run(args + sources + ["-lm", "-o", exe], cwd=root, check=True)
+    subprocess.run([exe, "async_save"], cwd=root, check=True)
+    subprocess.run([exe, "polling"], cwd=root, check=True)
+    subprocess.run([exe, "power_profile"], cwd=root, check=True)
+    subprocess.run([exe, "mpu_stale"], cwd=root, check=True)
+    subprocess.run([exe, "recovery"], cwd=root, check=True)
     subprocess.run([exe], cwd=root, check=True)
     subprocess.run([exe, "restored"], cwd=root, check=True)
     subprocess.run([exe, "load_failed"], cwd=root, check=True)
     subprocess.run([exe, "save_failed"], cwd=root, check=True)
     driver_exe = str(Path(out) / "drivers.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
-                    "-Itests/sensors/host", "-ICore/Inc", "-Iinterface",
-                    "tests/sensors/driver_harness.c", "interface/lcd.c", "interface/touch.c",
+                    "-include", "tests/sensors/host/i2c_platform.h",
+                    "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Icommon",
+                    "tests/sensors/driver_harness.c", "interface/lcd.c", "interface/touch.c", "common/my_i2c.c",
                     "-o", driver_exe], cwd=root, check=True)
     subprocess.run([driver_exe], cwd=root, check=True)
     heart_exe = str(Path(out) / "em7028.exe")

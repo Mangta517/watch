@@ -47,7 +47,8 @@ extern "C"
     void Common_IMU_GetEulerAngle(Accel_Gyro_struct *gyroAccel, Euler_struct *eulerAngle, float dt);
 
     /* 单 sensor 任务使用；磁场须映射到 MPU6050 机体坐标，校准后才有准确磁参考。
- * mag_uT=NULL 时六轴递推；返回 1=本次用了有效水平磁场修正航向。 */
+ * mag_uT=NULL 时六轴递推；euler=NULL只递推，不反解欧拉角。
+ * 返回 1=本次用了有效水平磁场修正航向。 */
     uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const float mag_uT[3], Euler_struct *euler, float dt);
     /* 重置递推状态；下一份0.75～1.25g样本初始化俯仰/横滚，航向仍从0开始。 */
     void Common_IMU_Reset(void);

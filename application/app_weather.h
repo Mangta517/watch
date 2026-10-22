@@ -16,6 +16,7 @@ typedef struct
  * ASCII协议：WEATHER,WMO天气码,摄氏温度乘10,相对湿度百分比\n。 */
 void app_weather_receive(const uint8_t *data, uint16_t size, uint32_t now_ms);
 void app_weather_service(uint32_t now_ms);
+void app_weather_reset_receive(void); /* 不清除最后一份有效天气。 */
 void app_weather_get_snapshot(app_weather_struct *snapshot);
 const char *app_weather_description(uint8_t code);
 

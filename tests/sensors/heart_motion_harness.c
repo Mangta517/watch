@@ -17,6 +17,8 @@
         } \
     } while (0)
 
+static uint32_t motion_step_ms = 10U;
+
 static void motion_wave(uint32_t duration_ms, float pulse_bpm, float motion_bpm, float pulse_amplitude,
                         float motion_amplitude, uint8_t axis, uint8_t supply_motion)
 {
@@ -24,15 +26,15 @@ static void motion_wave(uint32_t duration_ms, float pulse_bpm, float motion_bpm,
     float phase, motion, pulse;
     int16_t accel[3];
     uint32_t elapsed;
-    uint32_t step = 10U;
+    uint32_t step = motion_step_ms;
     uint32_t valid = 0, correct = 0;
 
     for (elapsed = 0; elapsed < duration_ms; elapsed += step)
     {
-        step = 10U;
+        step = motion_step_ms;
         if (supply_motion == 2U && elapsed % 70U == 0U)
         {
-            step = 20U;
+            step = motion_step_ms * 2U;
         }
         tick += step;
         phase = (float)(elapsed + step) * 6.2831853f / 60000.0f;
@@ -102,5 +104,16 @@ int main(void)
     begin();
     motion_wave(18000U, 90.0f, 0.0f, 120.0f, 0.0f, 0, 1);
     puts("PASS: synchronized motion rejection, mixed pulse recovery, three axes, stale IMU fallback, static reference and tick wrap.");
+    motion_step_ms = 20U;
+    for (axis = 0; axis < 3U; ++axis)
+    {
+        begin();
+        motion_wave(24000U, 90.0f, 150.0f, 120.0f, 400.0f, axis, 1);
+        begin();
+        motion_wave(18000U, 0.0f, 120.0f, 0.0f, 400.0f, axis, 1);
+    }
+    begin();
+    motion_wave(24000U, 180.0f, 120.0f, 120.0f, 400.0f, 2, 1);
+    puts("PASS: 50Hz IMU and effective 25Hz PPG retain synthetic mixed pulse and reject motion-only signals.");
     return 0;
 }

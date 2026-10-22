@@ -1,6 +1,6 @@
 /**
  * @file app_heart.c
- * @brief 去背景、三轴运动参考滤波、七点波峰确认、多门限及RR方差选优；有效范围40～200BPM。
+ * @brief 去背景、三轴运动参考滤波、局部波峰确认、多门限及RR方差选优；有效范围40～200BPM。
  */
 #include "app_heart.h"
 #include "app_diag.h"
@@ -12,7 +12,7 @@
 #include <math.h>
 #include <string.h>
 
-#define APP_HEART_POLL_MS      30U /* 现有 sensor 任务为 10ms，覆盖器件的 25ms 档 */
+#define APP_HEART_POLL_MS      30U /* 保留30ms读取下限；sensor每20ms服务，实际约40ms读一次。 */
 #define APP_HEART_WARMUP_MS    1000U
 #define APP_HEART_MAX_GAP_MS   120U /* 长时间缺采样后重新建立滤波与周期 */
 #define APP_HEART_STALE_MS     250U
@@ -238,7 +238,8 @@ static uint8_t heart_remove_motion(uint32_t now, uint32_t elapsed)
 /* 环形窗口按时间顺序比较；右侧严格降低，平台峰取最后一个等高点。 */
 static uint8_t heart_find_local_peak(uint32_t now, uint32_t *peak_tick)
 {
-    unsigned i, center, index;
+    unsigned i, center, index, start;
+    unsigned window = APP_HEART_PEAK_WINDOW;
     float value;
     detector.window[detector.window_next] = detector.filtered;
     detector.window_ticks[detector.window_next] = now;
@@ -251,13 +252,19 @@ static uint8_t heart_find_local_peak(uint32_t now, uint32_t *peak_tick)
     {
         return 0;
     }
-    center = (detector.window_next + APP_HEART_PEAK_WINDOW / 2U) % APP_HEART_PEAK_WINDOW;
-    value = detector.window[center];
-    for (i = 0; i < APP_HEART_PEAK_WINDOW; ++i)
+    /* 最近六个间隔平均至少39ms时用五点，保持约160ms跨度；单帧抖动不切换窗口。 */
+    if ((uint32_t)(now - detector.window_ticks[detector.window_next]) >= 39U * (APP_HEART_PEAK_WINDOW - 1U))
     {
-        index = (detector.window_next + i) % APP_HEART_PEAK_WINDOW;
-        if ((i < APP_HEART_PEAK_WINDOW / 2U && detector.window[index] > value) ||
-            (i > APP_HEART_PEAK_WINDOW / 2U && detector.window[index] >= value))
+        window = 5U;
+    }
+    start = (detector.window_next + APP_HEART_PEAK_WINDOW - window) % APP_HEART_PEAK_WINDOW;
+    center = (start + window / 2U) % APP_HEART_PEAK_WINDOW;
+    value = detector.window[center];
+    for (i = 0; i < window; ++i)
+    {
+        index = (start + i) % APP_HEART_PEAK_WINDOW;
+        if ((i < window / 2U && detector.window[index] > value) ||
+            (i > window / 2U && detector.window[index] >= value))
         {
             return 0;
         }
@@ -266,7 +273,7 @@ static uint8_t heart_find_local_peak(uint32_t now, uint32_t *peak_tick)
     return 1;
 }
 
-/* 每个门限独立记录峰谷和周期；波峰还须通过前后各三点的局部极大值检查。 */
+/* 每个门限独立记录峰谷和周期；波峰还须通过局部极大值检查。 */
 static void heart_track_peak(heart_peak_struct *peak, float factor, uint32_t now, uint8_t local_peak, uint32_t local_peak_tick)
 {
     float threshold = peak->swing * factor;
@@ -432,6 +439,8 @@ static void heart_process(uint16_t raw, uint32_t now, uint32_t elapsed, app_hear
         /* 启动/重建期间跟随当前背景，避免首帧未稳定让1.5秒背景滤波长时间追赶。 */
         detector.dc = (float)raw;
         detector.optical = detector.filtered = detector.amplitude = 0.0f;
+        /* 预热时填满零基线窗口，首个真实波峰不会因窗口未满而漏确认。 */
+        (void)heart_find_local_peak(now, &local_peak_tick);
         heart_reset_peaks(now);
         data->signal_x10 = 0;
         data->interval_ms = 0;

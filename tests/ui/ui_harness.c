@@ -4,30 +4,44 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "../../application/app_ui.c"
+#include "lv_port_indev_template.h"
 
 static uint32_t host_tick = 9U * 3600000U + 30U * 60000U + 42000U;
 static GPIO_PinState host_key = GPIO_PIN_SET;
 static GPIO_PinState host_wake = GPIO_PIN_RESET;
 static lv_indev_state_t host_touch = LV_INDEV_STATE_RELEASED;
 static lv_point_t host_point;
+static unsigned int host_touch_critical, host_touch_reads;
 static uint8_t host_online = 1;
 static uint8_t host_mag_online = 1;
 static uint8_t host_mag_calibrated;
+static float host_yaw = 725.2f;
+static float host_altitude = -0.5f;
 static app_mag_cal_state host_mag_cal_state;
 static app_mag_fusion_state host_mag_fusion_state = APP_MAG_FUSION_ACTIVE;
 static app_mag_persist_state host_mag_persist_state;
 static uint8_t host_light;
+static uint8_t host_idle, host_motion;
+void app_task_set_power_state(uint8_t idle, uint8_t motion)
+{
+    host_idle = idle;
+    host_motion = motion;
+}
 static lv_color_t framebuffer[240 * 280];
 static lv_color_t draw_buffer[240 * 12];
 static uint32_t host_flush_calls;
 static uint32_t host_battery_reads;
 static uint32_t host_heart_reads;
+static uint32_t host_baro_reads;
 static unsigned min_free = 40960;
 static uint8_t host_bt_pending, host_rtc_pending;
 static HAL_StatusTypeDef host_bt_init_status = HAL_OK;
 static uint8_t host_bt_rx[1024];
 static uint16_t host_bt_rx_size;
 static uint16_t host_bt_rx_pos;
+static uint32_t host_bt_dropped, host_bt_errors;
+static uint8_t host_bt_error_on_read;
+extern unsigned host_diag_rx_resets;
 static HAL_StatusTypeDef host_bt_tx_result = HAL_OK;
 static uint8_t host_bt_tx_busy;
 static uint8_t host_async_active;
@@ -38,13 +52,14 @@ static uint32_t host_bt_tx_calls;
 static uint32_t host_rtc_seconds = 10U * 3600U + 10U * 60U;
 static uint32_t host_rtc_tick = 9U * 3600000U + 30U * 60000U + 42000U;
 static uint32_t host_rtc_set_calls;
+static uint32_t host_rtc_read_calls;
 static uint8_t host_rtc_synced = 1;
 static HAL_StatusTypeDef host_rtc_status = HAL_OK;
 static app_heart_struct host_heart;
 static app_heart_sample_struct host_heart_samples[4];
 static uint16_t host_heart_samples_count;
 static app_aht21_struct host_aht21;
-static app_battery_struct host_battery = {.voltage_mv = 3850, .valid = 1};
+static app_battery_struct host_battery = {.voltage_mv = 3850, .valid = 1, .percent = 50};
 
 void app_battery_get_snapshot(app_battery_struct *snapshot)
 {
@@ -85,6 +100,7 @@ uint8_t watch_rtc_init_is_pending(void)
 HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time)
 {
     uint32_t seconds = (host_rtc_seconds + (uint32_t)(host_tick - host_rtc_tick) / 1000U) % 86400U;
+    ++host_rtc_read_calls;
     if (host_rtc_status != HAL_OK)
     {
         return host_rtc_status;
@@ -175,7 +191,20 @@ uint16_t kt6368a_read(uint8_t *data, uint16_t size)
     }
     memcpy(data, host_bt_rx + host_bt_rx_pos, count);
     host_bt_rx_pos += count;
+    if (host_bt_error_on_read != 0)
+    {
+        ++host_bt_errors;
+        host_bt_error_on_read = 0;
+    }
     return count;
+}
+uint32_t kt6368a_get_rx_dropped(void)
+{
+    return host_bt_dropped;
+}
+uint32_t kt6368a_get_rx_errors(void)
+{
+    return host_bt_errors;
 }
 void kt6368a_flush_rx(void)
 {
@@ -187,6 +216,82 @@ static void host_bluetooth_feed(const uint8_t *data, uint16_t size)
     memcpy(host_bt_rx, data, size);
     host_bt_rx_size = size;
     host_bt_rx_pos = 0;
+}
+
+static void bluetooth_clear_frame_tests(void)
+{
+    uint32_t calls = host_rtc_set_calls;
+    uint32_t seconds = host_rtc_seconds;
+    host_bluetooth_feed((const uint8_t *)"12:", 3);
+    bluetooth_receive();
+    host_bluetooth_feed((const uint8_t *)"34:", 3);
+    bluetooth_clear_cb(NULL);
+    assert(host_bt_rx_pos == 0);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls);
+    host_bluetooth_feed((const uint8_t *)"56\n", 3);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1);
+    assert(host_rtc_seconds == 12U * 3600U + 34U * 60U + 56U);
+    host_rtc_seconds = seconds;
+    host_rtc_set_calls = calls;
+    bluetooth_clear_cb(NULL);
+    puts("PASS: CLEAR preserves queued bytes and partial clock frames.");
+}
+
+static void bluetooth_rx_error_tests(void)
+{
+    uint32_t calls = host_rtc_set_calls;
+    unsigned resets = host_diag_rx_resets;
+    app_weather_struct before, after;
+    app_weather_get_snapshot(&before);
+    host_bluetooth_feed((const uint8_t *)"12:", 3);
+    bluetooth_receive();
+    ++host_bt_dropped;
+    host_bluetooth_feed((const uint8_t *)"34\n", 3);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls && host_diag_rx_resets == resets + 1);
+    host_bluetooth_feed((const uint8_t *)"35\n13:14:15\n", 12);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 13U * 3600U + 14U * 60U + 15U);
+
+    host_bluetooth_feed((const uint8_t *)"WEATHER,3,2", 11);
+    bluetooth_receive();
+    ++host_bt_errors;
+    bluetooth_receive();
+    host_bluetooth_feed((const uint8_t *)"63,80\n", 6);
+    bluetooth_receive();
+    app_weather_get_snapshot(&after);
+    assert(after.received_ms == before.received_ms && after.temperature_x10 == before.temperature_x10);
+    host_bluetooth_feed((const uint8_t *)"WEATHER,1,-20,60\n", 17);
+    bluetooth_receive();
+    app_weather_get_snapshot(&after);
+    assert(after.code == 1 && after.temperature_x10 == -20 && after.humidity_rh == 60);
+
+    host_bluetooth_feed((const uint8_t *)"10:", 3);
+    bluetooth_receive();
+    calls = host_rtc_set_calls;
+    host_bt_error_on_read = 1;
+    host_bluetooth_feed((const uint8_t *)"20\n", 3);
+    bluetooth_receive();
+    host_tick += APP_CLOCK_FRAME_IDLE_MS;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls);
+    host_bluetooth_feed((const uint8_t *)"09:08", 5);
+    bluetooth_receive();
+    host_tick += APP_CLOCK_FRAME_IDLE_MS;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 9U * 3600U + 8U * 60U);
+
+    host_bt_dropped = UINT32_MAX;
+    bluetooth_receive();
+    host_bt_dropped = 0;
+    bluetooth_receive();
+    assert(host_diag_rx_resets == resets + 5);
+    host_bluetooth_feed((const uint8_t *)"\n07:06:05\n", 10);
+    bluetooth_receive();
+    assert(host_rtc_seconds == 7U * 3600U + 6U * 60U + 5U);
+    puts("PASS: UART loss/error/counter-wrap resets all parsers, discards suffixes and recovers at newline or idle without clearing valid weather.");
 }
 
 TickType_t xTaskGetTickCount(void)
@@ -207,7 +312,7 @@ uint8_t App_IMU_GetSnapshot(app_imu_struct *imu)
     memset(imu, 0, sizeof(*imu));
     imu->pitch_deg = 12.4f;
     imu->roll_deg = -3.6f;
-    imu->yaw_deg = 725.2f;
+    imu->yaw_deg = host_yaw;
     imu->mag_online = host_mag_online;
     imu->mag_fused = host_mag_online && host_mag_cal_state != APP_MAG_CAL_RUNNING;
     imu->mag_calibrated = host_mag_calibrated;
@@ -236,9 +341,10 @@ void App_IMU_MagCalibrate(uint8_t start)
 }
 uint8_t App_Baro_GetSnapshot(app_baro_struct *baro)
 {
+    ++host_baro_reads;
     memset(baro, 0, sizeof(*baro));
     baro->pressure_pa = 101325;
-    baro->alt_m = -0.5f;
+    baro->alt_m = host_altitude;
     return host_online;
 }
 static void flush(lv_disp_drv_t *driver, const lv_area_t *area, lv_color_t *pixels)
@@ -254,20 +360,98 @@ static void flush(lv_disp_drv_t *driver, const lv_area_t *area, lv_color_t *pixe
     }
     lv_disp_flush_ready(driver);
 }
-static void read_touch(lv_indev_drv_t *driver, lv_indev_data_t *data)
+void host_touch_enter_critical(void)
 {
-    (void)driver;
-    data->state = host_touch;
-    data->point = host_point;
+    assert(host_touch_critical++ == 0);
+}
+void host_touch_exit_critical(void)
+{
+    assert(host_touch_critical-- == 1);
+}
+uint8_t Touch_Init(void)
+{
+    assert(host_touch_critical == 0);
+    return 0xB5;
+}
+uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
+{
+    assert(host_touch_critical == 0);
+    ++host_touch_reads;
+    *x = (uint16_t)host_point.x;
+    *y = (uint16_t)host_point.y;
+    return host_touch == LV_INDEV_STATE_PRESSED;
+}
+static unsigned int host_short_clicks;
+static void short_click_cb(lv_event_t *event)
+{
+    (void)event;
+    ++host_short_clicks;
+}
+static void touch_bridge_tests(void)
+{
+    lv_obj_t *button = lv_btn_create(lv_scr_act());
+    lv_obj_set_pos(button, 5, 5);
+    lv_obj_set_size(button, 30, 30);
+    lv_obj_add_event_cb(button, short_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_update_layout(button);
+    host_point.x = host_point.y = 15;
+    host_touch = LV_INDEV_STATE_PRESSED;
+    host_tick += 5;
+    app_touch_service();
+    host_touch = LV_INDEV_STATE_RELEASED;
+    host_tick += 5;
+    app_touch_service();
+    lv_timer_handler();
+    assert(host_short_clicks == 1); /* 两次采集之间没有LVGL轮询，仍收到完整点击。 */
+    host_touch = LV_INDEV_STATE_PRESSED;
+    host_tick += 5;
+    app_touch_service();
+    lv_timer_handler();
+    host_tick += 100; /* 模拟touch任务停滞，过期取消不能触发一次假点击。 */
+    lv_timer_handler();
+    assert(host_short_clicks == 1);
+    host_touch = LV_INDEV_STATE_RELEASED;
+    host_tick += 5;
+    app_touch_service();
+    lv_timer_handler();
+    lv_obj_del(button);
+    puts("PASS: real LVGL receives a buffered short click; stale touch cancels without a false click.");
 }
 static void advance(unsigned ms)
 {
     unsigned elapsed;
+    unsigned int touch_reads;
+    static uint32_t touch_tick, display_tick;
+    uint32_t period_ms;
     lv_mem_monitor_t memory;
     for (elapsed = 0; elapsed < ms; elapsed += 5)
     {
         host_tick += 5; /* Match the firmware LVGL task's5ms scheduling. */
-        lv_timer_handler();
+        period_ms = 5U;
+        if (host_idle != 0)
+        {
+            period_ms = 20U;
+        }
+        if ((uint32_t)(host_tick - touch_tick) >= period_ms)
+        {
+            touch_tick = host_tick;
+            app_touch_service();
+        }
+        touch_reads = host_touch_reads;
+        if ((uint32_t)(host_tick - display_tick) < period_ms)
+        {
+            continue;
+        }
+        display_tick = host_tick;
+        if (App_UI_IsScreenOn() != 0)
+        {
+            lv_timer_handler();
+        }
+        else
+        {
+            App_UI_ServiceSleeping();
+        }
+        assert(host_touch_reads == touch_reads); /* LVGL输入回调不能访问I2C。 */
         lv_mem_monitor(&memory);
         if (memory.free_size < min_free)
         {
@@ -275,6 +459,23 @@ static void advance(unsigned ms)
         }
     }
 }
+/* 长时间时钟测试保持有输入活动；无触摸待机由独立用例验证。 */
+static void advance_active(unsigned ms)
+{
+    unsigned step;
+    while (ms != 0)
+    {
+        step = ms;
+        if (step > 1000U)
+        {
+            step = 1000U;
+        }
+        lv_disp_trig_activity(NULL);
+        advance(step);
+        ms -= step;
+    }
+}
+
 /* 用真实刷新回调检查：输入与显示内容都不变时，不应再次传输像素。 */
 static void assert_static_refresh(void)
 {
@@ -289,6 +490,82 @@ static void assert_static_refresh(void)
         assert(host_flush_calls == calls);
     }
 }
+
+static lv_coord_t trend_latest(const ui_trend_struct *trend)
+{
+    uint16_t index = (trend->series->start_point + UI_TREND_POINTS - 1U) % UI_TREND_POINTS;
+    return trend->series->y_points[index];
+}
+
+static void compass_direction_tests(void)
+{
+    static const float yaw[] = {0.0f, -90.0f, -180.0f, 90.0f, -359.8f, 1080.0f};
+    static const int16_t heading[] = {0, 90, 180, 270, 0, 0};
+    unsigned i;
+    for (i = 0; i < sizeof(yaw) / sizeof(yaw[0]); ++i)
+    {
+        host_yaw = yaw[i];
+        s_compass_heading = -1;
+        refresh_data();
+        assert(s_compass_heading == heading[i]);
+    }
+    /* 359°→1°及反向都只走北点附近，不绕远路。 */
+    host_yaw = -359.0f;
+    s_compass_heading = -1;
+    refresh_data();
+    host_yaw = -1.0f;
+    advance(100);
+    assert(s_compass_heading == 359 || s_compass_heading == 0);
+    advance(1500);
+    assert(s_compass_heading == 1);
+    host_yaw = -359.0f;
+    advance(1600);
+    assert(s_compass_heading == 359);
+
+    /* 90°目标跳变后700ms内追到2°以内，防止显示滤波重新产生长拖尾。 */
+    host_yaw = 0.0f;
+    s_compass_heading = -1;
+    refresh_data();
+    host_yaw = -90.0f;
+    advance(700);
+    assert(s_compass_heading >= 88 && s_compass_heading <= 90);
+
+    host_yaw = 0.0f;
+    s_compass_heading = -1;
+    refresh_data();
+    host_yaw = -120.0f;
+    s_refresh_tick = lv_tick_get(); /* 手动刷新后对齐100ms周期，覆盖一轮完整显示步长。 */
+    advance(110);
+    assert(s_compass_heading > 12 && s_compass_heading <= 36);
+    advance(900);
+    assert(s_compass_heading == 120);
+    host_yaw = -90.0f;
+    advance(3000);
+    for (i = 0; i < 10; ++i)
+    {
+        if (i % 2 == 0)
+        {
+            host_yaw = -90.4f;
+        }
+        else
+        {
+            host_yaw = -89.6f;
+        }
+        advance(100);
+        assert(s_compass_heading == 90);
+    }
+    host_yaw = NAN;
+    refresh_data();
+    assert(s_compass_heading == -1 && strcmp(lv_label_get_text(s_compass_value), "--") == 0);
+    host_yaw = 725.2f;
+    host_online = 0;
+    refresh_data();
+    assert(s_compass_heading == -1);
+    host_online = 1;
+    refresh_data();
+    assert(s_compass_heading == 355);
+    assert(strcmp(lv_label_get_text(s_compass_value), "355\xC2\xB0 N") == 0);
+}
 static void tap(int x, int y)
 {
     host_point.x = x;
@@ -297,6 +574,23 @@ static void tap(int x, int y)
     advance(40);
     host_touch = LV_INDEV_STATE_RELEASED;
     advance(230);
+}
+
+static void assert_in_body(lv_obj_t *obj)
+{
+    lv_area_t body, area;
+    lv_obj_update_layout(s_screen);
+    lv_obj_get_coords(s_body, &body);
+    lv_obj_get_coords(obj, &area);
+    assert(area.x1 >= body.x1 && area.x2 <= body.x2);
+    assert(area.y1 >= body.y1 && area.y2 <= body.y2);
+}
+
+static void tap_object(lv_obj_t *obj)
+{
+    lv_area_t area;
+    lv_obj_get_coords(obj, &area);
+    tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
 }
 static void drag(int x, int y, int dx, int dy)
 {
@@ -358,7 +652,9 @@ static void open_feature(ui_page_t page)
     tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
     assert(s_page == page);
     assert(s_main_pages[PAGE_WATCH].screen == NULL && s_main_pages[PAGE_SETTINGS].screen == NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~50%") == 0);
+    assert(s_battery_bar != NULL && lv_bar_get_value(s_battery_bar) == 50);
+    assert(!lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
 }
 
 static void screenshot(const char *name)
@@ -382,15 +678,75 @@ static void screenshot(const char *name)
     }
     fclose(file);
 }
+static void touch_idle_tests(void)
+{
+    uint8_t brightness = s_brightness;
+    uint32_t reads, flushes, second;
+    lv_point_t frozen_hand;
+    char frozen_text[16];
+
+    assert(s_page == PAGE_WATCH && s_screen_on);
+    host_wake = GPIO_PIN_RESET;
+    host_touch = LV_INDEV_STATE_RELEASED;
+    advance(60);
+    lv_disp_trig_activity(NULL);
+    advance(4980);
+    assert(!s_idle_dimmed && host_light == brightness);
+    advance(40);
+    assert(s_idle_dimmed && host_light == UI_MIN_BRIGHTNESS && s_brightness == brightness);
+    reads = host_rtc_read_calls;
+    flushes = host_flush_calls;
+    frozen_hand = s_second_points[1];
+    strcpy(frozen_text, clock_text());
+    advance(61000);
+    assert(host_rtc_read_calls == reads && host_flush_calls == flushes);
+    assert(strcmp(clock_text(), frozen_text) == 0);
+    assert(memcmp(&frozen_hand, &s_second_points[1], sizeof(frozen_hand)) == 0);
+
+    /* 待机仍接收蓝牙校时；跨午夜由RTC计时，触摸后才更新表盘。 */
+    host_bluetooth_feed((const uint8_t *)"23:59:58\n", 9);
+    advance(3000);
+    assert(host_bt_rx_pos == host_bt_rx_size && host_rtc_read_calls == reads);
+    assert(strcmp(clock_text(), frozen_text) == 0);
+    host_point.x = 5;
+    host_point.y = 275;
+    host_touch = LV_INDEV_STATE_PRESSED;
+    advance(60); /* 20ms待机调度与LVGL输入/界面定时器允许分拍执行。 */
+    assert(!s_idle_dimmed && host_light == brightness && host_rtc_read_calls > reads);
+    assert(host_idle == 0 && host_motion == 0);
+    second = (host_rtc_seconds + (uint32_t)(host_tick - host_rtc_tick) / 1000U) % 86400U;
+    assert(s_last_second == second && strcmp(clock_text(), "00:00") == 0);
+    advance(5200);
+    assert(!s_idle_dimmed && host_light == brightness); /* 持续触摸不能中途降亮。 */
+    host_touch = LV_INDEV_STATE_RELEASED;
+    advance(60);
+    assert(s_page == PAGE_WATCH);
+    lv_disp_trig_activity(NULL);
+    advance(5020);
+    assert(s_idle_dimmed && host_light == UI_MIN_BRIGHTNESS);
+    tap(5, 275);
+    assert(!s_idle_dimmed && s_page == PAGE_WATCH && host_light == brightness);
+    /* 活动时间跨32位tick回绕，仍按5秒阈值降亮并可触摸恢复。 */
+    host_tick = UINT32_MAX - 2500U;
+    lv_disp_trig_activity(NULL);
+    advance(4980);
+    assert(!s_idle_dimmed && host_light == brightness);
+    advance(40);
+    assert(s_idle_dimmed && host_light == UI_MIN_BRIGHTNESS);
+    tap(5, 275);
+    assert(!s_idle_dimmed && host_light == brightness);
+    puts("PASS: 5s touch idle dims to 2%, polls at 20ms, freezes clock/RTC reads, preserves BLE sync, and touch/hold resumes current RTC time across midnight and tick wrap.");
+}
+
 int main(void)
 {
     static lv_disp_draw_buf_t buffer;
     static lv_disp_drv_t display;
-    static lv_indev_drv_t input;
     lv_coord_t saved_scroll;
     unsigned iteration;
     lv_mem_monitor_t before, after;
     lv_obj_t *cached_main[2];
+    bluetooth_clear_frame_tests();
     lv_init();
     lv_disp_draw_buf_init(&buffer, draw_buffer, NULL, 240 * 12);
     lv_disp_drv_init(&display);
@@ -399,12 +755,8 @@ int main(void)
     display.draw_buf = &buffer;
     display.flush_cb = flush;
     lv_disp_drv_register(&display);
-    lv_indev_drv_init(&input);
-    input.type = LV_INDEV_TYPE_POINTER;
-    input.read_cb = read_touch;
-    input.gesture_min_velocity = 0;
-    input.gesture_limit = 40;
-    lv_indev_drv_register(&input);
+    app_touch_init();
+    lv_port_indev_init();
     host_wake = GPIO_PIN_SET; /* 模拟按住 SW2 开机。 */
     App_UI_Create();
     if (APP_DEBUG_TELEMETRY == 0)
@@ -424,6 +776,7 @@ int main(void)
         advance(120);
         assert(host_bt_rx_pos == host_bt_rx_size && host_bt_tx_calls == 0);
         assert(strcmp(clock_text(), "11:22") == 0);
+        touch_idle_tests();
         puts("PASS: performance UI emits no debug TX; magnetic calibration, incoming clock sync and UI still work.");
         return 0;
     }
@@ -452,14 +805,14 @@ int main(void)
     assert(s_hour_points[1].x < 100 && s_hour_points[1].y < 100);
     assert(s_minute_points[1].x > 100 && s_minute_points[1].y < 100);
     assert_rtc_seconds(0);
-    advance(15000);
+    advance_active(15000);
     assert_rtc_seconds(15);
     assert(s_second_points[1].x == 182 && s_second_points[1].y == 100);
     screenshot("watch_seconds");
-    advance(15000);
+    advance_active(15000);
     assert_rtc_seconds(30);
     assert(s_second_points[1].x == 100 && s_second_points[1].y == 182);
-    advance(30000);
+    advance_active(30000);
     assert_rtc_seconds(0);
     assert(strcmp(clock_text(), "10:11") == 0);
     assert_rtc_seconds(0);
@@ -482,7 +835,7 @@ int main(void)
         assert(s_second_points[1].x == previous.x && s_second_points[1].y == previous.y);
         advance(250);
         assert(host_battery_reads == reads + 1 && host_heart_reads == heart_reads + 1);
-        assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.86V") == 0);
+        assert(strcmp(lv_label_get_text(s_battery_label), "~50% 3.86V") == 0);
         assert(s_second_points[1].x != previous.x || s_second_points[1].y != previous.y);
         host_battery.voltage_mv = 3851;
         advance(1000);
@@ -490,14 +843,15 @@ int main(void)
     host_battery.valid = 0;
     refresh_battery();
     lv_refr_now(NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT --.--V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "--%") == 0);
+    assert(lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
     screenshot("battery_waiting");
     /* 毫伏变化但显示仍相同时不重绘；显示值变化、ADC故障和恢复必须更新。 */
     host_battery.valid = 1;
     host_battery.voltage_mv = 3851;
     refresh_battery();
     lv_refr_now(NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~50% 3.85V") == 0);
     assert_static_refresh();
     {
         uint32_t calls = host_flush_calls;
@@ -508,13 +862,14 @@ int main(void)
         host_battery.voltage_mv = 3860;
         refresh_battery();
         lv_refr_now(NULL);
-        assert(host_flush_calls > calls && strcmp(lv_label_get_text(s_battery_label), "BAT 3.86V") == 0);
+        assert(host_flush_calls > calls && strcmp(lv_label_get_text(s_battery_label), "~50% 3.86V") == 0);
     }
     host_battery.valid = 0;
     host_battery.result = HAL_TIMEOUT;
     refresh_battery();
     lv_refr_now(NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT ADC ERR") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "ADC ERR") == 0);
+    assert(lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
     assert(lv_obj_get_style_text_color(s_battery_label, LV_PART_MAIN).full == lv_color_hex(UI_RED).full);
     assert_static_refresh();
     screenshot("battery_error");
@@ -523,8 +878,47 @@ int main(void)
     host_battery.voltage_mv = 3851;
     refresh_battery();
     lv_refr_now(NULL);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~50% 3.85V") == 0);
     assert(lv_obj_get_style_text_color(s_battery_label, LV_PART_MAIN).full == lv_color_hex(UI_TEXT).full);
+    assert(!lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
+    assert(lv_bar_get_value(s_battery_bar) == 50);
+    {
+        lv_area_t area;
+        lv_obj_get_coords(s_battery_bar, &area);
+        assert(framebuffer[(area.y1 + 6) * 240 + area.x1 + 6].full == lv_color_hex(UI_BATTERY_GREEN).full);
+        assert(framebuffer[(area.y1 + 6) * 240 + area.x2 - 5].full == lv_color_hex(UI_CARD).full);
+    }
+    /* 百分比变化必须刷新；0/100%单行显示，低电量及恢复使用正确颜色。 */
+    {
+        uint32_t calls = host_flush_calls;
+        host_battery.percent = 20;
+        refresh_battery();
+        lv_refr_now(NULL);
+        assert(host_flush_calls > calls);
+        assert(strcmp(lv_label_get_text(s_battery_label), "~20% 3.85V") == 0);
+        assert(lv_obj_get_style_text_color(s_battery_label, LV_PART_MAIN).full == lv_color_hex(UI_RED).full);
+        assert(lv_bar_get_value(s_battery_bar) == 20);
+        assert(lv_obj_get_style_bg_color(s_battery_bar, LV_PART_INDICATOR).full == lv_color_hex(UI_RED).full);
+        screenshot("battery_low");
+        host_battery.percent = 0;
+        refresh_battery();
+        assert(strcmp(lv_label_get_text(s_battery_label), "~0% 3.85V") == 0);
+        assert(lv_bar_get_value(s_battery_bar) == 0);
+        screenshot("battery_empty");
+        host_battery.percent = 100;
+        refresh_battery();
+        lv_obj_update_layout(s_screen);
+        assert(strcmp(lv_label_get_text(s_battery_label), "~100% 3.85V") == 0);
+        assert(lv_obj_get_height(s_battery_label) == lv_font_montserrat_14.line_height);
+        assert(lv_obj_get_style_text_color(s_battery_label, LV_PART_MAIN).full == lv_color_hex(UI_TEXT).full);
+        assert(lv_bar_get_value(s_battery_bar) == 100);
+        assert(!lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
+        assert(lv_obj_get_style_bg_color(s_battery_bar, LV_PART_INDICATOR).full == lv_color_hex(UI_BATTERY_GREEN).full);
+        screenshot("battery_full");
+        host_battery.percent = 50;
+        refresh_battery();
+        lv_refr_now(NULL);
+    }
     /* 真实按下及拖动刻度盘：背景保持透明，纵向滑动不误入校时页。 */
     host_point.x = 120;
     host_point.y = 80;
@@ -545,7 +939,15 @@ int main(void)
     assert(lv_obj_get_child_cnt(s_body) == 7);
     assert(!s_brightness_label && !s_angles[0] && !s_pressure && !s_altitude && !s_heart_card && !s_aht21_card);
     open_feature(PAGE_HEART);
-    assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~50%") == 0);
+    host_battery.percent = 100;
+    refresh_battery();
+    lv_obj_update_layout(s_screen);
+    assert(strcmp(lv_label_get_text(s_battery_label), "~100%") == 0);
+    assert(lv_obj_get_height(s_battery_label) == lv_font_montserrat_10.line_height);
+    host_battery.percent = 50;
+    refresh_battery();
+
     assert_static_refresh();
     /* 真实心率卡片的按钮、有效值和异常状态，不让旧 BPM 留在无效状态。 */
     {
@@ -624,9 +1026,44 @@ int main(void)
         assert(strcmp(lv_label_get_text(s_heart_value), "72") == 0);
         assert(strstr(lv_label_get_text(s_heart_status), "HRS1 12345  AC 16.0") != NULL);
         assert(strstr(lv_label_get_text(s_heart_status), "PERIOD 830 ms") != NULL);
+        assert(strcmp(lv_label_get_text(s_heart_summary), "TRACKING") == 0);
+        assert(lv_obj_has_flag(s_heart_details, LV_OBJ_FLAG_HIDDEN));
+        assert_in_body(s_heart_card);
+        assert_in_body(lv_obj_get_parent(s_heart_trend.chart));
+        assert_in_body(lv_obj_get_parent(s_heart_details_title));
         screenshot("heart");
+        tap_object(lv_obj_get_parent(s_heart_details_title));
+        assert(!lv_obj_has_flag(s_heart_details, LV_OBJ_FLAG_HIDDEN));
+        assert_in_body(s_heart_details);
+        assert(host_heart.enabled && host_heart.bpm == 72);
+        screenshot("heart_details");
+        tap_object(lv_obj_get_parent(s_heart_details_title));
+        assert(lv_obj_has_flag(s_heart_details, LV_OBJ_FLAG_HIDDEN));
+        assert(lv_obj_get_scroll_y(s_body) == 0);
+        assert_in_body(lv_obj_get_parent(s_heart_trend.chart));
+        {
+            unsigned i;
+            uint16_t start;
+            assert(lv_chart_get_type(s_heart_trend.chart) == LV_CHART_TYPE_BAR);
+            for (i = 0; i < UI_TREND_POINTS; ++i)
+            {
+                host_heart.bpm = 60U + i * 4U;
+                advance(1000);
+                assert(trend_latest(&s_heart_trend) == host_heart.bpm);
+            }
+            start = s_heart_trend.series->start_point;
+            refresh_data();
+            assert(s_heart_trend.series->start_point == start);
+            assert(((lv_chart_t *)s_heart_trend.chart)->ymax[0] == 200);
+            lv_obj_scroll_to_view(lv_obj_get_parent(s_heart_trend.chart), LV_ANIM_OFF);
+            advance(30);
+            screenshot("heart_history");
+            lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+            host_heart.bpm = 72;
+        }
         host_heart.state = APP_HEART_NO_SIGNAL;
-        advance(120);
+        advance(1000);
+        assert(trend_latest(&s_heart_trend) == LV_CHART_POINT_NONE);
         assert(strcmp(lv_label_get_text(s_heart_value), "--") == 0);
         assert(strstr(lv_label_get_text(s_heart_status), "NO SIGNAL") != NULL);
         screenshot("heart_no_signal");
@@ -637,6 +1074,7 @@ int main(void)
         advance(120);
         assert(strstr(lv_label_get_text(s_heart_status), "UNAVAILABLE") != NULL);
         assert(strstr(lv_label_get_text(s_heart_status), "I2C READ REG 29") != NULL);
+        assert(strcmp(lv_label_get_text(s_heart_summary), "UNAVAILABLE") == 0);
         assert(strcmp(lv_label_get_text(s_heart_button), "START") == 0);
         screenshot("heart_unavailable");
         host_heart.fault.kind = EM7028_FAULT_CONFIG;
@@ -676,7 +1114,15 @@ int main(void)
         assert(s_screen_on && host_light == saved_brightness);
         advance(40);
         assert(!s_screen_on && host_light == 0); /* 松手前已触发，不需要长按。 */
-        advance(1000);
+        {
+            unsigned int off_flushes = host_flush_calls;
+            advance(1000);
+            assert(host_flush_calls == off_flushes); /* 熄屏不提交新像素。 */
+            host_bluetooth_feed((const uint8_t *)"WEATHER,3,263,80\n", 17);
+            advance(60);
+            assert(host_bt_rx_pos == host_bt_rx_size && host_flush_calls == off_flushes);
+            bluetooth_clear_cb(NULL); /* 不影响后面的原蓝牙日志断言。 */
+        }
         assert(!s_screen_on && host_light == 0); /* 持续按住不重复触发。 */
         host_wake = GPIO_PIN_RESET;
         advance(60);
@@ -723,8 +1169,17 @@ int main(void)
     assert(strcmp(lv_label_get_text(s_angles[2]), "5.2") == 0);
     assert(strcmp(lv_label_get_text(s_yaw_source), "MAG UNCAL / calibrate first") == 0);
     assert(strcmp(lv_label_get_text(s_mag_values[1]), "-14.2") == 0);
+    assert(strcmp(lv_label_get_text(s_compass_status), "UNCALIBRATED") == 0);
+    compass_direction_tests();
     assert_static_refresh();
+    assert_in_body(s_compass);
+    assert_in_body(lv_obj_get_parent(s_compass_calibration));
     screenshot("motion");
+    /* 首屏校准入口只定位操作区，不会直接开始采集。 */
+    tap_object(lv_obj_get_parent(s_compass_calibration));
+    assert(host_mag_cal_state == APP_MAG_CAL_NONE);
+    assert(lv_obj_get_scroll_y(s_body) > 0);
+    assert_in_body(lv_obj_get_parent(s_mag_cal_label));
     /* Scroll to and tap the real calibration control. */
     lv_obj_scroll_to_view(lv_obj_get_parent(s_mag_cal_label), LV_ANIM_OFF);
     advance(30);
@@ -737,6 +1192,7 @@ int main(void)
     assert(strcmp(lv_label_get_text(s_mag_cal_label), "FINISH CALIBRATION") == 0);
     assert(strcmp(lv_label_get_text(s_yaw_source), "GYRO ONLY / CALIBRATING") == 0);
     assert(strstr(lv_label_get_text(s_mag_cal_status), "COLLECTING: 120") != NULL);
+    assert(strcmp(lv_label_get_text(s_compass_status), "CALIBRATING") == 0);
     screenshot("motion_calibrating");
     {
         lv_area_t area;
@@ -747,10 +1203,14 @@ int main(void)
     assert(strcmp(lv_label_get_text(s_yaw_source), "MAG NORTH / fused yaw") == 0);
     assert(strcmp(lv_label_get_text(s_mag_status), "CAL OK / MAG ONLINE") == 0);
     assert(strstr(lv_label_get_text(s_mag_cal_status), "CAL SAVED: 120") != NULL);
+    assert(strcmp(lv_label_get_text(s_compass_status), "MAG NORTH") == 0);
+    lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+    advance(30);
+    screenshot("compass");
     lv_obj_scroll_to_view(s_mag_cal_status, LV_ANIM_OFF);
     advance(30);
     screenshot("motion_calibration_status");
-    lv_obj_scroll_to_y(s_body, 384, LV_ANIM_OFF);
+    lv_obj_scroll_to_y(s_body, lv_obj_get_y(lv_obj_get_parent(s_mag_values[0])), LV_ANIM_OFF);
     advance(30);
     screenshot("motion_magnetic");
     host_mag_online = 0;
@@ -758,6 +1218,8 @@ int main(void)
     assert(strcmp(lv_label_get_text(s_mag_values[0]), "--") == 0);
     assert(strcmp(lv_label_get_text(s_angles[2]), "5.2") == 0);
     assert(strcmp(lv_label_get_text(s_yaw_source), "GYRO ONLY / MAG NO DATA") == 0);
+    assert(strcmp(lv_label_get_text(s_compass_status), "GYRO ONLY") == 0);
+    assert(s_compass_color == UI_MUTED);
     host_mag_online = 1;
     advance(120);
     host_mag_persist_state = APP_MAG_PERSIST_RESTORED;
@@ -813,7 +1275,42 @@ int main(void)
     assert(strcmp(lv_label_get_text(s_altitude), "-0.5") == 0);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
     advance(30);
+    assert_in_body(lv_obj_get_parent(s_altitude));
+    assert_in_body(lv_obj_get_parent(s_altitude_trend.chart));
     screenshot("environment");
+    {
+        unsigned i;
+        uint32_t reads;
+        lv_chart_t *chart = (lv_chart_t *)s_altitude_trend.chart;
+        assert(lv_chart_get_type(s_altitude_trend.chart) == LV_CHART_TYPE_BAR);
+        /* 气压页100ms服务仍运行，但5s以内不重复取快照或推进柱状图。 */
+        reads = host_baro_reads;
+        advance(1000);
+        assert(host_baro_reads == reads);
+        for (i = 0; i < UI_TREND_POINTS; ++i)
+        {
+            host_altitude = -12.0f + i * 2.0f;
+            reads = host_baro_reads;
+            advance(5000);
+            assert(host_baro_reads == reads + 1U);
+            assert(trend_latest(&s_altitude_trend) == (lv_coord_t)host_altitude);
+        }
+        assert(chart->ymin[0] < -12 && chart->ymax[0] > 34);
+        lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+        advance(30);
+        screenshot("altitude_history");
+        host_online = 0;
+        advance(5000);
+        assert(trend_latest(&s_altitude_trend) == LV_CHART_POINT_NONE);
+        host_online = 1;
+        host_altitude = NAN;
+        advance(5000);
+        assert(trend_latest(&s_altitude_trend) == LV_CHART_POINT_NONE);
+        host_altitude = -0.5f;
+        advance(125000);
+        assert(chart->ymax[0] - chart->ymin[0] >= 20);
+        lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+    }
     key_back();
     open_feature(PAGE_AHT21);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
@@ -979,9 +1476,9 @@ int main(void)
         assert(s_page == PAGE_SETTINGS);
         open_feature(PAGE_BLUETOOTH);
         assert(s_page == PAGE_BLUETOOTH);
-        assert(strcmp(lv_label_get_text(s_battery_label), "BAT 3.85V") == 0);
+        assert(strcmp(lv_label_get_text(s_battery_label), "~50%") == 0);
         assert(strcmp(lv_label_get_text(s_bt_log), s_bt_text) == 0);
-        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE + SPP") == 0);
+        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE ONLY") == 0);
         assert_static_refresh();
         /* 文字不变而颜色变化时，仍须传输新的像素。 */
         {
@@ -1005,7 +1502,7 @@ int main(void)
         assert(strcmp(lv_label_get_text(s_bt_tx_status), "TX BUSY") == 0);
         host_bt_tx_result = HAL_OK;
         advance(120);
-        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE + SPP") == 0);
+        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE ONLY") == 0);
         screenshot("bluetooth");
 
         /* 点击真实发送按钮，检查UART获得的内容及各失败状态，RX记录不受影响。 */
@@ -1069,7 +1566,7 @@ int main(void)
         assert(strcmp(lv_label_get_text(s_bt_status), "INIT TIMEOUT") == 0);
         host_bt_init_status = HAL_OK;
         advance(120);
-        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE + SPP") == 0);
+        assert(strcmp(lv_label_get_text(s_bt_status), "INIT OK / BLE ONLY") == 0);
         lv_mem_monitor(&before);
         for (iteration = 0; iteration < 10; ++iteration)
         {
@@ -1101,7 +1598,7 @@ int main(void)
         assert(s_page == PAGE_WATCH);
         assert(strcmp(clock_text(), "14:35") == 0);
         screenshot("watch_synced");
-        advance(60000);
+        advance_active(60000);
         assert(strcmp(clock_text(), "14:36") == 0);
         host_bluetooth_feed((const uint8_t *)"24:61\n", 6);
         advance(120);
@@ -1110,7 +1607,7 @@ int main(void)
         host_bluetooth_feed((const uint8_t *)"23:59\n", 6);
         advance(120);
         assert(strcmp(clock_text(), "23:59") == 0);
-        advance(60000);
+        advance_active(60000);
         assert(strcmp(clock_text(), "00:00") == 0);
         screenshot("watch_midnight");
         host_rtc_status = HAL_ERROR;
@@ -1156,30 +1653,117 @@ int main(void)
     assert(strcmp(clock_text(), "00:00") == 0);
     assert_rtc_seconds(0);
     printf("PASS: HH:MM:SS sync, internal RTC second progression, invalid second preservation and midnight carry.\n");
-    /* 手机天气经实际蓝牙接收入口解析，切页保留，并显示最后同步时间。 */
+    /* 表盘只用本地温湿度，手机天气经蓝牙接收后仅显示在天气页。 */
+    host_aht21.valid = 1;
+    host_aht21.sample.temperature_c = 25.0f;
+    host_aht21.sample.humidity_rh = 50.0f;
     host_bluetooth_feed((const uint8_t *)"WEATHER,3,263,80\n", 17);
-    advance(1100);
-    assert(strcmp(lv_label_get_text(s_clock_hint), "OVERCAST") == 0);
-    assert(strcmp(lv_label_get_text(s_watch_temperature), "26.3C") == 0);
+    advance_active(1100);
+    assert(strcmp(lv_label_get_text(s_clock_hint), "RTC / LSE") == 0);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "25.0C\n50.0%") == 0);
     assert_static_refresh();
-    screenshot("watch_weather");
+    screenshot("watch_climate");
+    assert(lv_obj_get_height(s_watch_temperature) <= lv_obj_get_height(lv_obj_get_parent(s_watch_temperature)));
+    host_aht21.sample.temperature_c = -5.0f;
+    host_aht21.sample.humidity_rh = 100.0f;
+    advance_active(1100);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "-5.0C\n100.0%") == 0);
+    host_aht21.valid = 0;
+    advance_active(1100);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "--C\n--%") == 0);
+    host_aht21.valid = 1;
+    host_aht21.sample.temperature_c = 25.0f;
+    host_aht21.sample.humidity_rh = 50.0f;
+    advance_active(1100);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "25.0C\n50.0%") == 0);
     drag(180, 140, -120, 0);
     assert(s_page == PAGE_SETTINGS);
     open_feature(PAGE_WEATHER);
     assert(strstr(lv_label_get_text(s_weather_label), "26.3C / RH 80%") != NULL);
     assert(strcmp(lv_label_get_text(s_weather_value), "26.3 C") == 0);
-    lv_obj_scroll_to_view(s_weather_label, LV_ANIM_OFF);
+    assert(strcmp(lv_label_get_text(s_weather_condition), "OVERCAST") == 0);
+    {
+        static const struct
+        {
+            const char *frame;
+            const char *description;
+        } cases[] =
+        {
+            {"WEATHER,0,263,80\n", "CLEAR"},
+            {"WEATHER,1,263,80\n", "MAINLY CLEAR"},
+            {"WEATHER,2,263,80\n", "PARTLY CLOUDY"},
+            {"WEATHER,45,263,80\n", "FOG"},
+            {"WEATHER,51,263,80\n", "DRIZZLE"},
+            {"WEATHER,61,263,80\n", "RAIN"},
+            {"WEATHER,71,263,80\n", "SNOW"},
+            {"WEATHER,95,263,80\n", "THUNDERSTORM"},
+            {"WEATHER,4,263,80\n", "UNKNOWN"}
+        };
+        uint32_t icon_hashes[sizeof(cases) / sizeof(cases[0])];
+        unsigned index;
+        for (index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index)
+        {
+            lv_area_t condition_area, card_area, body_area, icon_area, value_area;
+            lv_coord_t x, y;
+            char preview_name[32];
+            host_bluetooth_feed((const uint8_t *)cases[index].frame, (uint16_t)strlen(cases[index].frame));
+            advance(120);
+            assert(strcmp(lv_label_get_text(s_weather_condition), cases[index].description) == 0);
+            assert(strcmp(lv_label_get_text(s_weather_value), "26.3 C") == 0);
+            lv_obj_get_coords(s_weather_condition, &condition_area);
+            lv_obj_get_coords(lv_obj_get_parent(s_weather_condition), &card_area);
+            lv_obj_get_coords(s_body, &body_area);
+            assert(condition_area.x1 >= card_area.x1 && condition_area.x2 <= card_area.x2);
+            assert(condition_area.y1 >= card_area.y1 && condition_area.y2 <= card_area.y2);
+            assert(condition_area.y1 >= body_area.y1 && condition_area.y2 <= body_area.y2);
+            lv_obj_get_coords(s_weather_icon, &icon_area);
+            lv_obj_get_coords(s_weather_value, &value_area);
+            assert(icon_area.x1 >= card_area.x1 && icon_area.x2 < value_area.x1);
+            assert(icon_area.y1 >= card_area.y1 && icon_area.y2 < condition_area.y1);
+            assert(s_weather_icon_code == (uint8_t)strtoul(cases[index].frame + 8, NULL, 10));
+            icon_hashes[index] = 2166136261U;
+            for (y = icon_area.y1; y <= icon_area.y2; ++y)
+            {
+                for (x = icon_area.x1; x <= icon_area.x2; ++x)
+                {
+                    icon_hashes[index] = (icon_hashes[index] ^ lv_color_to32(framebuffer[y * 240 + x])) * 16777619U;
+                }
+            }
+            snprintf(preview_name, sizeof(preview_name), "weather_icon_%u", index);
+            screenshot(preview_name);
+        }
+        assert(icon_hashes[0] != icon_hashes[2]); /* 太阳与多云实际像素不同。 */
+        assert(icon_hashes[2] != icon_hashes[3]);
+        assert(icon_hashes[3] != icon_hashes[5]);
+        assert(icon_hashes[5] != icon_hashes[6]);
+        assert(icon_hashes[6] != icon_hashes[7]);
+        assert(icon_hashes[7] != icon_hashes[8]);
+    }
+    host_bluetooth_feed((const uint8_t *)"WEATHER,2,263,80\n", sizeof("WEATHER,2,263,80\n") - 1);
     advance(120);
+    host_bluetooth_feed((const uint8_t *)"WEATHER,100,263,80\n", sizeof("WEATHER,100,263,80\n") - 1);
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_weather_condition), "PARTLY CLOUDY") == 0);
+    assert(s_weather_icon_code == 2);
     assert_static_refresh();
     screenshot("phone_weather");
+    host_tick += 3600000U;
+    advance(120);
+    assert(lv_color_to32(lv_obj_get_style_text_color(s_weather_condition, 0)) == lv_color_to32(lv_color_hex(UI_MUTED)));
+    host_bluetooth_feed((const uint8_t *)"WEATHER,0,263,80\n", sizeof("WEATHER,0,263,80\n") - 1);
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_weather_condition), "CLEAR") == 0);
+    assert(lv_color_to32(lv_obj_get_style_text_color(s_weather_condition, 0)) == lv_color_to32(lv_color_hex(UI_TEXT)));
     key_back();
     key_back();
     host_tick += 3600000U;
     advance(120);
-    assert(strstr(lv_label_get_text(s_clock_hint), "OLD WEATHER") != NULL);
+    tap(5, 275); /* 一小时无触摸后，先恢复亮度及RTC表盘。 */
+    assert(strcmp(lv_label_get_text(s_clock_hint), "RTC / LSE") == 0);
+    assert(strcmp(lv_label_get_text(s_watch_temperature), "25.0C\n50.0%") == 0);
     /* 表盘快捷控件与左滑入口均使用真实触摸；底部非入口区域不触发导航。 */
     tap(174, 230);
-    assert(s_page == PAGE_WEATHER);
+    assert(s_page == PAGE_AHT21);
     key_back();
     tap(64, 230);
     assert(s_page == PAGE_HEART);
@@ -1222,12 +1806,34 @@ int main(void)
     assert(strcmp(lv_label_get_text(s_watch_heart), "72") == 0);
     assert_static_refresh();
     screenshot("watch");
+    bluetooth_rx_error_tests();
+    touch_bridge_tests();
+    touch_idle_tests();
+    /* 切页动画中熄屏：暂停绘图，唤醒后能完成动画并恢复交互。 */
+    create_page(PAGE_SETTINGS, 0, 0);
+    assert(s_transition);
+    host_wake = GPIO_PIN_SET;
+    advance(60);
+    assert(!s_screen_on && s_transition);
+    {
+        unsigned int off_flushes = host_flush_calls;
+        advance(1000);
+        assert(host_flush_calls == off_flushes && s_transition);
+    }
+    host_wake = GPIO_PIN_RESET;
+    advance(60);
+    host_wake = GPIO_PIN_SET;
+    advance(60);
+    assert(s_screen_on && !s_transition && s_page == PAGE_SETTINGS);
+    puts("PASS: screen-off skips pixel transfers and animation processing; Bluetooth still receives and wake completes a paused page transition.");
     printf("PASS: seven feature entries, full-screen watch, shortcuts, swipe entry, and detail return/scroll restoration.\n");
     printf("PASS: phone weather UART parsing, watch/weather display, age and unchanged redraw.\n");
-    printf("PASS: battery voltage on all pages, waiting/error/recovery, precision-aware redraw and navigation.\n");
+    printf("PASS: battery fill pixels, percentage, low/empty/full states, cached pages, waiting/error/recovery and unchanged redraw.\n");
     printf("PASS: unchanged UI produces no pixel transfers; displayed decimal and color changes still redraw.\n");
     printf("PASS: BLE receive page entry/back, off-page reception, clear, split CRLF, binary bytes, bounded log and initialization states.\n");
     printf("PASS: heart card START/STOP, BPM display, measuring/no-signal/unavailable states and preserved navigation.\n");
+    puts("PASS: 5s barometer/1s BPM history, missing data gaps, negative altitude and compass shortest-path smoothing/slew limit/jitter/fusion states.");
+    puts("PASS: first-screen measurement/chart layouts, heart DETAILS touch expand/collapse and direct compass calibration entry.");
     printf("PASS: AHT21 values, negative temperature, waiting/measuring, CRC/I2C/calibration/timeout states and recovery.\n");
     printf("PASS: Send Test touch button, exact TX bytes, UART attempt without link GPIO, timeout/busy/error, RX unchanged.\n");
     printf("PASS: BLE HH:MM -> RTC -> analog UI, fragmented input, invalid-time preservation, autonomous ticking, midnight and "

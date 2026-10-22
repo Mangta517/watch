@@ -39,7 +39,7 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
     float sine, cosine, pitch_sine;
     uint8_t i, mag_used = 0;
 
-    if (raw == NULL || euler == NULL || !isfinite(dt) || dt <= 0.0f)
+    if (raw == NULL || !isfinite(dt) || dt <= 0.0f)
     {
         return 0;
     }
@@ -136,6 +136,10 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
     s_q.q3 /= norm;
 
     /* 5. 反解欧拉角，输出单位为度；限制asin输入，避免浮点舍入越界。 */
+    if (euler == NULL)
+    {
+        return mag_used; /* 只递推四元数，按需省略三角函数输出。 */
+    }
     pitch_sine = 2.0f * (s_q.q0 * s_q.q2 - s_q.q1 * s_q.q3);
     if (pitch_sine > 1.0f)
     {

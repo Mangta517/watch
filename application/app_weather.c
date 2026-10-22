@@ -8,6 +8,12 @@ static uint8_t s_length;
 static uint8_t s_overflow;
 static uint32_t s_last_byte_ms;
 
+void app_weather_reset_receive(void)
+{
+    s_length = 0;
+    s_overflow = 0;
+}
+
 static uint8_t parse_number(const char **cursor, int32_t *value)
 {
     int32_t magnitude = 0;

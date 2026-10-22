@@ -37,6 +37,7 @@
 static SemaphoreHandle_t s_baro_mux; /* 保护快照 */
 static app_baro_struct s_baro_data;  /* 最新数据 (锁内赋值) */
 static uint8_t s_online;             /* 1=快照有效 */
+static uint32_t s_sample_ms;
 static uint8_t s_err_streak;         /* 连续总线失败计数 (仅 Service 读写) */
 
 /**********************
@@ -48,7 +49,7 @@ static void baro_unlock(void);
 /**********************
  *   STATIC FUNCTIONS
  **********************/
-/* 锁未创建成功时跳过锁操作；此时多字段快照的一致性不受保证。 */
+/* 初始化必须取得快照锁；首帧前的查询只读取静态空快照。 */
 static void baro_lock(void)
 {
     if (s_baro_mux != NULL)
@@ -72,6 +73,12 @@ void App_Baro_Init(void)
 {
     /* mutex 在任务上下文创建 (同 App_IMU_Init 的理由) */
     s_baro_mux = xSemaphoreCreateMutex();
+    if (s_baro_mux == NULL)
+    {
+        Error_Handler();
+        return;
+    }
+    s_sample_ms = HAL_GetTick();
 }
 
 void App_Baro_Service(void)
@@ -101,6 +108,7 @@ void App_Baro_Service(void)
             alt = 0.0f;
         }
         s_err_streak = 0;
+        s_sample_ms = HAL_GetTick();
         baro_lock();
         s_baro_data.pressure_pa = ppa;
         s_baro_data.alt_m = alt;
@@ -112,8 +120,7 @@ void App_Baro_Service(void)
     else if ((pr == 2) || (tr == 2))
     {
         app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_ERROR, pr | ((uint32_t)tr << 8), read_started);
-        /* 仅总线失败计入离线; 返回1=数据未就绪 —— 1Hz背景模式对250ms轮询
-         * 两次有效采样之间可能多次返回未就绪，快照与在线状态保持不变 */
+        /* 仅总线失败计入离线; 返回1=数据未就绪时保留快照，过期仍按3s判定。 */
         if (++s_err_streak >= APP_BARO_OFFLINE_STREAK)
         {
             baro_lock();
@@ -132,6 +139,12 @@ void App_Baro_Service(void)
             app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_ERROR, 0x10000U, read_started);
         }
         s_err_streak = 0;
+    }
+    if ((uint32_t)(HAL_GetTick() - s_sample_ms) >= SPL006_SAMPLE_MAX_AGE_MS)
+    {
+        baro_lock();
+        s_online = 0;
+        baro_unlock();
     }
 }
 

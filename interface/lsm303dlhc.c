@@ -14,36 +14,142 @@
 #define MAG_OUT_X_H 0x03
 #define MAG_STATUS  0x09
 #define MAG_ID_A    0x0A
+#define MAG_SAMPLE_TIMEOUT_MS 1000U /* 75Hz输出连续1s没有有效帧，进入原有分步重配置。 */
 
 static uint8_t s_ready;
+static uint16_t s_rate_hz_x10 = 750U;
 
 static uint8_t mag_read(uint8_t reg, uint8_t *data, uint16_t len)
 {
     return my_i2c_read_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_MAG_ADDR, reg, data, len);
 }
 
+enum
+{
+    MAG_RECOVER_ID,
+    MAG_RECOVER_CRA,
+    MAG_RECOVER_CRB,
+    MAG_RECOVER_MODE,
+    MAG_RECOVER_FAILED,
+    MAG_RECOVER_DONE
+};
+static struct
+{
+    uint32_t phase_ms, fault_ms, sample_ms;
+    uint8_t phase, faults, no_data;
+} mag_recovery;
+
+void lsm303dlhc_mag_recover_begin(void)
+{
+    s_ready = 0;
+    s_rate_hz_x10 = 750U;
+    mag_recovery.phase = MAG_RECOVER_ID;
+    mag_recovery.faults = 0;
+    mag_recovery.no_data = 0;
+    mag_recovery.phase_ms = HAL_GetTick();
+}
+
+static uint8_t mag_recover_failed(void)
+{
+    s_ready = 0;
+    mag_recovery.phase = MAG_RECOVER_FAILED;
+    mag_recovery.phase_ms = HAL_GetTick();
+    return 1;
+}
+
+static void mag_read_fault(void)
+{
+    if (mag_recovery.faults < 3U && ++mag_recovery.faults == 3U)
+    {
+        mag_recovery.fault_ms = HAL_GetTick();
+    }
+}
+
+uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
+{
+    static const uint8_t config[] = {0x18, 0x20, 0x00};
+    static const uint8_t regs[] = {MAG_CRA, MAG_CRB, MAG_MODE};
+    uint8_t id[3];
+    uint8_t index;
+    if (s_ready != 0)
+    {
+        if ((mag_recovery.no_data != 0 && (uint32_t)(now_ms - mag_recovery.sample_ms) >= MAG_SAMPLE_TIMEOUT_MS) ||
+            (mag_recovery.faults >= 3U && (uint32_t)(now_ms - mag_recovery.fault_ms) >= 1000U))
+        {
+            lsm303dlhc_mag_recover_begin();
+            return 2;
+        }
+        return 0;
+    }
+    if (mag_recovery.phase == MAG_RECOVER_FAILED)
+    {
+        if ((uint32_t)(now_ms - mag_recovery.phase_ms) >= 1000U)
+        {
+            lsm303dlhc_mag_recover_begin();
+            return 2;
+        }
+        return 1;
+    }
+    if (mag_recovery.phase == MAG_RECOVER_ID)
+    {
+        if (mag_read(MAG_ID_A, id, 3) != 0 || id[0] != 0x48 || id[1] != 0x34 || id[2] != 0x33)
+        {
+            return mag_recover_failed();
+        }
+        mag_recovery.phase = MAG_RECOVER_CRA;
+        return 2;
+    }
+    index = mag_recovery.phase - 1U;
+    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_MAG_ADDR, regs[index], &config[index], 1) != 0)
+    {
+        return mag_recover_failed();
+    }
+    if (++mag_recovery.phase == MAG_RECOVER_FAILED)
+    {
+        mag_recovery.phase = MAG_RECOVER_DONE;
+        s_ready = 1;
+        mag_recovery.sample_ms = HAL_GetTick();
+        return 0;
+    }
+    return 2;
+}
+
 uint8_t lsm303dlhc_mag_init(void)
 {
-    uint8_t id[3];
-    const uint8_t config[3] = {0x18, 0x20, 0x00}; /* 75Hz、±1.3gauss、连续转换 */
-    const uint8_t regs[3] = {MAG_CRA, MAG_CRB, MAG_MODE};
-    uint8_t i;
+    uint8_t result;
+    lsm303dlhc_mag_recover_begin();
+    while ((result = lsm303dlhc_mag_recover_step(HAL_GetTick())) == 2U)
+    {
+    }
+    return result;
+}
 
-    s_ready = 0;
-    if (mag_read(MAG_ID_A, id, 3) != 0 || id[0] != 0x48 || id[1] != 0x34 || id[2] != 0x33)
+uint8_t lsm303dlhc_mag_set_rate(uint16_t rate_hz_x10)
+{
+    uint8_t config;
+    if (rate_hz_x10 != 300U && rate_hz_x10 != 75U)
     {
         return 1;
     }
-
-    /* 按CRA → CRB → MR顺序设置速率、量程，最后启动连续转换。 */
-    for (i = 0; i < 3; ++i)
+    if (s_ready == 0)
     {
-        if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_MAG_ADDR, regs[i], &config[i], 1) != 0)
-        {
-            return 1;
-        }
+        return 1;
     }
-    s_ready = 1;
+    if (s_rate_hz_x10 == rate_hz_x10)
+    {
+        return 0;
+    }
+    config = 0x14; /* 30Hz，保留温度关闭。 */
+    if (rate_hz_x10 == 75U)
+    {
+        config = 0x0C; /* 7.5Hz。 */
+    }
+    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_MAG_ADDR, MAG_CRA, &config, 1) != 0)
+    {
+        lsm303dlhc_mag_recover_begin();
+        return 1;
+    }
+    s_rate_hz_x10 = rate_hz_x10;
     return 0;
 }
 
@@ -54,18 +160,26 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
     uint8_t i;
     float sensitivity;
 
-    if (!s_ready || mag == NULL || mag_read(MAG_STATUS, &status, 1) != 0)
+    if (!s_ready || mag == NULL)
     {
         return LSM303DLHC_MAG_ERROR;
     }
+    if (mag_read(MAG_STATUS, &status, 1) != 0)
+    {
+        mag_read_fault();
+        return LSM303DLHC_MAG_ERROR;
+    }
+    mag_recovery.no_data = 1;
     if ((status & 0x03) == 0)
     {
+        mag_recovery.faults = 0;
         return LSM303DLHC_MAG_NOT_READY;
     }
 
     /* LOCK 残留也完整读取以解锁；磁寄存器自动递增，不给 0x03 加 0x80。 */
     if (mag_read(MAG_OUT_X_H, buf, 6) != 0)
     {
+        mag_read_fault();
         return LSM303DLHC_MAG_ERROR;
     }
     if ((status & 0x01) == 0)
@@ -95,6 +209,9 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
         sample.field_uT[i] = sample.raw[i] * 100.0f / sensitivity;
     }
     /* 只有整帧读取和转换成功才发布，失败时保留调用方的上一帧。 */
+    mag_recovery.faults = 0;
+    mag_recovery.no_data = 0;
+    mag_recovery.sample_ms = HAL_GetTick();
     *mag = sample;
     return LSM303DLHC_MAG_OK;
 }

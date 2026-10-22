@@ -34,12 +34,15 @@ void HAL_GPIO_EXTI_Callback(uint16_t pin);
 static uint8_t regs[128][256];
 static TickType_t tick;
 static uint8_t mpu_auto_ready = 1;
+static uint32_t heart_motion_ms;
 static int scheduler_state = taskSCHEDULER_RUNNING;
 static unsigned hal_delay_calls, task_delay_calls;
 static uint32_t primask;
 static uint8_t bus_active, mutex_taken;
 static int fail_dev = -1, fail_reg = -1;
-static unsigned reads, mag_frames, mag_config_writes;
+static unsigned reads, mag_frames, mag_config_writes, bus_transactions;
+static uint32_t transfer_ms, spl_reset_ended, spl_status_ended;
+static uint8_t check_recovery_waits, spl_status_polls;
 static int spl_fail_read_at = -1, spl_fail_write_at = -1;
 static unsigned spl_reads, spl_writes;
 static unsigned mpu_reads, mpu_writes;
@@ -51,6 +54,7 @@ static uint8_t eeprom_write_protected;
 static TickType_t eeprom_busy_until;
 static int eeprom_fail_write_after = -1;
 static unsigned eeprom_writes;
+static unsigned eeprom_max_transfer;
 static int eeprom_read_fail_after = -1;
 static TickType_t eeprom_busy_ms = 3U;
 extern uint32_t host_imu_save_diag[4];
@@ -63,7 +67,8 @@ void app_heart_motion_update(int16_t accel_x, int16_t accel_y, int16_t accel_z, 
     heart_motion_accel[0] = accel_x;
     heart_motion_accel[1] = accel_y;
     heart_motion_accel[2] = accel_z;
-    assert(sample_ms == HAL_GetTick());
+    assert((uint32_t)(HAL_GetTick() - sample_ms) < 1000U);
+    heart_motion_ms = sample_ms;
     ++heart_motion_frames;
 }
 
@@ -134,6 +139,8 @@ static void bus_enter(my_i2c_bus_t bus)
 {
     assert((bus == MY_I2C_BUS_SENSOR || bus == MY_I2C_BUS_EEPROM) && !bus_active);
     assert(!primask && !mutex_taken); /* No whole-transfer IRQ mask or snapshot mutex. */
+    tick += transfer_ms;
+    ++bus_transactions;
     bus_active = 1;
     HAL_GPIO_EXTI_Callback(MPU6050_INT_Pin);
     assert(bus_active && !primask); /* ISR cannot nest an I2C transaction. */
@@ -147,12 +154,28 @@ uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev)
     bus_enter(bus);
     assert(bus == MY_I2C_BUS_EEPROM && dev == BL24C02_ADDR);
     bus_active = 0;
-    return fail_dev == dev || tick < eeprom_busy_until;
+    return fail_dev == dev || (int32_t)(tick - eeprom_busy_until) < 0;
 }
 uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, uint8_t *data, uint16_t len)
 {
     uint8_t error;
+    if (check_recovery_waits != 0 && dev == SPL006_ADDR && reg == SPL06_MEAS_CFG)
+    {
+        if (spl_status_polls == 0)
+        {
+            assert((uint32_t)(tick - spl_reset_ended) >= 20U);
+        }
+        else if (spl_status_polls == 1)
+        {
+            assert((uint32_t)(tick - spl_status_ended) >= 50U);
+        }
+        ++spl_status_polls;
+    }
     bus_enter(bus);
+    if (check_recovery_waits != 0 && dev == SPL006_ADDR && reg == SPL06_MEAS_CFG)
+    {
+        spl_status_ended = tick;
+    }
     ++reads;
     error = (fail_dev == dev && (fail_reg < 0 || fail_reg == reg));
     if (dev == MPU6050_ADDR)
@@ -166,7 +189,11 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, uint8_t *d
     if (bus == MY_I2C_BUS_EEPROM)
     {
         assert(dev == BL24C02_ADDR && (unsigned)reg + len <= sizeof(eeprom));
-        assert(tick >= eeprom_busy_until);
+        assert((int32_t)(tick - eeprom_busy_until) >= 0);
+        if (len > eeprom_max_transfer)
+        {
+            eeprom_max_transfer = len;
+        }
         if (eeprom_read_fail_after == 0)
         {
             error = 1;
@@ -193,13 +220,17 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, uint8_t *d
         }
         if (dev == MPU6050_ADDR && reg == 0x3A)
         {
-            assert(len == 15 || len == 1);
-            if (len == 15 && mpu_auto_ready != 0)
+            assert(len == 1 || len == 15);
+            if (mpu_auto_ready != 0)
             {
                 data[0] |= 1U; /* 默认模拟持续100Hz输出；新鲜度用例可暂停转换。 */
             }
             regs[dev][0x3A] = 0;
         }
+    }
+    else if (dev == MPU6050_ADDR && reg == MPU6050_INT_STATUS && len == 15)
+    {
+        memset(data, 0xA5, 5); /* 模拟读到部分字节后NACK，驱动不得发布半帧。 */
     }
     bus_active = 0;
     return error;
@@ -220,7 +251,11 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, const uin
     if (bus == MY_I2C_BUS_EEPROM)
     {
         assert(dev == BL24C02_ADDR && len > 0 && len <= 16 - (reg % 16));
-        assert((unsigned)reg + len <= sizeof(eeprom) && tick >= eeprom_busy_until);
+        assert((unsigned)reg + len <= sizeof(eeprom) && (int32_t)(tick - eeprom_busy_until) >= 0);
+        if (len > eeprom_max_transfer)
+        {
+            eeprom_max_transfer = len;
+        }
         if (eeprom_fail_write_after == 0)
         {
             memcpy(eeprom + reg, data, len / 2); /* Partial target page before power/transport failure. */
@@ -252,6 +287,8 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, const uin
         if (dev == SPL006_ADDR && reg == SPL06_RESET)
         {
             regs[dev][SPL06_MEAS_CFG] = spl_reset_status;
+            spl_reset_ended = tick;
+            spl_status_polls = 0;
         }
         if (dev == LSM303DLHC_MAG_ADDR)
         {
@@ -865,6 +902,7 @@ static void service_step(void)
 {
     tick += 10;
     App_IMU_Service();
+    (void)App_IMU_SaveService();
 }
 static void service_missing_frame_tests(void)
 {
@@ -872,10 +910,10 @@ static void service_missing_frame_tests(void)
     uint32_t motion_frames;
     mpu6050_offset_struct zero = {{0, 0, 0}, {0, 0, 0}};
     my_mpu6050_restore_offset(&zero);
-    Common_IMU_Reset();
+    App_IMU_Init();
     fail_dev = LSM303DLHC_MAG_ADDR;
     word(MPU6050_ADDR, 0x3F, 8192);
-    word(MPU6050_ADDR, 0x47, 6560); /* 200deg/s；相邻有效更新隔20ms应前进4度。 */
+    word(MPU6050_ADDR, 0x47, 6560); /* 200deg/s；20ms短间隔按实际读帧时间积分，即4度。 */
     service_step();
     assert(App_IMU_GetSnapshot(&before));
     assert(heart_motion_accel[0] == before.raw.Accel.Accel_x && heart_motion_accel[1] == before.raw.Accel.Accel_y &&
@@ -902,7 +940,7 @@ static void service_missing_frame_tests(void)
     assert(App_IMU_GetSnapshot(&after));
     fail_dev = -1;
     word(MPU6050_ADDR, 0x47, 0);
-    puts("PASS: no-ready frame neither publishes nor integrates; next fresh frame uses elapsed time; stale MPU goes offline and recovers.");
+    puts("PASS: no DATA_RDY neither publishes nor integrates; fresh frames use read intervals; stale MPU goes offline and recovers.");
 }
 
 static void service_tests(uint8_t fail_save)
@@ -933,7 +971,7 @@ static void service_tests(uint8_t fail_save)
     assert(imu.mag_fusion_state == APP_MAG_FUSION_ACTIVE);
     for (n = 0; n < 6; ++n)
     {
-        service_step(); /* No new DRDY: expire after50ms, not100ms. */
+        service_step(); /* No new DRDY: expire after50ms. */
     }
     App_IMU_GetSnapshot(&imu);
     assert(!imu.mag_online && !imu.mag_fused);
@@ -947,11 +985,11 @@ static void service_tests(uint8_t fail_save)
     assert(imu.mag_fused);
     fail_dev = 0x1E;
     fail_reg = -1;
-    for (n = 0; n < 3; ++n)
-    {
-        service_step();
-    }
-    assert(App_IMU_GetSnapshot(&imu) && !imu.mag_online && !imu.mag_fused);
+    service_step();
+    assert(App_IMU_GetSnapshot(&imu) && imu.mag_online); /* One NACK keeps the last frame. */
+    service_step();
+    service_step();
+    assert(App_IMU_GetSnapshot(&imu) && !imu.mag_online && !imu.mag_fused); /* Third NACK in a row stops mag fusion. */
     fail_dev = fail_reg = -1;
     magnetic(30, 0, 40);
     App_IMU_MagCalibrate(1);
@@ -974,6 +1012,12 @@ static void service_tests(uint8_t fail_save)
     service_step();
     App_IMU_GetSnapshot(&imu);
     assert(imu.mag_cal_state == APP_MAG_CAL_DONE && imu.mag_calibrated);
+    assert(imu.mag_persist_state == APP_MAG_PERSIST_SAVING);
+    for (n = 0; n < 40U && imu.mag_persist_state == APP_MAG_PERSIST_SAVING; ++n)
+    {
+        service_step();
+        App_IMU_GetSnapshot(&imu);
+    }
     assert(imu.mag_persist_state == (fail_save ? APP_MAG_PERSIST_SAVE_FAILED : APP_MAG_PERSIST_SAVED));
     assert(imu.mag_cal_samples >= 120);
     assert(imu.mag_cal_span_uT[0] > 79 && imu.mag_cal_span_uT[1] > 99 && imu.mag_cal_span_uT[2] > 119);
@@ -1186,7 +1230,7 @@ static void imu_save_diagnostic_tests(void)
     assert(host_imu_save_diag[2] == 0x60U && host_imu_save_diag[3] >= 6U);
     for (i = 0; i < 3U; ++i)
     {
-        eeprom_read_fail_after = (int)i;
+        eeprom_read_fail_after = (int)i * 2; /* 每份28字节现在分两拍读取。 */
         assert(app_imu_store_save(&b) == APP_IMU_STORE_ERROR);
         assert(host_imu_save_diag[0] == stages[i] && host_imu_save_diag[1] == BL24C02_ERROR_READ_NACK);
         assert(host_imu_save_diag[2] == addresses[i]);
@@ -1227,6 +1271,8 @@ static void imu_save_diagnostic_tests(void)
     puts("PASS: EEPROM pre-read/page-write/ready-timeout/readback/WP diagnostics preserve previous offsets and report recovery");
 }
 
+static uint8_t checked_recovery_step(uint8_t (*step)(uint32_t));
+
 static void restore_tests(uint8_t fail_load)
 {
     app_mag_calibration_struct calibration = {{10, -5, 7}, {1.25f, 1.0f, .8333333f}};
@@ -1251,6 +1297,44 @@ static void restore_tests(uint8_t fail_load)
         assert(imu.mag_calibrated && imu.mag_persist_state == APP_MAG_PERSIST_RESTORED);
         assert(fabsf(imu.mag_body_uT[0] - 50) < .01f && fabsf(imu.mag_body_uT[1]) < .01f);
         assert(imu.mag_fused && imu.mag_cal_samples == 0);
+        {
+            uint32_t last_sample = tick;
+            unsigned saved_writes = eeprom_writes, i;
+            for (i = 0; i < 6U; ++i)
+            {
+                service_step(); /* 器件继续ACK，但不再产生DRDY。 */
+            }
+            App_IMU_GetSnapshot(&imu);
+            assert(!imu.mag_online && imu.mag_persist_state == APP_MAG_PERSIST_RESTORED);
+            tick = last_sample + 999U;
+            assert(lsm303dlhc_mag_recover_step(tick) == 0);
+            ++tick;
+            assert(lsm303dlhc_mag_recover_step(tick) == 2);
+            for (i = 0; i < 10U && lsm303dlhc_mag_recover_step(tick) == 2U; ++i)
+            {
+                tick += 10U;
+            }
+            assert(i < 10U);
+            magnetic(50, -5, 7);
+            service_step();
+            App_IMU_GetSnapshot(&imu);
+            assert(imu.mag_online && imu.mag_fused && imu.mag_persist_state == APP_MAG_PERSIST_RESTORED);
+            assert(fabsf(imu.mag_body_uT[0] - 50.0f) < 0.01f && fabsf(imu.mag_body_uT[1]) < 0.01f);
+            assert(eeprom_writes == saved_writes);
+            /* 新一轮无数据跨tick回绕仍能触发恢复，恢复中每步至多一笔事务。 */
+            tick = UINT32_MAX - 100U;
+            magnetic(50, -5, 7);
+            service_step();
+            service_step();
+            tick += 1000U;
+            assert(checked_recovery_step(lsm303dlhc_mag_recover_step) == 2U);
+            for (i = 0; i < 10U && checked_recovery_step(lsm303dlhc_mag_recover_step) == 2U; ++i)
+            {
+                tick += 10U;
+            }
+            assert(i < 10U && eeprom_writes == saved_writes);
+            puts("PASS: ACK-without-DRDY triggers bounded MAG recovery, retains restored EEPROM calibration and handles tick wrap.");
+        }
     }
     puts(fail_load ? "PASS: EEPROM load failure does not claim restored calibration"
                    : "PASS: fresh-boot sensor service restores EEPROM coefficients");
@@ -1284,9 +1368,16 @@ static void spl006_init_tests(void)
     {
         spl_fail_read_at = failure;
         spl_reads = spl_writes = 0;
-        assert(spl006_init() == 1);
-        pressure = -1;
-        assert(spl006_process_pressure(0, 0, &pressure) == 1 && pressure == -1);
+        if (failure == 1 || failure == 2)
+        {
+            assert(spl006_init() == 0); /* 就绪轮询中的单次NACK被容忍。 */
+        }
+        else
+        {
+            assert(spl006_init() == 1);
+            pressure = -1;
+            assert(spl006_process_pressure(0, 0, &pressure) == 1 && pressure == -1);
+        }
         spl_fail_read_at = -1;
         assert(spl006_init() == 0);
     }
@@ -1373,6 +1464,37 @@ static void baro_service_tests(void)
     regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
     App_Baro_Service();
     assert(App_Baro_GetSnapshot(&sample) && sample.pressure_pa == 100000);
+    {
+        uint32_t last = tick;
+        regs[SPL006_ADDR][SPL06_MEAS_CFG] = 0;
+        tick += SPL006_SAMPLE_MAX_AGE_MS - 1U;
+        App_Baro_Service();
+        assert(App_Baro_GetSnapshot(&sample));
+        ++tick;
+        App_Baro_Service();
+        assert(!App_Baro_GetSnapshot(&sample));
+        assert(spl006_recover_step(tick) == 2U);
+        for (unsigned i = 0; i < 100U; ++i)
+        {
+            tick += 10U;
+            if (spl006_recover_step(tick) == 0)
+            {
+                break;
+            }
+            assert(i < 99U);
+        }
+        regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
+        App_Baro_Service();
+        assert(App_Baro_GetSnapshot(&sample));
+        tick = UINT32_MAX - 1000U;
+        App_Baro_Service();
+        regs[SPL006_ADDR][SPL06_MEAS_CFG] = 0;
+        tick += SPL006_SAMPLE_MAX_AGE_MS;
+        App_Baro_Service();
+        assert(!App_Baro_GetSnapshot(&sample));
+        tick = last;
+        assert(spl006_init() == 0);
+    }
     puts("PASS: real barometer service preserves compensation, partial-readiness snapshots, three-error offline threshold and recovery.");
 }
 
@@ -1385,7 +1507,7 @@ static void mpu_init_error_tests(void)
     assert(my_mpu6050_init() == 0);
     writes = mpu_writes;
     read_count = mpu_reads;
-    assert(writes == 11 && read_count == 3);
+    assert(writes == 12 && read_count == 3);
     memset(&raw, 0x5A, sizeof(raw));
     before = raw;
     for (failure = 0; failure < (int)writes; ++failure)
@@ -1401,9 +1523,16 @@ static void mpu_init_error_tests(void)
     {
         mpu_reads = 0;
         mpu_fail_read_at = failure;
-        assert(my_mpu6050_init() == 1);
+        if (failure == 1)
+        {
+            assert(my_mpu6050_init() == 0); /* 复位窗NACK后下一拍继续读。 */
+        }
+        else
+        {
+            assert(my_mpu6050_init() == 1);
+            assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &before, sizeof(raw)) == 0);
+        }
         mpu_fail_read_at = -1;
-        assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &before, sizeof(raw)) == 0);
         assert(my_mpu6050_init() == 0);
     }
     puts("PASS: every MPU config write and final status read reports failure; incomplete reinit cannot publish an ACK-only frame.");
@@ -1442,8 +1571,444 @@ static void init_delay_tests(void)
     puts("PASS: SPL006/MPU initialization yields only with a running scheduler, preserves minimum waits and bounded retries");
 }
 
+static uint8_t checked_recovery_step(uint8_t (*step)(uint32_t))
+{
+    unsigned transactions = bus_transactions;
+    unsigned task_waits = task_delay_calls, hal_waits = hal_delay_calls;
+    TickType_t started = tick;
+    uint8_t result = step(HAL_GetTick());
+    assert(bus_transactions - transactions <= 1U);
+    assert(task_delay_calls == task_waits && hal_delay_calls == hal_waits);
+    assert((uint32_t)(tick - started) == (bus_transactions - transactions) * transfer_ms);
+    return result;
+}
+
+static void recovery_tests(void)
+{
+    uint8_t (*const steps[])(uint32_t) = {my_mpu6050_recover_step, spl006_recover_step, lsm303dlhc_mag_recover_step};
+    uint8_t (*const inits[])(void) = {my_mpu6050_init, spl006_init, lsm303dlhc_mag_init};
+    const int devices[] = {MPU6050_ADDR, SPL006_ADDR, LSM303DLHC_MAG_ADDR};
+    const mpu6050_offset_struct saved = {{20, -10, 30}, {66, -33, 99}};
+    mpu6050_offset_struct after;
+    Accel_Gyro_struct raw, sentinel;
+    lsm303dlhc_mag_struct mag, previous;
+    uint8_t results[3] = {2, 2, 2};
+    unsigned lap, device;
+    int32_t pressure;
+    tick = UINT32_MAX - 100U;
+    transfer_ms = 2;
+    check_recovery_waits = 1;
+    regs[MPU6050_ADDR][MPU6050_WHO_AM_I] = 0x68;
+    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
+    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
+    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
+    regs[SPL006_ADDR][SPL06_C00_BYTE2] = 0x18;
+    regs[SPL006_ADDR][SPL06_C00_BYTE1] = 0x6A;
+    regs[SPL006_ADDR][SPL06_C00_BYTE0] = 0;
+    my_mpu6050_restore_offset(&saved);
+    my_mpu6050_recover_begin();
+    spl006_recover_begin();
+    lsm303dlhc_mag_recover_begin();
+    memset(&raw, 0x5A, sizeof(raw));
+    sentinel = raw;
+    memset(&mag, 0x5A, sizeof(mag));
+    previous = mag;
+    for (lap = 0; lap < 80; ++lap)
+    {
+        if (lap == 2)
+        {
+            mpu_fail_read_at = (int)mpu_reads; /* RESET轮询恰好一次NACK。 */
+        }
+        for (device = 0; device < 3; ++device)
+        {
+            results[device] = checked_recovery_step(steps[device]);
+            assert(results[device] != 1);
+        }
+        mpu_fail_read_at = -1;
+        if (results[0] == 2)
+        {
+            assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &sentinel, sizeof(raw)) == 0);
+        }
+        if (results[1] == 2)
+        {
+            pressure = -123;
+            assert(spl006_process_pressure(0, 0, &pressure) == 1 && pressure == -123);
+        }
+        if (results[2] == 2)
+        {
+            assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_ERROR && memcmp(&mag, &previous, sizeof(mag)) == 0);
+        }
+        tick += 10; /* 三状态机共同推进；真实任务随后还会走完其他服务和progress。 */
+    }
+    assert(results[0] == 0 && results[1] == 0 && results[2] == 0);
+    assert(spl006_process_pressure(0, 0, &pressure) == 0 && pressure == 100000);
+    /* 每个器件启动失败后，1s冷却结束才重试；无需重启MCU或调用阻塞init。 */
+    for (device = 0; device < 3; ++device)
+    {
+        fail_dev = devices[device];
+        assert(inits[device]() == 1);
+        fail_dev = -1;
+        tick += 999;
+        assert(checked_recovery_step(steps[device]) == 1);
+        ++tick;
+        assert(checked_recovery_step(steps[device]) == 2);
+        for (lap = 0; lap < 100 && checked_recovery_step(steps[device]) == 2; ++lap)
+        {
+            tick += 10;
+        }
+        assert(lap < 100 && checked_recovery_step(steps[device]) == 0);
+    }
+    /* 长期运行I2C故障触发MPU重配置；短暂失败仍可沿原采样路径自行恢复。 */
+    fail_dev = MPU6050_ADDR;
+    for (lap = 0; lap < 3; ++lap)
+    {
+        assert(my_mpu6050_get_data(&raw) == 1);
+    }
+    tick += 999;
+    assert(checked_recovery_step(my_mpu6050_recover_step) == 0);
+    ++tick;
+    assert(checked_recovery_step(my_mpu6050_recover_step) == 2);
+    for (lap = 0; lap < 130; ++lap)
+    {
+        checked_recovery_step(my_mpu6050_recover_step);
+        tick += 10;
+    }
+    fail_dev = -1;
+    for (lap = 0; lap < 150; ++lap)
+    {
+        checked_recovery_step(my_mpu6050_recover_step);
+        tick += 10;
+    }
+    assert(checked_recovery_step(my_mpu6050_recover_step) == 0);
+    my_mpu6050_get_offset(&after);
+    assert(memcmp(&saved, &after, sizeof(saved)) == 0);
+    assert(my_mpu6050_zero_offset_state() == MPU6050_CAL_RESTORED);
+    puts("PASS: real recovery steps use at most one transaction/no waits, tolerate reset NACK, retry failed boot/runtime faults, preserve offsets and survive tick wrap.");
+}
+
+static void mpu_stale_recovery_tests(void)
+{
+    Accel_Gyro_struct raw;
+    mpu6050_offset_struct saved = {{20, -10, 30}, {66, -33, 99}};
+    mpu6050_offset_struct after;
+    uint32_t start, writes_before;
+    uint32_t i;
+    for (i = 0; i < 2; ++i)
+    {
+        assert(my_mpu6050_init() == 0);
+        my_mpu6050_restore_offset(&saved);
+        mpu_auto_ready = 1;
+        assert(my_mpu6050_get_data(&raw) == 0);
+        if (i != 0)
+        {
+            tick = UINT32_MAX - 500U;
+            assert(my_mpu6050_get_data(&raw) == 0);
+        }
+        start = tick;
+        mpu_auto_ready = 0;
+        regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] = 0x40;
+        writes_before = mpu_writes;
+        tick = start + 999U;
+        assert(my_mpu6050_get_data(&raw) == MPU6050_DATA_NOT_READY);
+        assert(checked_recovery_step(my_mpu6050_recover_step) == 0);
+        ++tick;
+        assert(checked_recovery_step(my_mpu6050_recover_step) == 2);
+        while (checked_recovery_step(my_mpu6050_recover_step) == 2)
+        {
+            tick += 10;
+            assert((uint32_t)(tick - start) < 2000U);
+        }
+        assert(mpu_writes > writes_before);
+        mpu_auto_ready = 1;
+        assert(my_mpu6050_get_data(&raw) == 0);
+        tick += 999U;
+        assert(checked_recovery_step(my_mpu6050_recover_step) == 0);
+        assert(my_mpu6050_get_data(&raw) == 0);
+        tick += 999U;
+        assert(checked_recovery_step(my_mpu6050_recover_step) == 0);
+        my_mpu6050_get_offset(&after);
+        assert(memcmp(&saved, &after, sizeof(saved)) == 0);
+    }
+    puts("PASS: ACK without DATA_RDY recovers at 1s, preserves offsets, renews freshness and handles tick wrap.");
+}
+
+static void polling_tests(void)
+{
+    Accel_Gyro_struct raw, before;
+    const mpu6050_offset_struct zero = {{0, 0, 0}, {0, 0, 0}};
+    const mpu6050_offset_struct offset = {{20, -10, 30}, {17, 33, -99}};
+    app_imu_struct snapshot, previous;
+    uint32_t started, motion_before, mag_reads;
+    unsigned i, transactions;
+
+    tick = 1000U;
+    memset(eeprom, 0xFF, sizeof(eeprom));
+    assert(my_mpu6050_init() == 0);
+    assert(regs[MPU6050_ADDR][MPU6050_INT_ENABLE] == 0x01);
+    assert(regs[MPU6050_ADDR][MPU6050_FIFO_EN] == 0);
+    assert(regs[MPU6050_ADDR][MPU6050_USER_CTRL] == 0);
+    my_mpu6050_restore_offset(&zero);
+    mpu_auto_ready = 0;
+    memset(&raw, 0x5A, sizeof(raw));
+    before = raw;
+    transactions = bus_transactions;
+    assert(my_mpu6050_get_data(&raw) == MPU6050_DATA_NOT_READY);
+    assert(bus_transactions == transactions + 1U && memcmp(&raw, &before, sizeof(raw)) == 0);
+
+    /* 多次更新寄存器后只读取最后一帧，不消费任何历史队列。 */
+    for (i = 1; i <= 15U; ++i)
+    {
+        word(MPU6050_ADDR, 0x3B, (int16_t)i);
+        regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
+    }
+    word(MPU6050_ADDR, 0x3D, -456);
+    word(MPU6050_ADDR, 0x3F, 8192);
+    word(MPU6050_ADDR, 0x41, 12345); /* 温度字节不应混入角速度。 */
+    word(MPU6050_ADDR, 0x43, -17);
+    word(MPU6050_ADDR, 0x45, 33);
+    word(MPU6050_ADDR, 0x47, -3280);
+    transactions = bus_transactions;
+    started = tick;
+    transfer_ms = 3U;
+    assert(my_mpu6050_get_data(&raw) == 0);
+    assert(bus_transactions == transactions + 1U && tick == started + 3U);
+    assert(my_mpu6050_sample_ms() == started);
+    assert(raw.Accel.Accel_x == 15 && raw.Accel.Accel_y == -456 && raw.Accel.Accel_z == 8192);
+    assert(raw.Gyro.Gyro_x == -17 && raw.Gyro.Gyro_y == 33 && raw.Gyro.Gyro_z == -3280);
+    before = raw;
+    assert(my_mpu6050_get_data(&raw) == MPU6050_DATA_NOT_READY);
+    assert(memcmp(&raw, &before, sizeof(raw)) == 0 && my_mpu6050_sample_ms() == started);
+    fail_dev = MPU6050_ADDR;
+    fail_reg = MPU6050_INT_STATUS;
+    assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &before, sizeof(raw)) == 0);
+    assert(my_mpu6050_sample_ms() == started);
+    fail_dev = fail_reg = -1;
+    transfer_ms = 0;
+    my_mpu6050_restore_offset(&offset);
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
+    assert(my_mpu6050_get_data(&raw) == 0);
+    assert(raw.Accel.Accel_x == -5 && raw.Accel.Accel_y == -446 && raw.Accel.Accel_z == 8162);
+    assert(raw.Gyro.Gyro_x == -34 && raw.Gyro.Gyro_y == 0 && raw.Gyro.Gyro_z == -3181);
+
+    my_mpu6050_restore_offset(&zero);
+    App_IMU_Init();
+    fail_dev = LSM303DLHC_MAG_ADDR;
+    tick = 5000U;
+    word(MPU6050_ADDR, 0x3B, 0);
+    word(MPU6050_ADDR, 0x3D, 0);
+    word(MPU6050_ADDR, 0x43, 0);
+    word(MPU6050_ADDR, 0x45, 0);
+    word(MPU6050_ADDR, 0x47, 3280); /* 恒定100deg/s，用于验证短间隔的时间积分。 */
+    motion_before = heart_motion_frames;
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
+    App_IMU_Service();
+    assert(App_IMU_GetSnapshot(&previous) && heart_motion_frames == motion_before + 1U);
+    assert(angle_error(previous.yaw_deg, 1.0f) < 0.05f && heart_motion_ms == tick);
+    tick += 20U;
+    App_IMU_Service();
+    assert(App_IMU_GetSnapshot(&snapshot) && heart_motion_frames == motion_before + 1U);
+    assert(snapshot.yaw_deg == previous.yaw_deg);
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
+    App_IMU_Service();
+    assert(App_IMU_GetSnapshot(&snapshot) && heart_motion_frames == motion_before + 2U);
+    assert(angle_error(snapshot.yaw_deg, previous.yaw_deg + 2.0f) < 0.05f);
+    previous = snapshot;
+    tick += 150U;
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
+    App_IMU_Service();
+    assert(App_IMU_GetSnapshot(&snapshot) && heart_motion_frames == motion_before + 3U);
+    assert(angle_error(snapshot.yaw_deg, previous.yaw_deg + 1.0f) < 0.05f); /* 长断采不外推150ms。 */
+    tick = UINT32_MAX - 4U;
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
+    App_IMU_Service();
+    assert(App_IMU_GetSnapshot(&previous));
+    tick += 20U;
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
+    App_IMU_Service();
+    assert(App_IMU_GetSnapshot(&snapshot));
+    assert(angle_error(snapshot.yaw_deg, previous.yaw_deg + 2.0f) < 0.05f);
+
+    fail_dev = -1;
+    mpu_auto_ready = 1;
+    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
+    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
+    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
+    assert(lsm303dlhc_mag_init() == 0);
+    magnetic(30, 0, 40);
+    tick += 10U;
+    App_IMU_Service();
+    mag_reads = mag_frames;
+    magnetic(30, 0, 40);
+    tick += 5U;
+    App_IMU_Service();
+    assert(mag_frames == mag_reads);
+    tick += 4U;
+    App_IMU_Service();
+    assert(mag_frames == mag_reads);
+    ++tick;
+    App_IMU_Service();
+    assert(mag_frames == mag_reads + 1U);
+    puts("PASS: polling uses one transaction/latest frame, DRDY, signed axes/temperature skip, offsets, partial-read rejection, variable dt, long-gap restart, MAG cadence and tick wrap.");
+}
+
+static void async_save_tests(void)
+{
+    const mpu6050_offset_struct first = {{20, -10, 30}, {66, -33, 99}};
+    const mpu6050_offset_struct second = {{-21, 11, -31}, {-67, 34, -100}};
+    mpu6050_offset_struct input, loaded, zero = {{0, 0, 0}, {0, 0, 0}};
+    app_imu_store_result result;
+    app_imu_struct sample;
+    unsigned int lap, before, waits, failure;
+    memset(eeprom, 0xFF, sizeof(eeprom));
+    regs[MPU6050_ADDR][MPU6050_WHO_AM_I] = 0x68;
+    assert(my_mpu6050_init() == 0);
+    my_mpu6050_restore_offset(&zero);
+    word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, 8192);
+    App_IMU_Init();
+    assert(app_imu_store_save(&first) == APP_IMU_STORE_OK);
+    for (failure = 0; failure < 3U; ++failure)
+    {
+        input = second;
+        eeprom_fail_write_after = -1;
+        if (failure < 2U)
+        {
+            eeprom_fail_write_after = (int)failure;
+        }
+        tick = UINT32_MAX - 55U; /* 保存跨HAL tick回绕。 */
+        eeprom_busy_until = tick;
+        before = bus_transactions;
+        assert(app_imu_store_save_begin(&input) == APP_IMU_STORE_BUSY);
+        assert(bus_transactions == before);
+        memset(&input, 0, sizeof(input)); /* begin之后调用方可重用输入缓冲。 */
+        waits = task_delay_calls;
+        eeprom_max_transfer = 0;
+        result = APP_IMU_STORE_BUSY;
+        for (lap = 0; lap < 80U && result == APP_IMU_STORE_BUSY; ++lap)
+        {
+            tick += 10U;
+            App_IMU_Service();
+            assert(App_IMU_GetSnapshot(&sample));
+            before = bus_transactions;
+            result = app_imu_store_save_step();
+            assert(bus_transactions - before <= 1U && task_delay_calls == waits);
+        }
+        assert(lap < 80U && eeprom_max_transfer <= 16U);
+        eeprom_fail_write_after = -1;
+        assert(app_imu_store_load(&loaded) == APP_IMU_STORE_OK);
+        if (failure < 2U)
+        {
+            assert(result == APP_IMU_STORE_ERROR && memcmp(&loaded, &first, sizeof(first)) == 0);
+            memset(eeprom + 0x80, 0xFF, 32);
+        }
+        else
+        {
+            assert(result == APP_IMU_STORE_OK && memcmp(&loaded, &second, sizeof(second)) == 0);
+        }
+    }
+    puts("PASS: async save uses at most one 16-byte transaction/no waits per step; sampling continues, torn pages preserve the old copy, begin copies input and time wraps.");
+}
+
+static void euler_decimation_tests(void)
+{
+    Accel_Gyro_struct raw = {{0, 0, 6560}, {0, 0, 8192}};
+    Euler_struct full, reduced;
+    unsigned int frame;
+    Common_IMU_Reset();
+    for (frame = 0; frame < 100U; ++frame)
+    {
+        Common_IMU_GetEulerAngleWithMag(&raw, NULL, &full, 0.01f);
+    }
+    Common_IMU_Reset();
+    for (frame = 0; frame < 100U; ++frame)
+    {
+        Euler_struct *output = NULL;
+        if (frame % 2U != 0)
+        {
+            output = &reduced;
+        }
+        Common_IMU_GetEulerAngleWithMag(&raw, NULL, output, 0.01f);
+    }
+    assert(angle_error(full.yaw, reduced.yaw) < 0.001f);
+    assert(fabsf(full.pitch - reduced.pitch) < 0.001f && fabsf(full.roll - reduced.roll) < 0.001f);
+    puts("PASS: 50Hz Euler output preserves every 100Hz quaternion integration step.");
+}
+
+static void power_profile_tests(void)
+{
+    Accel_Gyro_struct raw;
+    app_imu_struct snapshot;
+    uint16_t stable, average;
+    unsigned i, writes;
+    const mpu6050_offset_struct zero = {{0, 0, 0}, {0, 0, 0}};
+
+    tick = 1000U;
+    memset(eeprom, 0xFF, sizeof(eeprom));
+    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
+    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
+    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
+    assert(my_mpu6050_init() == 0 && lsm303dlhc_mag_init() == 0);
+    App_IMU_Init();
+    assert(app_imu_set_sample_period(20U) == 20U);
+    assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 19U && regs[MPU6050_ADDR][MPU6050_CONFIG] == 4U);
+    assert(regs[0x1E][0x00] == 0x14U);
+    writes = mpu_writes;
+    assert(app_imu_set_sample_period(20U) == 20U && mpu_writes == writes);
+    my_mpu6050_restore_offset(&zero);
+    my_mpu6050_zero_offset_begin(tick);
+    for (i = 0; i <= 200U; ++i)
+    {
+        raw = (Accel_Gyro_struct){.Gyro = {66, -33, 99}, .Accel = {20, -10, 8222}};
+        my_mpu6050_zero_offset_step(&raw, 1, tick);
+        tick += 20U;
+    }
+    my_mpu6050_zero_offset_progress(&stable, &average);
+    assert(my_mpu6050_zero_offset_state() == MPU6050_CAL_DONE && stable == 100U && average == 100U);
+    my_mpu6050_restore_offset(&zero);
+    word(MPU6050_ADDR, 0x3F, 8192);
+    assert(app_imu_set_sample_period(40U) == 40U);
+    assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 39U && regs[MPU6050_ADDR][MPU6050_CONFIG] == 5U);
+    assert(regs[0x1E][0x00] == 0x0CU);
+    for (i = 0; i < 10U; ++i)
+    {
+        tick += 40U;
+        App_IMU_Service();
+        assert(App_IMU_GetSnapshot(&snapshot) != 0);
+        assert(heart_motion_ms == tick);
+    }
+    App_IMU_MagCalibrate(1);
+    assert(app_imu_set_sample_period(40U) == 20U);
+    assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 19U && regs[0x1E][0x00] == 0x14U);
+    puts("PASS: 50/25Hz rate registers, no repeated reconfiguration, 50Hz 100+100-frame calibration, 25Hz fusion and pending magnetic calibration.");
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "power_profile") == 0)
+    {
+        power_profile_tests();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "async_save") == 0)
+    {
+        async_save_tests();
+        euler_decimation_tests();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "polling") == 0)
+    {
+        polling_tests();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "mpu_stale") == 0)
+    {
+        mpu_stale_recovery_tests();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "recovery") == 0)
+    {
+        recovery_tests();
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "save_failed") != 0)
     {
         restore_tests(strcmp(argv[1], "load_failed") == 0);

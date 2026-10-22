@@ -64,10 +64,13 @@ uint32_t app_diag_clock_count(void);
 void app_diag_task_begin(uint8_t id);
 void app_diag_task_end(uint8_t id, uint32_t target_ms);
 void app_diag_sensor_init(uint8_t id, uint32_t result);
+/* 0=就绪，1=失败冷却，2=恢复中；状态/尝试次数保存在s_sensors供调试器查看。 */
+void app_diag_sensor_recovery(uint8_t id, uint8_t state);
 void app_diag_sensor_record(uint8_t id, uint8_t outcome, uint32_t result, uint32_t started);
 void app_diag_heart_queue(uint8_t dropped);
 void app_diag_heart_tx(uint16_t count, uint8_t success);
 void app_diag_receive(const uint8_t *data, uint16_t size);
+void app_diag_reset_receive(void);
 /* IMU,CAL请求仅传递标志；sensor任务消费后执行校准/EEPROM保存。 */
 uint8_t app_diag_take_imu_calibration(void);
 /* 仅LVGL任务发送，每100ms最多一帧；不增加任务，不在传感器/ISR里发串口。 */

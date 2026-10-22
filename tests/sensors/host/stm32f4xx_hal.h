@@ -3,6 +3,20 @@
 #define SENSOR_HOST_HAL_H
 #include <stdint.h>
 
+#define PWR_MAINREGULATOR_ON 0U
+#define PWR_SLEEPENTRY_WFI   1U
+void HAL_PWR_EnterSLEEPMode(uint32_t regulator, uint8_t entry);
+
+typedef struct
+{
+    uint32_t KR, PR, RLR, SR;
+} IWDG_TypeDef;
+extern IWDG_TypeDef host_iwdg;
+#define IWDG (&host_iwdg)
+#ifndef WRITE_REG
+#define WRITE_REG(reg, value) ((reg) = (value))
+#endif
+
 typedef struct
 {
     uint32_t unused;
@@ -12,6 +26,7 @@ extern GPIO_TypeDef host_gpio_a, host_gpio_b;
 #define GPIOB                (&host_gpio_b)
 #define GPIO_PIN_0           (1U << 0)
 #define GPIO_PIN_1           (1U << 1)
+#define GPIO_PIN_2           (1U << 2)
 #define GPIO_PIN_3           (1U << 3)
 #define GPIO_PIN_4           (1U << 4)
 #define GPIO_PIN_5           (1U << 5)
@@ -27,6 +42,8 @@ extern GPIO_TypeDef host_gpio_a, host_gpio_b;
 #define GPIO_PIN_15          (1U << 15)
 #define GPIO_MODE_INPUT      0U
 #define GPIO_MODE_OUTPUT_PP  1U
+#define GPIO_NOPULL          0U
+#define GPIO_SPEED_FREQ_LOW  0U
 #define GPIO_PULLUP          1U
 #define GPIO_SPEED_FREQ_HIGH 2U
 typedef enum
@@ -74,6 +91,7 @@ typedef struct
 } TIM_HandleTypeDef;
 #define TIM_CHANNEL_3                                3U
 #define DMA2_Stream2_IRQn                            2
+#define SPI1_IRQn                                    35
 #define __HAL_TIM_SET_AUTORELOAD(timer, value)       ((timer)->arr = (value))
 #define __HAL_TIM_SET_COMPARE(timer, channel, value) ((timer)->compare = (value))
 
@@ -93,8 +111,10 @@ void HAL_Delay(uint32_t ms);
 uint32_t HAL_GetTick(void);
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config);
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
+void HAL_GPIO_TogglePin(GPIO_TypeDef *port, uint16_t pin);
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
 void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority);
+void HAL_NVIC_EnableIRQ(int irq);
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout);
 HAL_StatusTypeDef HAL_SPI_Transmit_DMA(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size);
 HAL_StatusTypeDef HAL_SPI_DMAStop(SPI_HandleTypeDef *spi);

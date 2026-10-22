@@ -14,6 +14,9 @@ extern "C"
 
     /* Call once in the display task after display and touch initialization. */
     void App_UI_Create(void);
+    /* 仅显示任务使用：熄屏时继续处理业务/按键，不运行LVGL动画和刷新定时器。 */
+    uint8_t App_UI_IsScreenOn(void);
+    void App_UI_ServiceSleeping(void);
 
     /* Queue a return to the previous page, preserving its vertical scroll position.
  * Call in the display task or under App_Display_Lock(); never from an ISR.
