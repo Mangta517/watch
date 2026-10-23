@@ -1091,6 +1091,11 @@
               <FilePath>..\application\app_mag_store.c</FilePath>
             </File>
             <File>
+              <FileName>app_tickless.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_tickless.c</FilePath>
+            </File>
+            <File>
               <FileName>app_uptime.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\application\app_uptime.c</FilePath>

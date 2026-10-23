@@ -41,10 +41,13 @@
 
 #define configUSE_PREEMPTION		1
 #define configUSE_MUTEXES			1   /* app_display 的 LVGL 互斥锁需要 */
-#define configUSE_IDLE_HOOK			1   /* IDLE中进入Sleep，保留1ms节拍和外设中断。 */
+#define configUSE_IDLE_HOOK            0
+#define configUSE_TICKLESS_IDLE        2   /* 项目适配层测量RTC间隔，同时补偿HAL和RTOS时间。 */
+#include "app_tickless.h"
+#define portSUPPRESS_TICKS_AND_SLEEP(ticks) app_tickless_sleep(ticks)
 #define configUSE_TICK_HOOK			0
 #define configCPU_CLOCK_HZ			( ( unsigned long ) 84000000 ) /* F411: HSI/8*84/2 = 84MHz */
-#define configTICK_RATE_HZ			( ( TickType_t ) 1000 )
+#define configTICK_RATE_HZ             1000U /* HAL补时及LVGL时间单位均为1ms。 */
 #define configMAX_PRIORITIES		( 5 )
 #define configMINIMAL_STACK_SIZE	( ( unsigned short ) 128 )
 #define configTOTAL_HEAP_SIZE		( ( size_t ) ( 16 * 1024 ) )	/* 10K 偏紧: lvgl任务4K栈+idle+mutex≈6.5K, 留余量防建任务失败 */

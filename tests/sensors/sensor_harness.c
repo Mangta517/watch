@@ -2060,6 +2060,26 @@ static void power_profile_tests(void)
     assert(regs[0x1E][0x02] == 0 && regs[SPL006_ADDR][SPL06_MEAS_CFG] == 7U);
     assert(my_mpu6050_recover_step(tick) == 0 && lsm303dlhc_mag_recover_step(tick) == 0 && spl006_recover_step(tick) == 0);
     assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 39U && regs[0x1E][0x00] == 0x0CU);
+    for (i = 0; i < 500U; ++i)
+    {
+        magnetic(30.0f, 42.0f, 0.0f);
+        tick += 40U;
+        App_IMU_Service();
+    }
+    assert(App_IMU_GetSnapshot(&snapshot) != 0);
+    assert(angle_error(snapshot.yaw_deg, -54.4623f) < 0.5f);
+    for (i = 0; i < 5U; ++i)
+    {
+        app_imu_set_sleep(1);
+        tick += 800U;
+        app_imu_set_sleep(0);
+        tick += 200U;
+        magnetic(30.0f, 42.0f, 0.0f);
+        App_IMU_Service();
+        assert(App_IMU_GetSnapshot(&snapshot) != 0);
+        assert(angle_error(snapshot.yaw_deg, -54.4623f) < 0.5f);
+    }
+    puts("PASS: five 1Hz sleep/wake snapshots preserve settled magnetic heading instead of restarting at zero.");
     assert(app_imu_is_calibrating() == 0);
     App_IMU_MagCalibrate(1);
     assert(app_imu_is_calibrating() != 0);

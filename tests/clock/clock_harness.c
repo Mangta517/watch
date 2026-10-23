@@ -6,6 +6,8 @@
 #include <string.h>
 
 static uint32_t rtc_seconds, backup;
+RTC_TypeDef host_rtc;
+static uint32_t rtc_subsecond, prescaler_changes;
 static uint32_t tick, lse_ready;
 uint32_t HAL_GetTick(void)
 {
@@ -52,7 +54,22 @@ HAL_StatusTypeDef HAL_RCCEx_PeriphCLKConfig(RCC_PeriphCLKInitTypeDef *clock)
 HAL_StatusTypeDef HAL_RTC_Init(RTC_HandleTypeDef *rtc)
 {
     assert(rtc_enabled && rtc->Instance == RTC && rtc->Init.HourFormat == RTC_HOURFORMAT_24);
-    assert(rtc->Init.AsynchPrediv == 127 && rtc->Init.SynchPrediv == 255);
+    assert(rtc->Init.AsynchPrediv == 0 && rtc->Init.SynchPrediv == 32767);
+    if (host_rtc.PRER == 0)
+    {
+        host_rtc.PRER = rtc->Init.SynchPrediv;
+    }
+    return HAL_OK;
+}
+HAL_StatusTypeDef RTC_EnterInitMode(RTC_HandleTypeDef *rtc)
+{
+    assert(rtc->Instance == RTC);
+    ++prescaler_changes;
+    return HAL_OK;
+}
+HAL_StatusTypeDef RTC_ExitInitMode(RTC_HandleTypeDef *rtc)
+{
+    assert(rtc->Instance == RTC && host_rtc.PRER == 32767U);
     return HAL_OK;
 }
 HAL_StatusTypeDef HAL_RTC_SetTime(RTC_HandleTypeDef *rtc, RTC_TimeTypeDef *time, uint32_t format)
@@ -81,6 +98,7 @@ HAL_StatusTypeDef HAL_RTC_GetTime(RTC_HandleTypeDef *rtc, RTC_TimeTypeDef *time,
     time->Hours = rtc_seconds / 3600;
     time->Minutes = rtc_seconds / 60 % 60;
     time->Seconds = rtc_seconds % 60;
+    time->SubSeconds = 32767U - rtc_subsecond;
     return HAL_OK;
 }
 HAL_StatusTypeDef HAL_RTC_GetDate(RTC_HandleTypeDef *rtc, RTC_DateTypeDef *date, uint32_t format)
@@ -111,6 +129,7 @@ int main(int argc, char **argv)
     static const uint8_t nul_frame[] = {'1', '2', ':', '3', '0', 0, '\n'};
     assert(!watch_rtc_is_synced());
     assert(watch_rtc_get_time(&time) == HAL_ERROR);
+    assert(watch_rtc_get_subsecond() == UINT32_MAX);
     assert(watch_rtc_init() == HAL_OK && !watch_rtc_is_synced());
     assert(set_calls == 1 && date_calls == 1);
     calls = set_calls;
@@ -128,7 +147,18 @@ int main(int argc, char **argv)
     assert(watch_rtc_get_time(&time) == HAL_OK); /* 连续读取验证GetDate已释放影子锁存 */
     calls = set_calls;
     seconds = rtc_seconds;
+    host_rtc.PRER = (127U << 16) | 255U; /* 模拟旧固件已经初始化过的备份域。 */
     assert(watch_rtc_init() == HAL_OK && rtc_seconds == seconds && set_calls == calls && date_calls == 1);
+    assert(prescaler_changes == 1U && host_rtc.PRER == 32767U);
+    lse_ready = 1;
+    rtc_subsecond = 12345U;
+    assert(watch_rtc_get_subsecond() == 12345U && !shadow_locked);
+    rtc_subsecond = 32767U;
+    assert(watch_rtc_get_subsecond() == 32767U && !shadow_locked);
+    rtc_subsecond = 0;
+    assert(watch_rtc_get_subsecond() == 0 && !shadow_locked);
+    lse_ready = 0;
+    assert(watch_rtc_get_subsecond() == UINT32_MAX);
     assert(watch_rtc_is_synced());
     feed("24:00\n", 500);
     assert(app_clock_get_result() == APP_CLOCK_INVALID && rtc_seconds == seconds);

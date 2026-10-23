@@ -194,7 +194,7 @@ void SysTick_Handler(void)
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
   /* 心跳中断(与 Watch 工程一致的做法):
-   * SysTick 每1ms进入一次, HAL_IncTick 维护HAL心跳;
+   * 运行时SysTick每1ms进入一次；Tickless休眠的跳过时间由app_tickless同时补齐HAL/RTOS。
    * FreeRTOS 调度器启动后, 再把节拍交给 xPortSysTickHandler 做任务时间片轮转。
    * 调度器未启动时不执行调度处理, 避免启动阶段冲突。 */
   if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)

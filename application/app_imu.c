@@ -346,7 +346,7 @@ void app_imu_set_sleep(uint8_t sleeping)
     app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_set_sleep(sleeping));
     if (sleeping == 0)
     {
-        Common_IMU_Reset();
+        /* 间歇采样保留四元数；只丢弃旧时间基准，避免每秒把航向重新拉回0。 */
         s_have_sample = s_have_euler = s_mag_valid = 0;
         s_mag_poll_tick = xTaskGetTickCount() - pdMS_TO_TICKS(s_mag_poll_ms);
     }

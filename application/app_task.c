@@ -141,11 +141,7 @@ void App_Task_Start(void)
     } /* 调度器异常返回时死守 */
 }
 
-/* 仅IDLE任务执行：CPU空闲时Sleep；SysTick/UART/DMA中断唤醒，喂狗仍由任务进度决定。 */
-void vApplicationIdleHook(void)
-{
-    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
-}
+/* IDLE休眠统一由app_tickless处理，喂狗仍由LVGL及sensor任务进度决定。 */
 
 /**********************
  *   STATIC FUNCTIONS

@@ -34,13 +34,22 @@ typedef struct
 typedef struct
 {
     uint8_t Hours, Minutes, Seconds;
-    uint32_t DayLightSaving, StoreOperation;
+    uint32_t DayLightSaving, StoreOperation, SubSeconds;
 } RTC_TimeTypeDef;
 typedef struct
 {
     uint8_t Year, Month, Date, WeekDay;
 } RTC_DateTypeDef;
-#define RTC                        ((void *)1)
+typedef struct
+{
+    uint32_t PRER;
+} RTC_TypeDef;
+extern RTC_TypeDef host_rtc;
+#define RTC (&host_rtc)
+#define __HAL_RTC_WRITEPROTECTION_DISABLE(handle) ((void)(handle))
+#define __HAL_RTC_WRITEPROTECTION_ENABLE(handle) ((void)(handle))
+HAL_StatusTypeDef RTC_EnterInitMode(RTC_HandleTypeDef *rtc);
+HAL_StatusTypeDef RTC_ExitInitMode(RTC_HandleTypeDef *rtc);
 #define RCC_OSCILLATORTYPE_LSE     1U
 #define RCC_LSE_ON                 1U
 #define RCC_PLL_NONE               0U

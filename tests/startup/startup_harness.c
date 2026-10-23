@@ -335,8 +335,8 @@ void vTaskDelay(TickType_t ticks)
     unsigned int feeds = watchdog_feeds;
     unsigned int internal_feeds = iwdg_feeds;
     assert((ticks == 5 || ticks == 1 || (power_profile != 0 && (s_power_state & APP_POWER_IDLE) != 0 && ticks == 20U)) && task_count == 3);
-    vApplicationIdleHook(); /* 模拟任务阻塞后的空闲窗口，休眠不能替代进度喂狗。 */
-    assert(idle_sleep_calls != 0 && watchdog_feeds == feeds && iwdg_feeds == internal_feeds);
+    /* Tickless寄存器行为由tests/tickless覆盖，此处只验证任务进度喂狗。 */
+    assert(watchdog_feeds == feeds && iwdg_feeds == internal_feeds);
     tick += ticks;
     if (ticks == 1)
     {
