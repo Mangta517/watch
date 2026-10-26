@@ -1,5 +1,9 @@
 #include "app_battery_log.h"
 #include "app_battery_log_ble.h"
+#include "app_reset_ble.h"
+#include "app_clock.h"
+#include "app_weather.h"
+#include "watch_rtc.h"
 #include "app_battery.h"
 #include "int_battery_log.h"
 #include "semphr.h"
@@ -26,6 +30,28 @@ static uint16_t tx_size;
 static char tx_copy[128], output[32768];
 static uint32_t tick;
 static unsigned tx_count;
+static app_reset_info_struct reset_info;
+
+void app_reset_get_info(app_reset_info_struct *info)
+{
+    *info = reset_info;
+}
+void watch_rtc_get_status(watch_rtc_status_struct *value)
+{
+    memset(value, 0, sizeof(*value));
+}
+void app_weather_get_snapshot(app_weather_struct *value)
+{
+    memset(value, 0, sizeof(*value));
+}
+app_clock_result app_clock_get_result(void)
+{
+    return APP_CLOCK_NONE;
+}
+uint32_t app_clock_get_received_count(void)
+{
+    return 0;
+}
 
 SemaphoreHandle_t xSemaphoreCreateMutex(void)
 {
@@ -377,6 +403,251 @@ static void clear_tests(void)
     }
     puts("PASS: clear waits for UART completion and mutex, masks TPS3823, erases only sector 7, resets even after erase failure.");
 }
+static void history_command(const char *text)
+{
+    app_reset_ble_receive((const uint8_t *)text, (uint16_t)strlen(text), tick);
+}
+
+static void history_pump(void)
+{
+    unsigned budget = 1024;
+    while (budget != 0)
+    {
+        --budget;
+        tick += 100;
+        if (tx_active != 0)
+        {
+            tx_done = 1;
+        }
+        if (app_reset_ble_service(1, tick) == 0)
+        {
+            break;
+        }
+    }
+    assert(budget != 0 && !tx_active);
+}
+
+static void set_reset_info(void)
+{
+    reset_info.reset_flags = 0x0E000000;
+    reset_info.valid = 1;
+    reset_info.kind = APP_RESET_HARDFAULT;
+    reset_info.pc = 0x08012345;
+    reset_info.lr = 0x08022223;
+    reset_info.sp = 0x2001FFE0;
+    reset_info.uptime_ms = 1234567;
+    reset_info.last_feed_ms = 1234500;
+    reset_info.max_feed_gap_ms = 221;
+    reset_info.cfsr = 0x8200;
+    reset_info.hfsr = 0x40000000;
+}
+
+static void reset_tests(void)
+{
+    app_reset_info_struct saved;
+    app_battery_log_record_struct record;
+    uint8_t original[16];
+    uint8_t complete;
+    app_battery_log_init();
+    app_battery_log_service(60); /* 模拟旧版本留下的正常电压格式。 */
+    memcpy(original, (const void *)(uintptr_t)BATTERY_LOG_START_ADDR, sizeof(original));
+    set_reset_info();
+    app_battery_log_init();
+    app_battery_log_service(9);
+    assert(status().slots == 2);
+    battery.valid = 0;
+    app_battery_log_service(10);
+    assert(status().slots == 2);
+    battery.valid = 1;
+    battery.result = HAL_ERROR;
+    app_battery_log_service(11);
+    assert(status().slots == 2);
+    battery.result = HAL_OK;
+    mutex_locked = 1;
+    app_battery_log_service(12);
+    mutex_locked = 0;
+    app_battery_log_service(13);
+    assert(status().slots == 20 && status().samples == 1 && status().resets == 1);
+    assert(memcmp(original, (const void *)(uintptr_t)BATTERY_LOG_START_ADDR, sizeof(original)) == 0);
+    assert(app_battery_log_read_reset(3, 2, &saved, &complete) == 0 && complete && memcmp(&saved, &reset_info, sizeof(saved)) == 0);
+    assert(app_battery_log_read_reset(3, 1, &saved, &complete) == 0 && !complete);
+    assert(app_battery_log_read_reset(UINT32_MAX, 2, &saved, &complete) == 0 && !complete);
+    mutex_locked = 1;
+    assert(app_battery_log_read_reset(3, 2, &saved, &complete) == 1);
+    mutex_locked = 0;
+    unsigned before = programs;
+    app_battery_log_service(14);
+    assert(programs == before); /* 本次开机不重复保存。 */
+    for (uint32_t i = 0; i < APP_BATTERY_LOG_RESET_SLOTS; ++i)
+    {
+        uint8_t *byte = (uint8_t *)(uintptr_t)(BATTERY_LOG_START_ADDR + (3 + i) * 8);
+        *byte ^= 1;
+        assert(app_battery_log_read_reset(3, 2, &saved, &complete) == 0 && !complete);
+        *byte ^= 1;
+    }
+    app_battery_log_service(60);
+    assert(status().samples == 2 && status().slots == 21);
+    assert(app_battery_log_read(20, 2, &record) == 0 && record.voltage_mv == 3900);
+    memset(&reset_info, 0, sizeof(reset_info)); /* 模拟备份域完全丢失。 */
+    reset_info.reset_flags = 0x08000000;
+    app_battery_log_init();
+    assert(status().resets == 1 && status().samples == 2);
+    app_battery_log_service(10);
+    assert(status().resets == 2 && status().slots == 39);
+    assert(app_battery_log_read_reset(22, 3, &saved, &complete) == 0 && complete && saved.valid == 0 && saved.reset_flags == 0x08000000);
+    assert(app_battery_log_read_reset(3, 2, &saved, &complete) == 0 && complete && saved.pc == 0x08012345);
+
+    command("BATLOG,READ\n");
+    pump(10);
+    assert(strstr(output, "BATLOG,BEGIN,2,39\r\n") && strstr(output, "BATLOG,END,2\r\n"));
+    assert(strstr(output, "65280") == NULL);
+    output[0] = '\0';
+    history_command("RESET,HIS");
+    assert(app_reset_ble_service(1, tick) == 0);
+    history_command("TORY\r\n");
+    mutex_locked = 1;
+    assert(app_reset_ble_service(1, tick) == 1 && !tx_active);
+    mutex_locked = 0;
+    tx_start = HAL_BUSY;
+    assert(app_reset_ble_service(1, tick) == 1 && !tx_active);
+    tx_start = HAL_OK;
+    history_pump();
+    assert(strstr(output, "RESET,HISTORY,BEGIN,2,39,1\r\n"));
+    assert(strstr(output, "RESET,HISTORY,ENTRY,SLOT,3,BOOT,2\r\n"));
+    assert(strstr(output, "RESET,HISTORY,ENTRY,SLOT,22,BOOT,3\r\n"));
+    assert(strstr(output, "PC,0x08012345") && strstr(output, "VALID,0,FLAGS,0x08000000,KIND,0"));
+    assert(strstr(output, "RESET,HISTORY,END,2\r\n"));
+    assert(erases == 0 && flash_locked && !irq_mask);
+    puts("PASS: reset history preserves old voltage data, waits for valid startup voltage, saves once, survives backup loss, checks all CRCs and exports full scenes over BLE.");
+}
+
+static void reset_torn_tests(void)
+{
+    for (int halfwords = 0; halfwords < 72; ++halfwords)
+    {
+        memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, 0x20000);
+        memset(&reset_info, 0, sizeof(reset_info));
+        app_battery_log_init();
+        app_battery_log_service(60);
+        uint8_t original[16];
+        memcpy(original, (const void *)(uintptr_t)BATTERY_LOG_START_ADDR, sizeof(original));
+        set_reset_info();
+        app_battery_log_init();
+        program_remaining = halfwords;
+        app_battery_log_service(10);
+        assert(status().state == APP_BATTERY_LOG_ERROR && status().resets == 0);
+        assert(memcmp(original, (const void *)(uintptr_t)BATTERY_LOG_START_ADDR, sizeof(original)) == 0);
+        program_remaining = -1;
+        app_battery_log_init();
+        assert(status().resets == 0 && status().samples == 1);
+        app_battery_log_service(10);
+        assert(status().resets == 1 && status().state == APP_BATTERY_LOG_READY);
+        app_battery_log_init();
+        assert(status().resets == 1 && status().samples == 1 && erases == 0);
+    }
+    puts("PASS: power interruption at all 72 halfword boundaries rejects partial reset entries, preserves old data and resumes after reboot without erasing.");
+}
+
+static void reset_full_tests(void)
+{
+    app_battery_log_init();
+    for (uint32_t minute = 1; minute < BATTERY_LOG_CAPACITY - 17; ++minute)
+    {
+        app_battery_log_service(minute * 60);
+    }
+    assert(status().slots == BATTERY_LOG_CAPACITY - 17);
+    set_reset_info();
+    app_battery_log_init();
+    unsigned before = programs;
+    app_battery_log_service(10);
+    assert(status().state == APP_BATTERY_LOG_FULL && status().resets == 0 && programs == before && erases == 0);
+    puts("PASS: insufficient space for a complete reset entry stops before programming and never erases existing records.");
+}
+
+static void reset_history_tests(void)
+{
+    app_battery_log_init();
+    history_command("RESET,HISTORY\n");
+    history_pump();
+    assert(strcmp(output, "RESET,HISTORY,BEGIN,0,0,1\r\nRESET,HISTORY,END,0\r\n") == 0);
+    for (uint32_t minute = 1; minute <= 70; ++minute)
+    {
+        app_battery_log_service(minute * 60);
+    }
+    output[0] = '\0';
+    history_command("RESET,HISTORY,EXTRA\n");
+    assert(app_reset_ble_service(1, tick) == 0);
+    history_command("RESET,HISTORY\n");
+    tick += 100;
+    assert(app_reset_ble_service(1, tick) == 1 && tx_active);
+    tx_done = 1;
+    tick += 100;
+    mutex_locked = 1;
+    assert(app_reset_ble_service(1, tick) == 1 && !tx_active);
+    mutex_locked = 0;
+    app_battery_log_service(71 * 60); /* BEGIN后的新槽留到下一次请求。 */
+    assert(app_reset_ble_service(1, tick) == 1 && !tx_active);
+    assert(app_reset_ble_service(1, tick) == 1 && !tx_active);
+    history_pump();
+    assert(strcmp(output, "RESET,HISTORY,BEGIN,0,71,1\r\nRESET,HISTORY,END,0\r\n") == 0);
+
+    set_reset_info();
+    app_battery_log_init();
+    app_battery_log_service(10);
+    for (unsigned mode = 0; mode < 3; ++mode)
+    {
+        history_command("RESET,HISTORY\n");
+        tick += 100;
+        assert(app_reset_ble_service(1, tick) == 1 && tx_active);
+        if (mode == 0)
+        {
+            app_reset_ble_reset();
+            assert(app_reset_ble_service(0, tick) == 1);
+        }
+        tx_result = HAL_OK;
+        if (mode == 1)
+        {
+            tx_result = HAL_ERROR;
+        }
+        tx_done = 1;
+        tick += 100;
+        if (mode < 2)
+        {
+            assert(app_reset_ble_service(1, tick) == 0);
+            unsigned before = tx_count;
+            assert(app_reset_ble_service(1, tick + 10000) == 0 && tx_count == before);
+        }
+        else
+        {
+            assert(app_reset_ble_service(1, tick) == 1 && !tx_active);
+            unsigned budget = 4;
+            while (tx_active == 0 && budget != 0)
+            {
+                --budget;
+                tick += 100;
+                assert(app_reset_ble_service(1, tick) == 1);
+            }
+            assert(tx_active);
+            tx_done = 1;
+            tick += 100;
+            assert(app_reset_ble_service(1, tick) == 1 && !tx_active);
+            tick += 99;
+            assert(app_reset_ble_service(1, tick) == 1 && !tx_active);
+            tick += 1;
+            assert(app_reset_ble_service(1, tick) == 1 && tx_active);
+            history_pump();
+        }
+    }
+    tx_result = HAL_OK;
+    memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0x12, 8);
+    app_battery_log_init();
+    output[0] = '\0';
+    history_command("RESET,HISTORY\n");
+    history_pump();
+    assert(strcmp(output, "RESET,HISTORY,ERROR,3\r\n") == 0);
+    puts("PASS: history handles empty/unknown logs, bounded scans, snapshot limits, lock contention, malformed commands, 100ms pacing, UART errors and power abort without retries.");
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -386,7 +657,23 @@ int main(int argc, char **argv)
     memset(mapped, 0x5A, 0x60000);
     memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, 0x20000);
     FLASH->ACR = FLASH_ACR_DCEN;
-    if (strcmp(argv[1], "record") == 0)
+    if (strcmp(argv[1], "reset_history") == 0)
+    {
+        reset_history_tests();
+    }
+    else if (strcmp(argv[1], "reset") == 0)
+    {
+        reset_tests();
+    }
+    else if (strcmp(argv[1], "reset_torn") == 0)
+    {
+        reset_torn_tests();
+    }
+    else if (strcmp(argv[1], "reset_full") == 0)
+    {
+        reset_full_tests();
+    }
+    else if (strcmp(argv[1], "record") == 0)
     {
         record_tests();
     }

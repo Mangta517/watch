@@ -1,4 +1,4 @@
-/** 内部Flash sector 7专用于电压日志；APP与Bootloader均止于此地址。 */
+/** 内部Flash sector 7用于电压与复位日志；APP与Bootloader均止于此地址。 */
 #ifndef INT_BATTERY_LOG_H
 #define INT_BATTERY_LOG_H
 

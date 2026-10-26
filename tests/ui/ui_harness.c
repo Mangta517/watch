@@ -6,6 +6,7 @@
 #include "../../application/app_ui.c"
 #include "lv_port_indev_template.h"
 #include "app_reset.h"
+#include "app_battery_log.h"
 #include "touch.h"
 
 void app_reset_assert_stop(void)
@@ -23,6 +24,27 @@ void app_reset_get_info(app_reset_info_struct *info)
 }
 
 static unsigned host_log_rx, host_log_reset, host_log_tx;
+uint8_t app_battery_log_get_status(app_battery_log_status_struct *status)
+{
+    memset(status, 0, sizeof(*status));
+    status->state = APP_BATTERY_LOG_READY;
+    return 0;
+}
+uint8_t app_battery_log_read(uint32_t slot, uint32_t session, app_battery_log_record_struct *record)
+{
+    (void)slot;
+    (void)session;
+    (void)record;
+    return 1;
+}
+uint8_t app_battery_log_read_reset(uint32_t slot, uint32_t session, app_reset_info_struct *info, uint8_t *complete)
+{
+    (void)slot;
+    (void)session;
+    (void)info;
+    *complete = 0;
+    return 0;
+}
 static uint8_t host_log_busy;
 void app_battery_log_ble_receive(const uint8_t *data, uint16_t size, uint32_t now_ms)
 {
@@ -1302,6 +1324,26 @@ static void reset_report_tests(void)
     bluetooth_send_heart();
     assert(host_bt_tx_calls == calls + 5);
     puts("PASS: RESET query traverses the real UI RX/TX path in quiet/debug builds and collects its TX while a log command waits.");
+    calls = host_bt_tx_calls;
+    host_bluetooth_feed((const uint8_t *)"RESET,HIS", 9);
+    bluetooth_receive();
+    bluetooth_send_heart();
+    assert(host_bt_tx_calls == calls);
+    host_bluetooth_feed((const uint8_t *)"TORY\n", 5);
+    bluetooth_receive();
+    host_tick += 100;
+    bluetooth_send_heart();
+    assert(host_async_active && host_bt_tx_calls == calls + 1);
+    assert(strcmp((const char *)host_bt_tx_data, "RESET,HISTORY,BEGIN,0,0,1\r\n") == 0);
+    bluetooth_send_heart();
+    assert(host_async_active == 0);
+    host_tick += 100;
+    bluetooth_send_heart();
+    assert(host_async_active && host_bt_tx_calls == calls + 2);
+    assert(strcmp((const char *)host_bt_tx_data, "RESET,HISTORY,END,0\r\n") == 0);
+    bluetooth_send_heart();
+    assert(host_async_active == 0);
+    puts("PASS: fragmented RESET,HISTORY reaches the real UI RX/TX path in quiet/debug builds.");
     state_report_tests();
 }
 

@@ -185,7 +185,7 @@ uint8_t app_battery_log_ble_service(uint8_t ready, uint32_t now_ms)
                 {
                     s_ble.session = record.seconds;
                 }
-                else if (s_ble.session != 0)
+                else if (s_ble.session != 0 && record.voltage_mv < APP_BATTERY_LOG_RESET_TAG)
                 {
                     s_ble.tx_length = (uint16_t)snprintf(s_ble.tx, sizeof(s_ble.tx), "BATLOG,DATA,%lu,%lu,%lu,%u\r\n",
                                                          (unsigned long)s_ble.index, (unsigned long)s_ble.session,

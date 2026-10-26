@@ -13,7 +13,12 @@ static struct
     uint32_t session;
     uint32_t last_minute;
     uint8_t session_written;
+    uint8_t reset_written;
 } s_log;
+
+#define BATTERY_LOG_RESET_COMMIT 0x52535431
+
+static uint8_t battery_log_reset_decode(uint32_t slot, uint32_t session, app_reset_info_struct *info);
 
 /* CRC16-CCITT多项式0x1021；格式及session参与初值，坏开机标记不会串接到旧曲线。 */
 static uint16_t battery_log_crc(const uint8_t *data, uint32_t session)
@@ -96,9 +101,18 @@ void app_battery_log_init(void)
             {
                 s_log.session = record.seconds;
             }
-            else if (s_log.session != 0)
+            else if (s_log.session != 0 && record.voltage_mv < APP_BATTERY_LOG_RESET_TAG)
             {
                 ++s_log.status.samples;
+            }
+            else if (s_log.session != 0 && record.voltage_mv == APP_BATTERY_LOG_RESET_TAG)
+            {
+                app_reset_info_struct info;
+                if (slot + APP_BATTERY_LOG_RESET_SLOTS <= BATTERY_LOG_CAPACITY &&
+                    battery_log_reset_decode(slot, s_log.session, &info) == 0)
+                {
+                    ++s_log.status.resets;
+                }
             }
         }
     }
@@ -151,6 +165,78 @@ static uint8_t battery_log_append(uint32_t seconds, uint16_t voltage_mv)
     return 0;
 }
 
+static uint8_t battery_log_reset_decode(uint32_t slot, uint32_t session, app_reset_info_struct *info)
+{
+    uint32_t words[16];
+    uint32_t i;
+    app_battery_log_record_struct record;
+    if (session == 0 || slot > BATTERY_LOG_CAPACITY - APP_BATTERY_LOG_RESET_SLOTS)
+    {
+        return 1;
+    }
+    for (i = 0; i < APP_BATTERY_LOG_RESET_SLOTS; ++i)
+    {
+        if (battery_log_decode(slot + i, session, &record) != 0 || record.voltage_mv != APP_BATTERY_LOG_RESET_TAG + i)
+        {
+            return 1;
+        }
+        if (i < 16)
+        {
+            words[i] = record.seconds;
+        }
+        else if (record.seconds != BATTERY_LOG_RESET_COMMIT)
+        {
+            return 1;
+        }
+    }
+    memcpy(info, words, sizeof(*info));
+    return 0;
+}
+
+static void battery_log_save_reset(void)
+{
+    app_reset_info_struct info;
+    uint32_t words[16];
+    uint32_t i, needed = APP_BATTERY_LOG_RESET_SLOTS;
+    app_reset_get_info(&info); /* 启动时已固定的RCC标志及上次备份现场，不读取本次运行检查点。 */
+    if (info.reset_flags == 0 && info.valid == 0)
+    {
+        s_log.reset_written = 1;
+        return;
+    }
+    if (s_log.session_written == 0)
+    {
+        ++needed;
+    }
+    if (BATTERY_LOG_CAPACITY - s_log.status.slots < needed)
+    {
+        s_log.status.state = APP_BATTERY_LOG_FULL;
+        return;
+    }
+    if (s_log.session_written == 0)
+    {
+        if (battery_log_append(s_log.session, UINT16_MAX) != 0)
+        {
+            return;
+        }
+        s_log.session_written = 1;
+    }
+    memcpy(words, &info, sizeof(info));
+    for (i = 0; i < 16; ++i)
+    {
+        if (battery_log_append(words[i], (uint16_t)(APP_BATTERY_LOG_RESET_TAG + i)) != 0)
+        {
+            return;
+        }
+    }
+    /* 每槽CRC绑定开机编号，最后提交版本标记；掉电残留不能当成完整现场。 */
+    if (battery_log_append(BATTERY_LOG_RESET_COMMIT, APP_BATTERY_LOG_RESET_TAG + 16) == 0)
+    {
+        s_log.reset_written = 1;
+        ++s_log.status.resets;
+    }
+}
+
 void app_battery_log_service(uint32_t seconds)
 {
     app_battery_struct battery;
@@ -158,10 +244,21 @@ void app_battery_log_service(uint32_t seconds)
     {
         return;
     }
+    if (s_log.status.state != APP_BATTERY_LOG_READY ||
+        ((s_log.reset_written != 0 || seconds < 10) && seconds / 60 == s_log.last_minute))
+    {
+        xSemaphoreGive(s_log_mutex);
+        return;
+    }
+    app_battery_get_snapshot(&battery);
+    if (s_log.status.state == APP_BATTERY_LOG_READY && s_log.reset_written == 0 && seconds >= 10 &&
+        battery.valid != 0 && battery.result == HAL_OK)
+    {
+        battery_log_save_reset();
+    }
     if (s_log.status.state == APP_BATTERY_LOG_READY && seconds / 60 != s_log.last_minute)
     {
-        app_battery_get_snapshot(&battery);
-        if (battery.valid != 0 && battery.result == HAL_OK && battery.voltage_mv < UINT16_MAX)
+        if (battery.valid != 0 && battery.result == HAL_OK && battery.voltage_mv < APP_BATTERY_LOG_RESET_TAG)
         {
             s_log.last_minute = seconds / 60;
             if (s_log.session_written == 0 && battery_log_append(s_log.session, UINT16_MAX) == 0)
@@ -206,6 +303,24 @@ uint8_t app_battery_log_read(uint32_t slot, uint32_t session, app_battery_log_re
     }
     xSemaphoreGive(s_log_mutex);
     return result;
+}
+
+uint8_t app_battery_log_read_reset(uint32_t slot, uint32_t session, app_reset_info_struct *info, uint8_t *complete)
+{
+    if (s_log_mutex == NULL || xSemaphoreTake(s_log_mutex, 0) == 0)
+    {
+        return 1;
+    }
+    *complete = 0;
+    if (slot < s_log.status.slots && s_log.status.slots - slot >= APP_BATTERY_LOG_RESET_SLOTS)
+    {
+        if (battery_log_reset_decode(slot, session, info) == 0)
+        {
+            *complete = 1;
+        }
+    }
+    xSemaphoreGive(s_log_mutex);
+    return 0;
 }
 
 void app_battery_log_clear_and_reset(void)

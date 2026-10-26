@@ -19,6 +19,8 @@ with tempfile.TemporaryDirectory(prefix="watch-battery-log-") as output:
     subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-int-to-pointer-cast",
                     "-Itests/battery_log/host", "-Itests/sensors/host", "-Iapplication", "-Iinterface",
                     "tests/battery_log/battery_log_harness.c", "application/app_battery_log.c",
-                    "application/app_battery_log_ble.c", "interface/int_battery_log.c", "-o", exe], cwd=root, check=True)
-    for mode in ["record", "full", "faults", "unknown", "allocation", "ble", "clear", "erase_error"]:
+                    "application/app_battery_log_ble.c", "application/app_reset_ble.c",
+                    "interface/int_battery_log.c", "-o", exe], cwd=root, check=True)
+    for mode in ["record", "full", "faults", "unknown", "allocation", "ble", "clear", "erase_error",
+                 "reset", "reset_torn", "reset_full", "reset_history"]:
         subprocess.run([exe, mode], cwd=root, check=True)

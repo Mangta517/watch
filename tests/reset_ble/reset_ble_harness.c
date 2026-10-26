@@ -1,5 +1,6 @@
 #include "app_reset_ble.h"
 #include "app_reset.h"
+#include "app_battery_log.h"
 #include "app_clock.h"
 #include "app_weather.h"
 #include "watch_rtc.h"
@@ -29,6 +30,28 @@ static uint32_t host_now;
 static unsigned host_writes, host_takes, host_snapshots, host_lines;
 static char host_pending[112];
 static char host_output[4096];
+
+uint8_t app_battery_log_get_status(app_battery_log_status_struct *status)
+{
+    memset(status, 0, sizeof(*status));
+    status->state = APP_BATTERY_LOG_READY;
+    return 0;
+}
+uint8_t app_battery_log_read(uint32_t slot, uint32_t session, app_battery_log_record_struct *record)
+{
+    (void)slot;
+    (void)session;
+    (void)record;
+    return 1;
+}
+uint8_t app_battery_log_read_reset(uint32_t slot, uint32_t session, app_reset_info_struct *info, uint8_t *complete)
+{
+    (void)slot;
+    (void)session;
+    (void)info;
+    *complete = 0;
+    return 0;
+}
 
 void app_reset_get_info(app_reset_info_struct *info)
 {

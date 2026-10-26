@@ -3,6 +3,11 @@
 #define APP_BATTERY_LOG_H
 
 #include <stdint.h>
+#include "app_reset.h"
+
+/* 0xFF00..0xFF0F存16个现场字，0xFF10为最后提交槽；与有效电压区分。 */
+#define APP_BATTERY_LOG_RESET_TAG   0xFF00
+#define APP_BATTERY_LOG_RESET_SLOTS 17
 
 typedef enum
 {
@@ -17,6 +22,7 @@ typedef struct
 {
     uint32_t slots;
     uint32_t samples;
+    uint32_t resets;
     app_battery_log_state state;
 } app_battery_log_status_struct;
 
@@ -32,7 +38,9 @@ void app_battery_log_service(uint32_t seconds);
 uint8_t app_battery_log_get_status(app_battery_log_status_struct *status);
 /* 0=读取成功，1=坏槽/越界，2=互斥锁忙；忙时导出不得跳过此槽。session来自前一个开机标记。 */
 uint8_t app_battery_log_read(uint32_t slot, uint32_t session, app_battery_log_record_struct *record);
-/* LVGL显式清空：屏蔽TPS3823、仅擦sector 7，成功失败均重启。 */
+/* 0=已取得读取结果，1=日志锁忙/未初始化；complete=1时info为完整现场，0表示无完整记录。 */
+uint8_t app_battery_log_read_reset(uint32_t slot, uint32_t session, app_reset_info_struct *info, uint8_t *complete);
+/* LVGL显式清空电压与复位历史：屏蔽TPS3823、仅擦sector 7，成功失败均重启。 */
 void app_battery_log_clear_and_reset(void);
 
 #endif

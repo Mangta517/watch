@@ -1,5 +1,6 @@
 #include "app_reset_ble.h"
 #include "app_reset.h"
+#include "app_battery_log.h"
 #include "app_clock.h"
 #include "app_weather.h"
 #include "watch_rtc.h"
@@ -11,7 +12,8 @@ enum
 {
     APP_REPORT_NONE,
     APP_REPORT_RESET,
-    APP_REPORT_STATE
+    APP_REPORT_STATE,
+    APP_REPORT_HISTORY
 };
 
 static struct
@@ -21,11 +23,12 @@ static struct
     app_weather_struct weather;
     app_clock_result clock_result;
     uint32_t snapshot_ms, clock_frames;
+    uint32_t slot, limit, session, exported;
     char line[16];
     char tx[112];
     uint32_t rx_ms, tx_ms;
     uint16_t length, tx_length;
-    uint8_t overflow, report, index, pending;
+    uint8_t overflow, report, index, pending, history_stage;
 } s_ble;
 
 void app_reset_ble_reset(void)
@@ -34,6 +37,7 @@ void app_reset_ble_reset(void)
     s_ble.overflow = 0;
     s_ble.report = 0;
     s_ble.index = 0;
+    s_ble.history_stage = 0;
     /* UART不复制异步缓冲；复位解析器或蓝牙断电均不能改写在途数据。 */
     if (s_ble.pending == 0)
     {
@@ -66,6 +70,15 @@ void app_reset_ble_receive(const uint8_t *data, uint16_t size, uint32_t now_ms)
                 {
                     s_ble.report = APP_REPORT_STATE;
                     s_ble.index = 0;
+                }
+                else if (strcmp(s_ble.line, "RESET,HISTORY") == 0)
+                {
+                    s_ble.report = APP_REPORT_HISTORY;
+                    s_ble.history_stage = 0;
+                    s_ble.index = 0;
+                    s_ble.slot = 0;
+                    s_ble.session = 0;
+                    s_ble.exported = 0;
                 }
             }
             s_ble.length = 0;
@@ -120,6 +133,64 @@ static int app_state_ble_format(uint32_t now_ms)
     }
 }
 
+static int app_reset_history_format(void)
+{
+    app_battery_log_status_struct status;
+    app_battery_log_record_struct record;
+    uint32_t budget = 32;
+    uint8_t result, complete;
+    if (s_ble.history_stage == 0)
+    {
+        if (app_battery_log_get_status(&status) != 0)
+        {
+            return 0;
+        }
+        s_ble.limit = status.slots;
+        if (status.state == APP_BATTERY_LOG_STARTING || status.state == APP_BATTERY_LOG_NEED_CLEAR)
+        {
+            s_ble.history_stage = 3;
+            return snprintf(s_ble.tx, sizeof(s_ble.tx), "RESET,HISTORY,ERROR,%u\r\n", (unsigned)status.state);
+        }
+        return snprintf(s_ble.tx, sizeof(s_ble.tx), "RESET,HISTORY,BEGIN,%lu,%lu,%u\r\n",
+                        (unsigned long)status.resets, (unsigned long)status.slots, (unsigned)status.state);
+    }
+    while (s_ble.slot < s_ble.limit && budget != 0)
+    {
+        --budget;
+        result = app_battery_log_read(s_ble.slot, s_ble.session, &record);
+        if (result == 2)
+        {
+            return 0;
+        }
+        if (result == 0 && record.voltage_mv == UINT16_MAX)
+        {
+            s_ble.session = record.seconds;
+        }
+        else if (result == 0 && record.voltage_mv == APP_BATTERY_LOG_RESET_TAG &&
+                 s_ble.limit - s_ble.slot >= APP_BATTERY_LOG_RESET_SLOTS)
+        {
+            if (app_battery_log_read_reset(s_ble.slot, s_ble.session, &s_ble.info, &complete) != 0)
+            {
+                return 0;
+            }
+            if (complete != 0)
+            {
+                ++s_ble.exported;
+                s_ble.slot += APP_BATTERY_LOG_RESET_SLOTS;
+                return snprintf(s_ble.tx, sizeof(s_ble.tx), "RESET,HISTORY,ENTRY,SLOT,%lu,BOOT,%lu\r\n",
+                                (unsigned long)(s_ble.slot - APP_BATTERY_LOG_RESET_SLOTS), (unsigned long)s_ble.session);
+            }
+        }
+        ++s_ble.slot;
+    }
+    if (s_ble.slot == s_ble.limit)
+    {
+        s_ble.history_stage = 3;
+        return snprintf(s_ble.tx, sizeof(s_ble.tx), "RESET,HISTORY,END,%lu\r\n", (unsigned long)s_ble.exported);
+    }
+    return 0;
+}
+
 static uint8_t app_reset_ble_format(uint32_t now_ms)
 {
     int length;
@@ -128,12 +199,23 @@ static uint8_t app_reset_ble_format(uint32_t now_ms)
     {
         length = app_state_ble_format(now_ms);
     }
+    else if (s_ble.report == APP_REPORT_HISTORY && s_ble.history_stage != 2)
+    {
+        length = app_reset_history_format();
+        if (length == 0)
+        {
+            return 1; /* 日志锁忙或本轮扫描预算耗尽，保持请求，下一轮继续。 */
+        }
+    }
     else
     {
         switch (s_ble.index)
         {
         case 0:
-            app_reset_get_info(info); /* 一次请求只取一份上一启动快照。 */
+            if (s_ble.report == APP_REPORT_RESET)
+            {
+                app_reset_get_info(info); /* 一次请求只取一份上一启动快照。 */
+            }
             length = snprintf(s_ble.tx, sizeof(s_ble.tx), "RESET,CAUSE,VALID,%lu,FLAGS,0x%08lX,KIND,%lu\r\n",
                               (unsigned long)info->valid, (unsigned long)info->reset_flags, (unsigned long)info->kind);
             break;
@@ -187,12 +269,39 @@ uint8_t app_reset_ble_service(uint8_t ready, uint32_t now_ms)
         }
         if (s_ble.report != 0)
         {
-            ++s_ble.index;
             s_ble.tx_ms = now_ms;
-            if ((s_ble.report == APP_REPORT_RESET && s_ble.index == 5) ||
-                (s_ble.report == APP_REPORT_STATE && s_ble.index == 4))
+            if (s_ble.report == APP_REPORT_HISTORY)
             {
-                app_reset_ble_reset();
+                if (s_ble.history_stage == 0)
+                {
+                    s_ble.history_stage = 1;
+                }
+                else if (s_ble.history_stage == 1)
+                {
+                    s_ble.history_stage = 2;
+                    s_ble.index = 0;
+                }
+                else if (s_ble.history_stage == 2)
+                {
+                    ++s_ble.index;
+                    if (s_ble.index == 4)
+                    {
+                        s_ble.history_stage = 1;
+                    }
+                }
+                else
+                {
+                    app_reset_ble_reset();
+                }
+            }
+            else
+            {
+                ++s_ble.index;
+                if ((s_ble.report == APP_REPORT_RESET && s_ble.index == 5) ||
+                    (s_ble.report == APP_REPORT_STATE && s_ble.index == 4))
+                {
+                    app_reset_ble_reset();
+                }
             }
         }
     }
@@ -202,9 +311,11 @@ uint8_t app_reset_ble_service(uint8_t ready, uint32_t now_ms)
     }
     if (s_ble.tx_length == 0 && app_reset_ble_format(now_ms) != 0)
     {
-        return 0;
+        return s_ble.report != 0;
     }
-    if ((s_ble.index == 0 || (uint32_t)(now_ms - s_ble.tx_ms) >= 100) && kt6368a_tx_is_busy() == 0)
+    if (((s_ble.report != APP_REPORT_HISTORY && s_ble.index == 0) ||
+         (uint32_t)(now_ms - s_ble.tx_ms) >= 100) &&
+        kt6368a_tx_is_busy() == 0)
     {
         result = kt6368a_write_async((const uint8_t *)s_ble.tx, s_ble.tx_length, 100);
         if (result == HAL_OK)
