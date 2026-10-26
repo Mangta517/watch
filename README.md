@@ -2,7 +2,7 @@
 
 基于 STM32F411CEU6、FreeRTOS 和 LVGL 的手表工程，包含 RTC 表盘、蓝牙校时与天气同步、运动与环境传感器、心率和电池显示。
 
-本页对应 `codex/low-power` 分支，当前功能版本为 [91036d2](https://github.com/Mangta517/watch/commit/91036d2dd975e360ba9e01752055bac17a4ec5e0)（2026-10-22）。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、日常 BLE 通信及 Bootloader SPP 升级。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；当前行为以本页首节及当前源码为准。
+本页对应 `codex/low-power` 分支，当前功能版本为 [84f62b5](https://github.com/Mangta517/watch/commit/84f62b54a0650cafcabe11460740da64ae6885e4)（2026-10-26）。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、计步与辅助抬腕、日常 BLE 通信、复位和电压日志，以及 Bootloader SPP 升级。本次涉及的文件、具体改动、优化效果及验证结果见[更新记录](#更新记录)。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；当前行为以本页首节及当前源码为准。
 
 ## 当前低功耗策略
 
@@ -42,6 +42,8 @@ Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍�
 
 直接运行手表可选择独立 APP。部署 OTA 时，先通过 SWD 下载 Bootloader，再下载升级 APP 或进入 SPP 模式发送其 BIN；下载升级 APP 时保留 Bootloader 所在扇区。独立 APP 与 Bootloader 地址重叠，应按上表选择部署组合。
 
+新版 Bootloader 还检查 EEPROM 中的 APP 有效标志。仅通过 SWD 下载升级 APP 不会自动建立此标志；首次部署或标志无效时，需要成功完成一次 SPP 升级，Bootloader 才会将镜像标为有效并允许正常启动。升级中断时会保留在升级模式，不能只凭向量表看似有效就启动未完成镜像。
+
 应用代码在 `application/`，硬件接口在 `interface/`，公共算法与软件 I2C 在 `common/`。
 
 | 内容 | 文档 |
@@ -51,6 +53,7 @@ Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍�
 | 蓝牙、校时和天气协议 | [docs/bluetooth.md](docs/bluetooth.md) |
 | 启动流程与等待优化 | [docs/startup-optimization.md](docs/startup-optimization.md) |
 | 运行诊断 | [docs/diagnostics.md](docs/diagnostics.md) |
+| 复位现场与 RTC / 天气状态查询 | [docs/reset-diagnostics.md](docs/reset-diagnostics.md) |
 | BLE / SPP 升级与部署 | [docs/bootloader.md](docs/bootloader.md) |
 | 看门狗与任务进度检查 | [docs/watchdog.md](docs/watchdog.md) |
 | MPU 零偏及 EEPROM 保存 | [docs/imu-eeprom.md](docs/imu-eeprom.md) |
@@ -73,6 +76,25 @@ python -X utf8 tests/battery_log/run.py
 ## 更新记录
 
 以下日期取自 Git 提交日期。记录按新到旧排列，旧条目中的 4.2V 电量曲线等限制为当时状态，已由上述低功耗版本更新；各条目的验证结果仅适用于对应版本。
+
+### 2026-10-26 · [84f62b5](https://github.com/Mangta517/watch/commit/84f62b54a0650cafcabe11460740da64ae6885e4) · 后台活动识别、熄屏通信与复位 / 电压日志
+
+- **问题**：原先 5 秒无操作只调暗背光，普通手动熄屏会关闭蓝牙；缺少后台计步、辅助抬腕及跨重启的电压记录，偶发重启也缺少可查询的异常现场。显示分块调度、拖动后的点击判断和电量插值也需要调整。
+- **改动与优化效果**：
+
+| 模块 / 主要文件 | 改了哪里 | 优化效果 |
+| --- | --- | --- |
+| 后台采样：`application/app_task.c`、`application/app_imu.c`、`interface/mpu6050.c`、`interface/lsm303dlhc.c` | 无姿态需求时使用 MPU 自主 5Hz 加速度低功耗循环，关闭陀螺仪和温度、休眠磁力计，sensor 每 200ms 取新帧；姿态页与校准保留 50Hz，运动和心率保留 100Hz 六轴采样 | 减少普通亮屏 / 熄屏后台的传感器与总线工作量，同时保留活跃场景所需采样频率；节电幅度尚未实测 |
+| 计步与辅助抬腕：`common/common_activity.c`、`application/app_imu.c`、`application/app_ui.c` | 增加加速度峰谷计步，连续 3 个有效步态后回补；首页显示本次开机累计步数和脚印图标；放下后转向观看姿态可触发一次亮屏，并丢弃过期唤醒事件 | 低频后台也能提供日常步行计数和辅助亮屏；步数只存 RAM，重启后重新累计 |
+| 待机与 BLE：`application/app_ui.c`、`application/app_task.c`、`application/app_touch.c`、`interface/kt6368a.c` | 由 5 秒调暗改为 10 秒完整熄屏；LCD / 触摸芯片休眠、触摸任务阻塞；普通熄屏保留 BLE 电源、UART 和消息解析，接收达到水位时通知任务；SPORT 启停仍控制蓝牙电源 | 减少熄屏绘图和轮询，待机时继续接收校时、天气及查询，无需因屏幕明暗重启蓝牙 |
+| 显示与触摸：`interface/lcd.c`、`Middlewares/LVGL/lvgl/examples/porting/lv_port_disp_template.c`、`application/app_ui.c` | 先启动像素 DMA 再让 sensor 运行；LCD 地址参数按组发送、SPI 阻塞超时缩短为 50ms；指南针只重绘旧 / 新指针覆盖区域；睡眠前等 DMA 完成或安全收尾，唤醒后等待至少 120ms；卡片拖动后取消点击、详情右滑返回功能页并恢复滚动位置 | 让传感器执行与像素传输重叠，减少重复发送和重绘，避免面板休眠与在途传输冲突，并减少拖动误入页面 |
+| 复位与状态诊断：`application/app_reset.c`、`application/app_reset_ble.c`、`Core/Src/stm32f4xx_it.c`、`interface/watch_rtc.c` | 在 RTC 备份寄存器保存复位标志和可取得的异常现场，支持 `RESET,READ`；`STATE,READ` 查询 RTC / LSE、校时和天气快照；LSE 停振时不把冻结时间当作有效读取，LVGL 断言也记录停机原因 | 为偶发重启、校时及显示异常提供可导出的证据，帮助区分异常现场、同步状态和读取失败；不代表已确定或修复物理复位原因 |
+| 电压历史与升级：`application/app_battery_log*.c`、`interface/int_battery_log.c`、`interface/int_bootloader.c`、`bootloader/boot_main.c`、`MDK-ARM/*.uvprojx`、`tools/send_bootloader.py` | 每分钟追加滤波电压与开机秒数，按开机编号通过 `BATLOG` 查询 / 导出；写满停止，显式 CLEAR 才擦除并重启。sector 7 的 128KiB 留给日志，普通 / 升级 APP 限制为 384 / 352KiB；EEPROM 保存升级中 / 有效标志 | 保留跨重启的放电趋势，并使链接边界和升级长度上限避开日志区；升级未完成时留在 Bootloader，避免启动残缺镜像 |
+| 电量估算与首页：`application/app_battery.c`、`application/app_ui.c` | 按未充电日志局部修正 3.6～4.0V 的插值节点，保留 4.0V 满电、启动均值、Q8 滤波及本次开机百分比只降不升；调整首页步数和脚印位置 | 让已测电压区间的估算更贴合本地记录，避免脚印贴顶裁切；3.6V 以下仍是估算节点，不能据此给出精确剩余时长 |
+| 上次开机时长：`application/app_uptime.c`、`application/app_ui.c` | 将启动时读到的上次记录单独保存，在收到合法手机校时消息后每次开机只报告一次，并与日志 / 诊断发送共享 UART | 避免本次运行的新存档覆盖“上次开机”报告内容，保留消息分包、BUSY 和发送失败时的处理 |
+
+- **验证结果**：`84f62b5` 推送前，在独立工作树中通过 clock、sensors、startup、UI（含诊断开 / 关）、BLE、bootloader（含发送脚本）、battery_log、reset、reset_ble、tickless、touch、watchdog、diagnostics 共 13 套现有主机回归；CRLF 空白检查通过，远端提交号一致且同步差异为 `0 0`。本次 README 补充只修改文档，沿用该功能提交的测试结果，没有重新运行固件测试、Keil 编译或实板验证。
+- **剩余问题**：实际待机电流、唤醒延迟、屏幕帧率、连续 BLE / SPP 传输和 Flash 操作时序尚需实测；偶发重启的物理触发原因仍未确定。计步算法即使在 100Hz 六轴模式下也按至少 200ms 间隔消费，5Hz 面向日常步行，快速跑步可能混叠漏计，佩戴精度尚未验证。电池低压端尚未完成耗尽标定，充电期间百分比回升仍需重新上电估算。
 
 ### 2026-10-22 · [91036d2](https://github.com/Mangta517/watch/commit/91036d2dd975e360ba9e01752055bac17a4ec5e0) · 低功耗、4.0V 电量估算与 OTA 蓝牙策略
 
@@ -147,7 +169,7 @@ python -X utf8 tests/battery_log/run.py
 ## 后续记录规则
 
 1. 功能或修复提交完成后，把确定的提交号、日期和四项说明补入本页，并在推送时同步提交文档。
-2. “问题”写具体触发现象；“改动”写最终行为及必要代价，不能只写“优化了一下”。
+2. “问题”写具体触发现象；“改动”写涉及模块 / 主要文件、修改后的行为、优化效果及必要代价，不能只写“优化了一下”；没有实测的数据不写成已验证的收益。
 3. “验证结果”写实际执行的检查、对应代码版本及结果；没有执行写“未运行”，没有历史证据写“未记录”。
 4. “剩余问题”保留未解决缺陷、待实板验证项和功能限制；后续修复用新提交链接追溯，不抹去旧版交付时的限制。
 5. 纯文档维护提交不重复列为功能版本，避免为填写本条记录自身的提交号而反复提交。
@@ -157,7 +179,7 @@ python -X utf8 tests/battery_log/run.py
 ```text
 日期 · 提交号链接 · 版本主题
 问题：具体触发现象或功能缺口。
-改动：修改后的行为及必要代价。
+改动：涉及模块 / 主要文件、修改后的行为、优化效果及必要代价。
 验证结果：代码版本、实际执行的检查及结果。
 剩余问题：尚未解决或尚待验证的内容。
 ```
