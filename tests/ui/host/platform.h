@@ -21,4 +21,5 @@ typedef enum
 } HAL_StatusTypeDef;
 GPIO_PinState HAL_GPIO_ReadPin(void *port, uint16_t pin);
 uint32_t __get_IPSR(void);
+uint32_t HAL_GetTick(void);
 #endif

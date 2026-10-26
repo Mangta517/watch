@@ -6,4 +6,7 @@ void vTaskStartScheduler(void);
 TickType_t xTaskGetTickCount(void);
 void vTaskDelay(TickType_t ticks);
 void vTaskDelayUntil(TickType_t *last, TickType_t ticks);
+BaseType_t xTaskNotifyGive(TaskHandle_t task);
+void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken);
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait);
 #endif

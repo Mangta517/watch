@@ -9,9 +9,9 @@
 #include "semphr.h"
 #include <string.h>
 
-#define APP_BATTERY_ADC_TIMEOUT_MS 2U
-#define APP_BATTERY_STARTUP_SAMPLES 8U
-#define APP_BATTERY_STARTUP_AVERAGE_SAMPLES 4U
+#define APP_BATTERY_ADC_TIMEOUT_MS          2
+#define APP_BATTERY_STARTUP_SAMPLES         8
+#define APP_BATTERY_STARTUP_AVERAGE_SAMPLES 4
 
 static SemaphoreHandle_t s_battery_mux;
 static app_battery_struct s_battery_data;
@@ -23,9 +23,10 @@ static uint8_t s_last_percent;
 
 static uint8_t battery_percent(uint32_t voltage_mv)
 {
-    /* 按用户确认的4.0V满电估算；低压段沿用原节点，仍须按实际放电曲线校准。 */
-    static const uint16_t voltage_points_mv[] = {3300, 3500, 3600, 3700, 3750, 3800, 3850, 3900, 4000};
-    static const uint8_t percent_points[] = {0, 5, 10, 20, 30, 40, 50, 60, 100};
+    /* 2026-10-25按未充电日志的经过时间校正3.6～4.0V形状；4.0V/100%、3.6V/10%仍是既定锚点。 */
+    /* 3.6V以下未测到耗尽，沿用原低压节点；本表为局部估算，依据见docs/battery-log.md。 */
+    static const uint16_t voltage_points_mv[] = {3300, 3500, 3600, 3650, 3700, 3750, 3800, 3850, 3900, 3950, 4000};
+    static const uint8_t percent_points[] = {0, 5, 10, 23, 37, 53, 62, 75, 85, 93, 100};
     uint32_t i;
     if (voltage_mv <= voltage_points_mv[0])
     {
@@ -37,7 +38,7 @@ static uint8_t battery_percent(uint32_t voltage_mv)
         {
             uint32_t span_mv = voltage_points_mv[i] - voltage_points_mv[i - 1];
             uint32_t rise = (voltage_mv - voltage_points_mv[i - 1]) * (percent_points[i] - percent_points[i - 1]);
-            return (uint8_t)(percent_points[i - 1] + (rise + span_mv / 2U) / span_mv);
+            return (uint8_t)(percent_points[i - 1] + (rise + span_mv / 2) / span_mv);
         }
     }
     return 100;
@@ -92,7 +93,7 @@ void app_battery_service(void)
     if (sample.result == HAL_OK)
     {
         sample.adc_raw = (uint16_t)raw;
-        sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2U + 2047U) / 4095U;
+        sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2 + 2047) / 4095;
         /* 启动前4次不入均值，后4次均值作为初值；沿用每秒调度，不阻塞sensor任务。 */
         if (s_startup_samples < APP_BATTERY_STARTUP_SAMPLES)
         {
@@ -103,8 +104,8 @@ void app_battery_service(void)
             }
             if (s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
             {
-                s_filtered_mv_q8 = (int32_t)(s_startup_sum_mv * 256U / APP_BATTERY_STARTUP_AVERAGE_SAMPLES);
-                s_last_percent = battery_percent((uint32_t)(s_filtered_mv_q8 + 128) / 256U);
+                s_filtered_mv_q8 = (int32_t)(s_startup_sum_mv * 256 / APP_BATTERY_STARTUP_AVERAGE_SAMPLES);
+                s_last_percent = battery_percent((uint32_t)(s_filtered_mv_q8 + 128) / 256);
             }
         }
         else
@@ -114,7 +115,7 @@ void app_battery_service(void)
         }
         if (s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
         {
-            sample.voltage_mv = (uint32_t)(s_filtered_mv_q8 + 128) / 256U;
+            sample.voltage_mv = (uint32_t)(s_filtered_mv_q8 + 128) / 256;
             sample.percent = battery_percent(sample.voltage_mv);
             /* 尚无充电状态输入：本次开机电量只降不升，电压回弹不代表补充了电荷。 */
             if (sample.percent < s_last_percent)

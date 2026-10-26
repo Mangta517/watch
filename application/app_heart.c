@@ -12,25 +12,25 @@
 #include <math.h>
 #include <string.h>
 
-#define APP_HEART_POLL_MS      30U /* 测量时sensor每10ms服务，普通/运动模式均约30ms读取。 */
-#define APP_HEART_WARMUP_MS    1000U
-#define APP_HEART_MAX_GAP_MS   120U /* 长时间缺采样后重新建立滤波与周期 */
-#define APP_HEART_STALE_MS     250U
-#define APP_HEART_MIN_BEAT_MS  300U  /* 200 BPM */
-#define APP_HEART_MAX_BEAT_MS  1500U /* 40 BPM */
-#define APP_HEART_BEAT_TIMEOUT 2500U
-#define APP_HEART_MIN_SIGNAL   8.0f /* 峰谷反向变化的最小幅度；单位 ADC 计数 */
-#define APP_HEART_STABLE_BEATS 3U
-#define APP_HEART_RR_TOLERANCE 0.35f /* 单路原始峰间隔容差；最终平滑周期仍检查25%连续性 */
-#define APP_HEART_MIN_BPM      40U
-#define APP_HEART_MAX_BPM      200U
-#define APP_HEART_GATE_COUNT   5U
-#define APP_HEART_PEAK_WINDOW  7U
-#define APP_HEART_SAMPLE_COUNT 32U
-#define APP_HEART_JUMP_COUNTS  1024U /* 突变门限下限；还须超过上一原始值25%，实板诊断参数 */
-#define APP_HEART_MOTION_TAPS  4U
-#define APP_HEART_MOTION_AGE_MS 50U
-#define APP_HEART_MOTION_SETTLE_MS 1500U
+#define APP_HEART_POLL_MS          30 /* 测量时sensor每10ms服务，普通/运动模式均约30ms读取。 */
+#define APP_HEART_WARMUP_MS        1000
+#define APP_HEART_MAX_GAP_MS       120 /* 长时间缺采样后重新建立滤波与周期 */
+#define APP_HEART_STALE_MS         250
+#define APP_HEART_MIN_BEAT_MS      300  /* 200 BPM */
+#define APP_HEART_MAX_BEAT_MS      1500 /* 40 BPM */
+#define APP_HEART_BEAT_TIMEOUT     2500
+#define APP_HEART_MIN_SIGNAL       8.0f /* 峰谷反向变化的最小幅度；单位 ADC 计数 */
+#define APP_HEART_STABLE_BEATS     3
+#define APP_HEART_RR_TOLERANCE     0.35f /* 单路原始峰间隔容差；最终平滑周期仍检查25%连续性 */
+#define APP_HEART_MIN_BPM          40
+#define APP_HEART_MAX_BPM          200
+#define APP_HEART_GATE_COUNT       5
+#define APP_HEART_PEAK_WINDOW      7
+#define APP_HEART_SAMPLE_COUNT     32
+#define APP_HEART_JUMP_COUNTS      1024 /* 突变门限下限；还须超过上一原始值25%，实板诊断参数 */
+#define APP_HEART_MOTION_TAPS      4
+#define APP_HEART_MOTION_AGE_MS    50
+#define APP_HEART_MOTION_SETTLE_MS 1500
 
 /* HeartPy fit_peaks 的多门限/RR方差选优思路，独立实现为固定内存的C实时版本。 */
 static const float heart_gate_factors[APP_HEART_GATE_COUNT] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
@@ -97,8 +97,8 @@ static app_heart_struct heart_data;
 static heart_detector_struct detector;
 static uint8_t requested;
 static uint8_t running;
-#define APP_HEART_SLEEP_PERIOD_MS 600000U
-#define APP_HEART_SLEEP_TIMEOUT_MS 10000U
+#define APP_HEART_SLEEP_PERIOD_MS  600000
+#define APP_HEART_SLEEP_TIMEOUT_MS 10000
 static uint8_t s_sleep_mode, s_sleep_active;
 static uint8_t s_sport_mode, s_sport_failed;
 static uint32_t s_sleep_cycle_ms, s_sleep_started_ms;
@@ -154,11 +154,11 @@ void app_heart_motion_update(int16_t accel_x, int16_t accel_y, int16_t accel_z, 
     uint8_t axis;
     float value;
 
-    if (motion_input.seeded != 0 && elapsed == 0U)
+    if (motion_input.seeded != 0 && elapsed == 0)
     {
         return;
     }
-    for (axis = 0; axis < 3U; ++axis)
+    for (axis = 0; axis < 3; ++axis)
     {
         value = (float)accel[axis] / MPU6050_ACCEL_LSB_PER_G;
         if (motion_input.seeded == 0 || elapsed > APP_HEART_MOTION_AGE_MS)
@@ -170,7 +170,7 @@ void app_heart_motion_update(int16_t accel_x, int16_t accel_y, int16_t accel_z, 
         {
             motion_input.baseline[axis] += (float)elapsed / (1500.0f + (float)elapsed) * (value - motion_input.baseline[axis]);
             motion_input.filtered[axis] += (float)elapsed / (70.0f + (float)elapsed) *
-                                          (value - motion_input.baseline[axis] - motion_input.filtered[axis]);
+                                           (value - motion_input.baseline[axis] - motion_input.filtered[axis]);
         }
     }
     motion_input.sample_ms = sample_ms;
@@ -192,11 +192,11 @@ static uint8_t heart_remove_motion(uint32_t now, uint32_t elapsed)
         detector.filtered = detector.optical;
         return 0;
     }
-    for (axis = 0; axis < 3U; ++axis)
+    for (axis = 0; axis < 3; ++axis)
     {
-        for (tap = APP_HEART_MOTION_TAPS - 1U; tap > 0U; --tap)
+        for (tap = APP_HEART_MOTION_TAPS - 1; tap > 0; --tap)
         {
-            motion->history[axis][tap] = motion->history[axis][tap - 1U];
+            motion->history[axis][tap] = motion->history[axis][tap - 1];
         }
         motion->history[axis][0] = motion_input.filtered[axis];
         energy += motion_input.filtered[axis] * motion_input.filtered[axis];
@@ -217,7 +217,7 @@ static uint8_t heart_remove_motion(uint32_t now, uint32_t elapsed)
         motion->active = 1;
     }
     energy = 0.001f; /* 归一化分母下限，单位g平方。 */
-    for (axis = 0; axis < 3U; ++axis)
+    for (axis = 0; axis < 3; ++axis)
     {
         for (tap = 0; tap < APP_HEART_MOTION_TAPS; ++tap)
         {
@@ -227,7 +227,7 @@ static uint8_t heart_remove_motion(uint32_t now, uint32_t elapsed)
     }
     residual = detector.optical - prediction;
     step = 0.08f * residual / energy;
-    for (axis = 0; axis < 3U; ++axis)
+    for (axis = 0; axis < 3; ++axis)
     {
         for (tap = 0; tap < APP_HEART_MOTION_TAPS; ++tap)
         {
@@ -253,7 +253,7 @@ static uint8_t heart_find_local_peak(uint32_t now, uint32_t *peak_tick)
     float value;
     detector.window[detector.window_next] = detector.filtered;
     detector.window_ticks[detector.window_next] = now;
-    detector.window_next = (uint8_t)((detector.window_next + 1U) % APP_HEART_PEAK_WINDOW);
+    detector.window_next = (uint8_t)((detector.window_next + 1) % APP_HEART_PEAK_WINDOW);
     if (detector.window_count < APP_HEART_PEAK_WINDOW)
     {
         ++detector.window_count;
@@ -263,18 +263,18 @@ static uint8_t heart_find_local_peak(uint32_t now, uint32_t *peak_tick)
         return 0;
     }
     /* 最近六个间隔平均至少39ms时用五点，保持约160ms跨度；单帧抖动不切换窗口。 */
-    if ((uint32_t)(now - detector.window_ticks[detector.window_next]) >= 39U * (APP_HEART_PEAK_WINDOW - 1U))
+    if ((uint32_t)(now - detector.window_ticks[detector.window_next]) >= 39 * (APP_HEART_PEAK_WINDOW - 1))
     {
-        window = 5U;
+        window = 5;
     }
     start = (detector.window_next + APP_HEART_PEAK_WINDOW - window) % APP_HEART_PEAK_WINDOW;
-    center = (start + window / 2U) % APP_HEART_PEAK_WINDOW;
+    center = (start + window / 2) % APP_HEART_PEAK_WINDOW;
     value = detector.window[center];
     for (i = 0; i < window; ++i)
     {
         index = (start + i) % APP_HEART_PEAK_WINDOW;
-        if ((i < window / 2U && detector.window[index] > value) ||
-            (i > window / 2U && detector.window[index] >= value))
+        if ((i < window / 2 && detector.window[index] > value) ||
+            (i > window / 2 && detector.window[index] >= value))
         {
             return 0;
         }
@@ -396,7 +396,7 @@ static void heart_track_peak(heart_peak_struct *peak, float factor, uint32_t now
     }
     peak->interval_ms = peak->interval_ms * 0.75f + (float)interval * 0.25f;
     peak->rr[peak->rr_next] = (float)interval;
-    peak->rr_next = (uint8_t)((peak->rr_next + 1U) % APP_HEART_STABLE_BEATS);
+    peak->rr_next = (uint8_t)((peak->rr_next + 1) % APP_HEART_STABLE_BEATS);
     if (peak->stable_beats < APP_HEART_STABLE_BEATS)
     {
         ++peak->stable_beats;
@@ -426,14 +426,16 @@ static void heart_process(uint16_t raw, uint32_t now, uint32_t elapsed, app_hear
     {
         raw_difference = detector.previous_raw - raw;
     }
-    jump_limit = detector.previous_raw / 4U;
+    jump_limit = detector.previous_raw / 4;
     if (jump_limit < APP_HEART_JUMP_COUNTS)
     {
         jump_limit = APP_HEART_JUMP_COUNTS;
     }
     /* 极值/大幅阶跃重建基线；上一帧滤波偏移也覆盖多帧累计的接触变化。原始值仍照常导出。 */
-    if (raw == 0 || raw == UINT16_MAX || (detector.seeded != 0 && (raw_difference > jump_limit ||
-        (fabsf(detector.optical) > APP_HEART_JUMP_COUNTS && fabsf(detector.optical) > detector.dc * 0.25f))))
+    if (raw == 0 || raw == UINT16_MAX ||
+        (detector.seeded != 0 &&
+         (raw_difference > jump_limit ||
+          (fabsf(detector.optical) > APP_HEART_JUMP_COUNTS && fabsf(detector.optical) > detector.dc * 0.25f))))
     {
         memset(&detector, 0, sizeof(detector));
     }
@@ -665,7 +667,7 @@ uint16_t app_heart_read_samples(app_heart_sample_struct *samples, uint16_t size)
     while (count < size && sample_count != 0)
     {
         samples[count++] = heart_samples[sample_head];
-        sample_head = (uint16_t)((sample_head + 1U) % APP_HEART_SAMPLE_COUNT);
+        sample_head = (uint16_t)((sample_head + 1) % APP_HEART_SAMPLE_COUNT);
         --sample_count;
     }
     xSemaphoreGive(heart_mutex);
@@ -797,7 +799,7 @@ void app_heart_service(void)
             if (sample_count == APP_HEART_SAMPLE_COUNT)
             {
                 app_diag_heart_queue(1);
-                sample_head = (uint16_t)((sample_head + 1U) % APP_HEART_SAMPLE_COUNT);
+                sample_head = (uint16_t)((sample_head + 1) % APP_HEART_SAMPLE_COUNT);
                 --sample_count;
             }
             heart_samples[(sample_head + sample_count) % APP_HEART_SAMPLE_COUNT] = sample;

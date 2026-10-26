@@ -5,6 +5,8 @@
 #include <stdint.h>
 
 void app_uptime_init(void);
+/* 仅sensor读取本次开机秒数，包含Tickless补时及tick回绕。 */
+uint32_t app_uptime_get_seconds(void);
 /* 每拍更新计时；storage_available为0时推迟新写入，已开始的写入继续收尾。
  * 返回1表示占用EEPROM，其他校准保存应等到返回0后再开始。 */
 uint8_t app_uptime_service(uint8_t storage_available);

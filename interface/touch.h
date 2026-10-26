@@ -8,7 +8,7 @@
   *          软件 I2C: SCL(TP_SCL)=PB6  SDA(TP_SDA)=PB4  RST(TP_RST)=PA15
   *          (实测本板 TP 走线与早期引脚表相反, 已在 CubeMX 对调标签)。
   *          本板无 INT 引脚 → 驱动上电关闭芯片自动休眠, 纯轮询;
-  *          连续失败约 1s 自动做复位重探测自愈 (无永久失效死角)。
+  *          连续失败200次后逐拍推进复位和地址重探测，实际耗时随任务调度变化。
   ******************************************************************************
 ***/
 #ifndef __TOUCH_H
@@ -22,18 +22,21 @@ extern "C"
 #include "main.h"
 #include <stdint.h>
 
+#define TOUCH_READ_ERROR 0xFF /* 读取失败、恢复中或扫描不可用，不代表手指已松开。 */
+
     /* 返回读到的 ChipID (CST816S≈0xB5, CST816D≈0xB7); 总线异常返回 0 */
     uint8_t Touch_Init(void);
 
-    extern volatile uint8_t g_tp_chip_id; /* 最近一次 ChipID 读数 (0xB5/0xB7=I2C通, 0=总线死) */
+    /* touch.c定义；初始化、ChipID读取和恢复流程更新，调试器/主机验证只读。 */
+    extern volatile uint8_t g_tp_chip_id; /* 0xB5/0xB7=I2C通，0=未读到有效ID。 */
 
     uint8_t Touch_GetChipID(void);
 
-    /* 读取一个触点: 返回手指数(0=无触摸/读失败), x/y 为屏幕坐标(与 LCD 对齐) */
+    /* 返回手指数：0=已松手，TOUCH_READ_ERROR=读取不可用；有触点时才更新x/y屏幕坐标。 */
     uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y);
 
     void Touch_Reset(void);
-    void Touch_Sleep(void);  /* 进低功耗(触摸自唤醒) */
+    void Touch_Sleep(void);  /* 本板无TP_INT，休眠后由PA4触发复位唤醒。 */
     void Touch_Wakeup(void); /* 复位唤醒 */
 
 #ifdef __cplusplus

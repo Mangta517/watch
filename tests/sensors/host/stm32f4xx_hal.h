@@ -7,12 +7,6 @@
 #define PWR_SLEEPENTRY_WFI   1U
 void HAL_PWR_EnterSLEEPMode(uint32_t regulator, uint8_t entry);
 
-typedef struct
-{
-    uint32_t KR, PR, RLR, SR;
-} IWDG_TypeDef;
-extern IWDG_TypeDef host_iwdg;
-#define IWDG (&host_iwdg)
 #ifndef WRITE_REG
 #define WRITE_REG(reg, value) ((reg) = (value))
 #endif

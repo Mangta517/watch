@@ -68,7 +68,14 @@ void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t data)
     if (phase == 1)
     {
         assert(data == 0x48 || data == 0x49);
-        phase = data == 0x48 ? 2 : 4;
+        if (data == 0x48)
+        {
+            phase = 2;
+        }
+        else
+        {
+            phase = 4;
+        }
     }
     else
     {
@@ -81,7 +88,14 @@ void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t data)
 uint8_t my_i2c_wait_ack(my_i2c_bus_t bus)
 {
     assert(bus == MY_I2C_BUS_SENSOR && phase >= 2 && phase <= 4);
-    return ++ack_count == fail_ack ? 1 : 0;
+    if (++ack_count == fail_ack)
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
@@ -189,7 +203,14 @@ int main(void)
         raw = 0xCAFE;
         assert(em7028_read_raw(&raw) == EM7028_ERROR && raw == 0xCAFE && phase == 0);
         em7028_get_fault(&fault);
-        assert(fault.kind == EM7028_FAULT_READ && fault.reg == (i >= 4 && i <= 6 ? 0x28 : 0x29));
+        if (i >= 4 && i <= 6)
+        {
+            assert(fault.kind == EM7028_FAULT_READ && fault.reg == 0x28);
+        }
+        else
+        {
+            assert(fault.kind == EM7028_FAULT_READ && fault.reg == 0x29);
+        }
     }
     fail_ack = 0;
     fail_write = write_count + 1;
@@ -203,7 +224,7 @@ int main(void)
     fail_write = write_count + 1;
     assert(em7028_start() == EM7028_ERROR && light == GPIO_PIN_RESET);
     fail_write = 0;
-    tick = UINT32_MAX - 10U;
+    tick = UINT32_MAX - 10;
     assert(em7028_start() == EM7028_OK);
     tick += EM7028_SAMPLE_PERIOD_MS;
     assert(em7028_read_raw(&raw) == EM7028_OK); /* HAL tick 回绕 */

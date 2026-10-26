@@ -7,8 +7,8 @@
 
 #include <stdint.h>
 
-#define AHT21_ADDR          0x38U
-#define AHT21_CONVERSION_MS 80U
+#define AHT21_ADDR          0x38
+#define AHT21_CONVERSION_MS 80
 
 typedef enum
 {

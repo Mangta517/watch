@@ -236,8 +236,8 @@
 #define LV_USE_ASSERT_OBJ           0   /*Check the object's type and existence (e.g. not deleted). (Slow)*/
 
 /*Add a custom handler when assert happens e.g. to restart the MCU*/
-#define LV_ASSERT_HANDLER_INCLUDE <stdint.h>
-#define LV_ASSERT_HANDLER while(1);   /*Halt by default*/
+#define LV_ASSERT_HANDLER_INCLUDE "app_reset.h"
+#define LV_ASSERT_HANDLER app_reset_assert_stop();
 
 /*-------------
  * Others

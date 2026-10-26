@@ -42,7 +42,7 @@ typedef struct
 } RTC_DateTypeDef;
 typedef struct
 {
-    uint32_t PRER;
+    uint32_t PRER, BKP0R;
 } RTC_TypeDef;
 extern RTC_TypeDef host_rtc;
 #define RTC (&host_rtc)

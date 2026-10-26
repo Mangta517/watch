@@ -43,6 +43,12 @@ static HAL_StatusTypeDef spi_error;
 static unsigned spi_payload_calls, spi_payload_bytes;
 static uint16_t spi_expected_color = 0x1234;
 static int spi_command_fail_after = -1;
+static GPIO_PinState lcd_dc_state = GPIO_PIN_SET;
+static uint8_t spi_lcd_command, spi_address_capture;
+static uint8_t spi_address_bytes[11];
+static uint16_t spi_address_sizes[5];
+static GPIO_PinState spi_address_dc[5];
+static unsigned spi_calls, spi_address_calls, spi_address_length;
 static HAL_StatusTypeDef dma_start_result = HAL_OK;
 static unsigned dma_starts, dma_stops, spi_aborts, flush_completions;
 static uint8_t dma_stuck;
@@ -130,6 +136,10 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
             assert(elapsed_ms - lcd_reset_start >= 100);
         }
     }
+    else if (port == LCD_DC_GPIO_Port && pin == LCD_DC_Pin)
+    {
+        lcd_dc_state = state;
+    }
 }
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
 {
@@ -165,22 +175,39 @@ uint32_t HAL_GetTick(void)
 }
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout)
 {
-    assert(spi == &hspi1 && data && size && timeout);
-    if (size == 1 && spi_command_fail_after >= 0)
+    assert(spi == &hspi1 && data && size && timeout == 50);
+    ++spi_calls;
+    if (lcd_dc_state == GPIO_PIN_RESET)
+    {
+        assert(size == 1);
+        spi_lcd_command = data[0];
+    }
+    if (spi_address_capture != 0)
+    {
+        unsigned i;
+        assert(spi_address_calls < 5 && spi_address_length + size <= sizeof(spi_address_bytes));
+        spi_address_sizes[spi_address_calls] = size;
+        spi_address_dc[spi_address_calls++] = lcd_dc_state;
+        for (i = 0; i < size; ++i)
+        {
+            spi_address_bytes[spi_address_length++] = data[i];
+        }
+    }
+    if (spi_command_fail_after >= 0)
     {
         if (spi_command_fail_after-- == 0)
         {
-            return HAL_ERROR;
+            return spi_error;
         }
     }
-    if (spi_capture && size > 1)
+    if (spi_capture && size > 1 && spi_lcd_command != 0x2A && spi_lcd_command != 0x2B)
     {
         unsigned i;
-        assert(size % 2 == 0);
-        for (i = 0; i < size; i += 2U)
+        assert(lcd_dc_state == GPIO_PIN_SET && size % 2 == 0);
+        for (i = 0; i < size; i += 2)
         {
             assert(data[i] == (uint8_t)(spi_expected_color >> 8));
-            assert(data[i + 1U] == (uint8_t)spi_expected_color);
+            assert(data[i + 1] == (uint8_t)spi_expected_color);
         }
         ++spi_payload_calls;
         spi_payload_bytes += size;
@@ -239,7 +266,14 @@ static void queue_read(uint8_t data)
     }
     for (i = 0; i < 8; ++i)
     {
-        queue_bit((data & (0x80U >> i)) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        if ((data & (0x80U >> i)) != 0)
+        {
+            queue_bit(GPIO_PIN_SET);
+        }
+        else
+        {
+            queue_bit(GPIO_PIN_RESET);
+        }
     }
 }
 static void queue_write(void)
@@ -310,7 +344,7 @@ static void touch_recovery_tests(void)
     assert(Touch_GetPoint(&x, &y) == 0 && x == 123 && y == 456);
     for (i = 0; i < 199; ++i)
     {
-        assert(Touch_GetPoint(&x, &y) == 0);
+        assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
     }
     assert(tp_resets == 0 && task_waits == 0);
     before_edges = scl_edges;
@@ -319,21 +353,21 @@ static void touch_recovery_tests(void)
     queue_bit(GPIO_PIN_SET); /* 200th read fails, then recovery succeeds. */
     queue_read(0xB5);
     queue_write();
-    assert(Touch_GetPoint(&x, &y) == 0);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
     assert(tp_resets == 1 && g_tp_chip_id == 0 && task_waits == 0 && hal_waits == 0);
     start = elapsed_ms;
-    assert(Touch_GetPoint(&x, &y) == 0 && elapsed_ms == start);
-    elapsed_ms += 9U;
-    assert(Touch_GetPoint(&x, &y) == 0);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && elapsed_ms == start);
+    elapsed_ms += 9;
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
     ++elapsed_ms;
-    assert(Touch_GetPoint(&x, &y) == 0);
-    elapsed_ms += 299U;
-    assert(Touch_GetPoint(&x, &y) == 0 && g_tp_chip_id == 0);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    elapsed_ms += 299;
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && g_tp_chip_id == 0);
     ++elapsed_ms;
-    assert(Touch_GetPoint(&x, &y) == 0);
-    assert(Touch_GetPoint(&x, &y) == 0 && g_tp_chip_id == 0xB5);
-    assert(Touch_GetPoint(&x, &y) == 0);
-    assert(task_waits == 0 && hal_waits == 0 && elapsed_ms - start == 310U);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && g_tp_chip_id == 0xB5);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    assert(task_waits == 0 && hal_waits == 0 && elapsed_ms - start == 310);
     assert(edges_at_reset - before_edges == 20 && released_at_reset - before_released == 10);
     assert(reply_pos == reply_count);
     reply_count = reply_pos = 0;
@@ -358,6 +392,51 @@ static void touch_recovery_tests(void)
     assert(hal_waits == 0 && task_waits == 4);
 }
 
+static void lcd_address_tests(void)
+{
+    static const uint8_t expected_bytes[] = {0x2A, 0, 7, 0, 239, 0x2B, 0, 255, 1, 43, 0x2C};
+    static const uint16_t expected_sizes[] = {1, 4, 1, 4, 1};
+    static const GPIO_PinState expected_dc[] = {GPIO_PIN_RESET, GPIO_PIN_SET, GPIO_PIN_RESET, GPIO_PIN_SET, GPIO_PIN_RESET};
+    static const HAL_StatusTypeDef errors[] = {HAL_ERROR, HAL_BUSY, HAL_TIMEOUT};
+    static const uint16_t pixels[4] = {0};
+    unsigned i, error, failure, before;
+
+    spi_address_capture = 1;
+    LCD_Address_Set(7, 235, 239, 279);
+    assert(spi_address_calls == 5 && spi_address_length == sizeof(expected_bytes) && lcd_dc_state == GPIO_PIN_SET);
+    for (i = 0; i < sizeof(expected_bytes); ++i)
+    {
+        assert(spi_address_bytes[i] == expected_bytes[i]);
+    }
+    for (i = 0; i < 5; ++i)
+    {
+        assert(spi_address_sizes[i] == expected_sizes[i] && spi_address_dc[i] == expected_dc[i]);
+    }
+    /* 任一命令/参数分组失败，阻塞刷屏不能继续发地址或像素。 */
+    for (error = 0; error < sizeof(errors) / sizeof(errors[0]); ++error)
+    {
+        for (failure = 0; failure < 5; ++failure)
+        {
+            spi_address_calls = spi_address_length = 0;
+            spi_command_fail_after = (int)failure;
+            spi_error = errors[error];
+            before = spi_calls;
+            error_expected = 1;
+            if (setjmp(error_jump) == 0)
+            {
+                LCD_Color_Fill(7, 235, 8, 236, pixels);
+                assert(0 && "LCD_Color_Fill must stop on address failure");
+            }
+            error_expected = 0;
+            assert(spi_calls == before + failure + 1 && spi_address_calls == failure + 1);
+            assert(lcd_dc_state == GPIO_PIN_SET);
+            spi_command_fail_after = -1;
+        }
+    }
+    spi_address_capture = 0;
+    puts("PASS: LCD address uses five groups with unchanged bytes/DC; every group stops on ERROR/BUSY/TIMEOUT at 50ms.");
+}
+
 static void lcd_fill_tests(void)
 {
     static const uint16_t widths[] = {1, 63, 64, 65, 128, 130};
@@ -369,8 +448,8 @@ static void lcd_fill_tests(void)
     {
         spi_payload_calls = spi_payload_bytes = 0;
         LCD_Fill(0, 0, widths[i] - 1, 0, 0x1234);
-        assert(spi_payload_bytes == widths[i] * 2U);
-        assert(spi_payload_calls == (widths[i] + 63U) / 64U);
+        assert(spi_payload_bytes == widths[i] * 2);
+        assert(spi_payload_calls == (widths[i] + 63U) / 64);
     }
     /* RGB565原生色值按线上字节验证，同时覆盖整块和尾块。 */
     {
@@ -416,7 +495,7 @@ static void lcd_dma_error_tests(void)
 {
     static uint16_t pixels[LCD_WIDTH * LCD_HEIGHT];
     static const HAL_StatusTypeDef errors[] = {HAL_ERROR, HAL_BUSY, HAL_TIMEOUT};
-    unsigned i, before, starts;
+    unsigned i, error, before, starts, calls;
     LCD_Set_Flush_Complete_Callback(flush_done);
     for (i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i)
     {
@@ -429,12 +508,17 @@ static void lcd_dma_error_tests(void)
         assert(LCD_Flush_Service() == 0 && flush_completions == before + 1);
     }
     dma_start_result = HAL_OK;
-    for (i = 0; i < 11; ++i)
+    for (error = 0; error < sizeof(errors) / sizeof(errors[0]); ++error)
     {
-        spi_command_fail_after = (int)i;
-        starts = dma_starts;
-        LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
-        assert(dma_starts == starts && LCD_Flush_Service() == 1);
+        for (i = 0; i < 5; ++i)
+        {
+            spi_command_fail_after = (int)i;
+            spi_error = errors[error];
+            starts = dma_starts;
+            calls = spi_calls;
+            LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
+            assert(spi_calls == calls + i + 1 && dma_starts == starts && LCD_Flush_Service() == 1);
+        }
     }
     spi_command_fail_after = -1;
     LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
@@ -477,30 +561,30 @@ static void lcd_dma_timeout_tests(void)
 {
     static uint16_t pixels[4];
     unsigned int before, stops, wrap;
-    for (wrap = 0; wrap < 2U; ++wrap)
+    for (wrap = 0; wrap < 2; ++wrap)
     {
-        elapsed_ms = 1000U;
+        elapsed_ms = 1000;
         if (wrap != 0)
         {
-            elapsed_ms = UINT32_MAX - 50U;
+            elapsed_ms = UINT32_MAX - 50;
         }
         before = flush_completions;
         stops = dma_stops;
         LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
-        elapsed_ms += 99U;
+        elapsed_ms += 99;
         assert(LCD_Flush_Service() == 0 && dma_stops == stops);
         ++elapsed_ms;
         dma_stuck = 1;
         assert(LCD_Flush_Service() == 0 && flush_completions == before);
         dma_stuck = 0;
-        assert(LCD_Flush_Service() == 1 && flush_completions == before + 1U);
+        assert(LCD_Flush_Service() == 1 && flush_completions == before + 1);
         HAL_SPI_TxCpltCallback(&hspi1);
-        assert(flush_completions == before + 1U && LCD_Flush_Service() == 0);
+        assert(flush_completions == before + 1 && LCD_Flush_Service() == 0);
         LCD_Color_Fill_DMA(0, 0, 1, 1, pixels);
         host_dma_stream.CR = 0;
         HAL_SPI_TxCpltCallback(&hspi1);
-        elapsed_ms += 1000U;
-        assert(LCD_Flush_Service() == 0 && flush_completions == before + 2U);
+        elapsed_ms += 1000;
+        assert(LCD_Flush_Service() == 0 && flush_completions == before + 2);
     }
     assert(primask == 0);
     puts("PASS: lost DMA callbacks time out at 100ms, wait for buffer safety, complete once and handle tick wrap.");
@@ -508,85 +592,89 @@ static void lcd_dma_timeout_tests(void)
 
 static void touch_coordinate_failure_tests(void)
 {
-    uint16_t x = 123U, y = 456U;
+    uint16_t x = 123, y = 456;
     uint32_t i, start;
 
     reset_observations(taskSCHEDULER_RUNNING);
     queue_read(0);
     assert(Touch_GetPoint(&x, &y) == 0);
-    for (i = 0; i < 199U; ++i)
+    reply_count = reply_pos = 0;
+    queue_read(0xFF); /* 扫描不可用不能充当真实松手，也不能覆盖旧坐标。 */
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123 && y == 456);
+    for (i = 0; i < 199; ++i)
     {
         reply_count = reply_pos = 0;
         queue_read(1);
         queue_bit(GPIO_PIN_SET); /* 手指数可读，坐标事务NACK。 */
-        assert(Touch_GetPoint(&x, &y) == 0 && x == 123U && y == 456U);
+        assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123U && y == 456U);
     }
     assert(tp_resets == 0);
     reply_count = reply_pos = 0;
     queue_read(0); /* 无手指是成功采样，应清除连续失败计数。 */
     assert(Touch_GetPoint(&x, &y) == 0 && tp_resets == 0);
-    for (i = 0; i < 200U; ++i)
+    for (i = 0; i < 200; ++i)
     {
         reply_count = reply_pos = 0;
         queue_read(1);
         queue_bit(GPIO_PIN_SET);
-        assert(Touch_GetPoint(&x, &y) == 0 && x == 123U && y == 456U);
-        if (i < 199U)
+        assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123U && y == 456U);
+        if (i < 199)
         {
             assert(tp_resets == 0);
         }
-        elapsed_ms += 5U;
+        elapsed_ms += 5;
     }
-    assert(tp_resets == 1U && task_waits == 0 && hal_waits == 0);
+    assert(tp_resets == 1 && task_waits == 0 && hal_waits == 0);
     reply_count = reply_pos = 0;
     queue_read(0xB5);
     queue_write();
     start = elapsed_ms;
-    elapsed_ms += 10U;
-    assert(Touch_GetPoint(&x, &y) == 0);
-    elapsed_ms += 300U;
-    assert(Touch_GetPoint(&x, &y) == 0);
-    assert(Touch_GetPoint(&x, &y) == 0 && g_tp_chip_id == 0xB5);
-    assert(Touch_GetPoint(&x, &y) == 0);
-    assert(elapsed_ms - start == 310U && task_waits == 0 && hal_waits == 0);
+    elapsed_ms += 10;
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    elapsed_ms += 300;
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && g_tp_chip_id == 0xB5);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    assert(elapsed_ms - start == 310 && task_waits == 0 && hal_waits == 0);
     assert(reply_pos == reply_count);
     reply_count = reply_pos = 0;
     queue_read(1);
     queue_read(0);
-    for (i = 0; i < 24U; ++i)
+    for (i = 0; i < 24; ++i)
     {
         queue_bit(GPIO_PIN_RESET);
     }
     assert(Touch_GetPoint(&x, &y) == 1 && x == 239U && y == 279U);
-    assert(reply_pos == reply_count && tp_resets == 1U);
+    assert(reply_pos == reply_count && tp_resets == 1);
     puts("PASS: coordinate-only NACKs trigger bounded deferred recovery; no-finger success resets the streak.");
 }
 
 static void touch_async_absent_tests(void)
 {
-    uint16_t x = 123U, y = 456U;
+    uint16_t x = 123, y = 456;
     uint32_t before;
     unsigned i;
     reset_observations(taskSCHEDULER_RUNNING);
-    elapsed_ms = UINT32_MAX - 5U;
-    for (i = 0; i < 200U; ++i)
+    elapsed_ms = UINT32_MAX - 5;
+    for (i = 0; i < 200; ++i)
     {
-        assert(Touch_GetPoint(&x, &y) == 0);
+        assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
     }
-    assert(tp_resets == 1U && task_waits == 0 && hal_waits == 0);
-    for (i = 0; i < 120U; ++i)
+    assert(tp_resets == 1 && task_waits == 0 && hal_waits == 0);
+    for (i = 0; i < 120; ++i)
     {
-        elapsed_ms += 5U;
+        elapsed_ms += 5;
         before = elapsed_ms;
-        assert(Touch_GetPoint(&x, &y) == 0 && elapsed_ms == before);
+        assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && elapsed_ms == before);
     }
-    assert(g_tp_chip_id == 0 && x == 123U && y == 456U);
-    assert(tp_resets == 1U && task_waits == 0 && hal_waits == 0);
+    assert(g_tp_chip_id == 0 && x == 123 && y == 456);
+    assert(tp_resets == 1 && task_waits == 0 && hal_waits == 0);
     puts("PASS: absent touch recovers across tick wrap without sleeping in input callbacks or publishing stale coordinates.");
 }
 
 int main(void)
 {
+    lcd_address_tests();
     lcd_fill_tests();
     lcd_dma_error_tests();
     lcd_dma_timeout_tests();

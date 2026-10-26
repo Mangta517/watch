@@ -36,5 +36,7 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
                  "runtime_sensor_stalled", "runtime_deadline", "baro_cadence", "touch_alloc_failed", "touch_overrun",
                  "power_background", "power_idle", "power_motion", "power_heart", "power_calibration", "power_heart_calibration",
                  "sleep_cycle", "sleep_wrap", "sleep_calibration", "sleep_heart_early", "sleep_heart_offset",
-                 "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime"]:
+                 "sleep_recovery", "sleep_recovery_wrap",
+                 "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime", "touch_sleep", "touch_sleep_early",
+                 "background_cycle", "background_wrap", "background_calibration", "lvgl_wake"]:
         subprocess.run([exe, mode], cwd=root, check=True)

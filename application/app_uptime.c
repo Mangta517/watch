@@ -8,10 +8,10 @@
 #include "main.h"
 #include <string.h>
 
-#define APP_UPTIME_STORE_BASE 0xA0U
-#define APP_UPTIME_RECORD_BYTES 16U
-#define APP_UPTIME_MAGIC 0x31545055U
-#define APP_UPTIME_SAVE_SECONDS 600U
+#define APP_UPTIME_STORE_BASE   0xA0
+#define APP_UPTIME_RECORD_BYTES 16
+#define APP_UPTIME_MAGIC        0x31545055
+#define APP_UPTIME_SAVE_SECONDS 600
 
 static struct
 {
@@ -36,7 +36,7 @@ static void uptime_put_u32(uint8_t *data, uint32_t value)
     uint8_t i;
     for (i = 0; i < 4; ++i)
     {
-        data[i] = (uint8_t)(value >> (8U * i));
+        data[i] = (uint8_t)(value >> (8 * i));
     }
 }
 
@@ -49,7 +49,7 @@ static uint32_t uptime_crc(const uint8_t *data)
         crc ^= data[i];
         for (bit = 0; bit < 8; ++bit)
         {
-            if ((crc & 1U) != 0)
+            if ((crc & 1) != 0)
             {
                 crc = (crc >> 1) ^ 0xEDB88320U;
             }
@@ -71,7 +71,7 @@ static uint8_t uptime_load(void)
     {
         if (bl24c02_read(APP_UPTIME_STORE_BASE + i * APP_UPTIME_RECORD_BYTES, record[i], APP_UPTIME_RECORD_BYTES) != 0)
         {
-            return 0; /* 未读清旧副本时不覆盖，下一记录周期再探测。 */
+            return 1; /* 未读清旧副本时不覆盖，下一记录周期再探测。 */
         }
         valid[i] = uptime_get_u32(record[i]) == APP_UPTIME_MAGIC && uptime_get_u32(record[i] + 12) == uptime_crc(record[i]);
     }
@@ -85,7 +85,7 @@ static uint8_t uptime_load(void)
     {
         s_uptime.sequence = uptime_get_u32(record[latest] + 4);
         s_uptime.saved_seconds = uptime_get_u32(record[latest] + 8);
-        s_uptime.target = latest ^ 1U;
+        s_uptime.target = latest ^ 1;
         if (s_previous_valid == 0)
         {
             s_previous_seconds = s_uptime.saved_seconds;
@@ -93,7 +93,7 @@ static uint8_t uptime_load(void)
             s_previous_valid = 1;
         }
     }
-    return 1;
+    return 0;
 }
 
 void app_uptime_init(void)
@@ -101,9 +101,9 @@ void app_uptime_init(void)
     memset(&s_uptime, 0, sizeof(s_uptime));
     s_previous_valid = 0;
     s_uptime.last_ms = HAL_GetTick();
-    s_uptime.seconds = s_uptime.last_ms / 1000U;
-    s_uptime.remainder_ms = s_uptime.last_ms % 1000U;
-    s_uptime.loaded = uptime_load();
+    s_uptime.seconds = s_uptime.last_ms / 1000;
+    s_uptime.remainder_ms = s_uptime.last_ms % 1000;
+    s_uptime.loaded = uptime_load() == 0;
 }
 
 uint8_t app_uptime_service(uint8_t storage_available)
@@ -113,10 +113,10 @@ uint8_t app_uptime_service(uint8_t storage_available)
     uint8_t result;
     /* Sleep仍保留HAL节拍；逐拍累计差值，跨49.7天tick回绕仍连续计时。 */
     s_uptime.last_ms = now_ms;
-    s_uptime.seconds += elapsed_ms / 1000U;
-    s_uptime.remainder_ms += elapsed_ms % 1000U;
-    s_uptime.seconds += s_uptime.remainder_ms / 1000U;
-    s_uptime.remainder_ms %= 1000U;
+    s_uptime.seconds += elapsed_ms / 1000;
+    s_uptime.remainder_ms += elapsed_ms % 1000;
+    s_uptime.seconds += s_uptime.remainder_ms / 1000;
+    s_uptime.remainder_ms %= 1000;
     if (s_uptime.phase == 0)
     {
         if (storage_available == 0 || (uint32_t)(s_uptime.seconds - s_uptime.attempted_seconds) < APP_UPTIME_SAVE_SECONDS)
@@ -126,18 +126,18 @@ uint8_t app_uptime_service(uint8_t storage_available)
         s_uptime.attempted_seconds = s_uptime.seconds - s_uptime.seconds % APP_UPTIME_SAVE_SECONDS;
         if (s_uptime.loaded == 0)
         {
-            s_uptime.loaded = uptime_load();
+            s_uptime.loaded = uptime_load() == 0;
             if (s_uptime.loaded == 0)
             {
                 return 0;
             }
         }
         uptime_put_u32(s_uptime.record, APP_UPTIME_MAGIC);
-        uptime_put_u32(s_uptime.record + 4, s_uptime.sequence + 1U);
+        uptime_put_u32(s_uptime.record + 4, s_uptime.sequence + 1);
         uptime_put_u32(s_uptime.record + 8, s_uptime.seconds);
         uptime_put_u32(s_uptime.record + 12, uptime_crc(s_uptime.record));
         bl24c02_transfer_begin(&s_uptime.io, APP_UPTIME_STORE_BASE + s_uptime.target * APP_UPTIME_RECORD_BYTES,
-                              s_uptime.record, APP_UPTIME_RECORD_BYTES, 1);
+                               s_uptime.record, APP_UPTIME_RECORD_BYTES, 1);
         s_uptime.phase = 1;
         return 1;
     }
@@ -154,7 +154,7 @@ uint8_t app_uptime_service(uint8_t storage_available)
     if (s_uptime.phase == 1)
     {
         bl24c02_transfer_begin(&s_uptime.io, APP_UPTIME_STORE_BASE + s_uptime.target * APP_UPTIME_RECORD_BYTES,
-                              s_uptime.verify, APP_UPTIME_RECORD_BYTES, 0);
+                               s_uptime.verify, APP_UPTIME_RECORD_BYTES, 0);
         s_uptime.phase = 2;
         return 1;
     }
@@ -163,10 +163,15 @@ uint8_t app_uptime_service(uint8_t storage_available)
         s_uptime.valid = 1;
         s_uptime.saved_seconds = uptime_get_u32(s_uptime.record + 8);
         ++s_uptime.sequence;
-        s_uptime.target ^= 1U;
+        s_uptime.target ^= 1;
     }
     s_uptime.phase = 0;
     return 0;
+}
+
+uint32_t app_uptime_get_seconds(void)
+{
+    return s_uptime.seconds;
 }
 
 uint8_t app_uptime_get_saved(uint32_t *seconds)

@@ -37,7 +37,7 @@ subprocess.run([str(dma_exe)], cwd=ROOT, check=True)
 timeout_exe = OUT / "dma_timeout.exe"
 subprocess.run([gcc, "-std=c99", "-O0", "-Wall", "-Wextra", "-Werror",
                "-include", "tests/sensors/host/i2c_platform.h",
-               "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Icommon",
+               "-Itests/sensors/host", "-ICore/Inc", "-Iapplication", "-Iinterface", "-Icommon",
                "-IMiddlewares/LVGL", "-IMiddlewares/LVGL/lvgl",
                "tests/ui/dma_timeout_harness.c", "interface/lcd.c", "interface/touch.c", "common/my_i2c.c",
                str(library), "-lm", "-o", str(timeout_exe)], cwd=ROOT, check=True)
@@ -45,7 +45,8 @@ subprocess.run([str(timeout_exe)], cwd=ROOT, check=True)
 subprocess.run([str(timeout_exe), "wrap"], cwd=ROOT, check=True)
 subprocess.run([str(timeout_exe), "slow"], cwd=ROOT, check=True)
 subprocess.run([str(timeout_exe), "slow_wrap"], cwd=ROOT, check=True)
-touch_sources = ["application/app_touch.c", "Middlewares/LVGL/lvgl/examples/porting/lv_port_indev_template.c"]
+touch_sources = ["application/app_touch.c", "application/app_reset_ble.c",
+                 "Middlewares/LVGL/lvgl/examples/porting/lv_port_indev_template.c"]
 subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-DAPP_DEBUG_TELEMETRY=1", "-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
 quiet_exe = OUT / "ui_quiet.exe"
@@ -90,7 +91,7 @@ make_preview([f"weather_icon_{index}" for index in range(9)],
              3, "weather-icons-preview.png")
 for name in ["watch", "motion_magnetic", "motion_calibrating", "motion_calibration_status", "motion_restored", "motion_save_failed",
              "bluetooth", "bluetooth_empty", "bluetooth_tx", "bluetooth_time",
-             "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds",
+             "watch_activity", "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds",
              "heart", "heart_details", "heart_measuring", "heart_no_signal", "heart_unavailable",
              "aht21", "aht21_measuring", "aht21_crc_error", "aht21_unavailable", "battery_waiting", "battery_error", "battery_low", "battery_empty", "battery_full", "phone_weather", "watch_climate"]:
     Image.open(OUT / (name + ".ppm")).save(OUT / (name + ".png"))

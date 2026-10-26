@@ -39,60 +39,53 @@
  * See http://www.freertos.org/a00110.html
  *----------------------------------------------------------*/
 
-#define configUSE_PREEMPTION		1
-#define configUSE_MUTEXES			1   /* app_display 的 LVGL 互斥锁需要 */
-#define configUSE_IDLE_HOOK            0
-#define configUSE_TICKLESS_IDLE        2   /* 项目适配层测量RTC间隔，同时补偿HAL和RTOS时间。 */
+#define configUSE_PREEMPTION    1
+#define configUSE_MUTEXES       1 /* app_display 的 LVGL 互斥锁需要 */
+#define configUSE_IDLE_HOOK     0
+#define configUSE_TICKLESS_IDLE 2 /* 项目适配层测量RTC间隔，同时补偿HAL和RTOS时间。 */
 #include "app_tickless.h"
 #define portSUPPRESS_TICKS_AND_SLEEP(ticks) app_tickless_sleep(ticks)
-#define configUSE_TICK_HOOK			0
-#define configCPU_CLOCK_HZ			( ( unsigned long ) 84000000 ) /* F411: HSI/8*84/2 = 84MHz */
-#define configTICK_RATE_HZ             1000U /* HAL补时及LVGL时间单位均为1ms。 */
-#define configMAX_PRIORITIES		( 5 )
-#define configMINIMAL_STACK_SIZE	( ( unsigned short ) 128 )
-#define configTOTAL_HEAP_SIZE		( ( size_t ) ( 16 * 1024 ) )	/* 10K 偏紧: lvgl任务4K栈+idle+mutex≈6.5K, 留余量防建任务失败 */
-#define configMAX_TASK_NAME_LEN		( 16 )
-#define configUSE_TRACE_FACILITY	1
+#define configUSE_TICK_HOOK                 0
+#define configCPU_CLOCK_HZ                  ((unsigned long)84000000) /* F411: HSI/8*84/2 = 84MHz */
+#define configTICK_RATE_HZ                  1000                      /* HAL补时及LVGL时间单位均为1ms。 */
+#define configMAX_PRIORITIES                (5)
+#define configMINIMAL_STACK_SIZE            ((unsigned short)128)
+#define configTOTAL_HEAP_SIZE               ((size_t)(16 * 1024)) /* 16KB堆供任务栈、任务控制块及互斥锁使用。 */
+#define configMAX_TASK_NAME_LEN             (16)
+#define configUSE_TRACE_FACILITY            1
 
 #include "app_diag.h"
-#define configGENERATE_RUN_TIME_STATS 1
+#define configGENERATE_RUN_TIME_STATS            1
 #define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() app_diag_clock_init()
-#define portGET_RUN_TIME_COUNTER_VALUE() app_diag_clock_count()
-#define configUSE_16_BIT_TICKS		0
-#define configIDLE_SHOULD_YIELD		1
+#define portGET_RUN_TIME_COUNTER_VALUE()         app_diag_clock_count()
+#define configUSE_16_BIT_TICKS                   0
+#define configIDLE_SHOULD_YIELD                  1
 
-/* 栈溢出检测(方法1: 切换时比对栈顶哨兵值, 开销小):
+/* 栈溢出检测(方法1: 切换时检查保存的栈指针边界, 开销小):
  * 触发即进入 vApplicationStackOverflowHook(app_task.c) 停死, 便于调试定位越界任务 */
-#define configCHECK_FOR_STACK_OVERFLOW	1
-
+#define configCHECK_FOR_STACK_OVERFLOW 1
 
 /* Set the following definitions to 1 to include the API function, or zero
 to exclude the API function. */
 
-#define INCLUDE_vTaskPrioritySet		1
-#define INCLUDE_uxTaskPriorityGet		1
-#define INCLUDE_vTaskDelete				1
-#define INCLUDE_vTaskCleanUpResources	0
-#define INCLUDE_vTaskSuspend			1
-#define INCLUDE_vTaskDelayUntil			1
-#define INCLUDE_vTaskDelay				1
-#define INCLUDE_xTaskGetSchedulerState  1
+#define INCLUDE_vTaskPrioritySet       1
+#define INCLUDE_uxTaskPriorityGet      1
+#define INCLUDE_vTaskDelete            1
+#define INCLUDE_vTaskCleanUpResources  0
+#define INCLUDE_vTaskSuspend           1
+#define INCLUDE_vTaskDelayUntil        1
+#define INCLUDE_vTaskDelay             1
+#define INCLUDE_xTaskGetSchedulerState 1
 
-/* This is the raw value as per the F411: it.c SVC/PendSV handler call vPortSVCHandler/xPortPendSVHandler directly NVIC.  Values can be 255
-(lowest) to 0 (1?) (highest). */
-#define configKERNEL_INTERRUPT_PRIORITY 		255
+/* NVIC优先级寄存器原始值，255的有效高4位对应最低优先级15。 */
+#define configKERNEL_INTERRUPT_PRIORITY 255
 /* !!!! configMAX_SYSCALL_INTERRUPT_PRIORITY must not be set to zero !!!!
 See http://www.FreeRTOS.org/RTOS-F411: it.c SVC/PendSV handler call vPortSVCHandler/xPortPendSVHandler directly-M4.html. */
-#define configMAX_SYSCALL_INTERRUPT_PRIORITY 	191 /* equivalent to 0xb0, or priority 11. */
+#define configMAX_SYSCALL_INTERRUPT_PRIORITY 191 /* BASEPRI写入0xBF，有效高4位为0xB0，对应抢占优先级11。 */
 
+/* HAL/CMSIS使用0..15的逻辑优先级；15与上方内核原始优先级255对应。 */
+#define configLIBRARY_KERNEL_INTERRUPT_PRIORITY 15
 
-/* This is the value being used as per the ST library which permits 16
-priority values, 0 to 15.  This must correspond to the
-configKERNEL_INTERRUPT_PRIORITY setting.  Here 15 corresponds to the lowest
-NVIC value of 255. */
-#define configLIBRARY_KERNEL_INTERRUPT_PRIORITY	15
-
-/* F411: it.c SVC/PendSV handler call vPortSVCHandler/xPortPendSVHandler directly 中断向量映射: FreeRTOS port函数 → CMSIS 向量名 */
+/* FreeRTOS端口的SVC/PendSV处理函数由stm32f4xx_it.c的中断入口直接调用。 */
 
 #endif /* FREERTOS_CONFIG_H */
-

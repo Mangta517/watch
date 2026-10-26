@@ -12,9 +12,9 @@ extern "C"
 {
 #endif
 
-#define EM7028_ADDR             0x24U /* 7 位地址，线上写/读地址为 0x48/0x49 */
-#define EM7028_PRODUCT_ID       0x36U
-#define EM7028_SAMPLE_PERIOD_MS 25U /* 手册第8页16位连续转换的典型时间；实际周期需实测 */
+#define EM7028_ADDR             0x24 /* 7 位地址，线上写/读地址为 0x48/0x49 */
+#define EM7028_PRODUCT_ID       0x36
+#define EM7028_SAMPLE_PERIOD_MS 25 /* 手册第8页16位连续转换的典型时间；实际周期需实测 */
 
     typedef enum
     {

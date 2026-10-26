@@ -15,8 +15,8 @@ if not gcc:
 
 for project_name, target_name, start, size in [
     ("f411_bootloader", "f411_bootloader", 0x08000000, 0x8000),
-    ("f411ceu6", "f411ceu6", 0x08000000, 0x80000),
-    ("f411ceu6_upgrade_app", "f411ceu6_upgrade_app", 0x08008000, 0x78000),
+    ("f411ceu6", "f411ceu6", 0x08000000, 0x60000),
+    ("f411ceu6_upgrade_app", "f411ceu6_upgrade_app", 0x08008000, 0x58000),
 ]:
     project = ET.parse(root / "MDK-ARM" / (project_name + ".uvprojx"))
     target = project.find("./Targets/Target[TargetName='" + target_name + "']")
@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="watch-bootloader-") as output:
     (output / "main.h").write_text(header, encoding="utf-8")
     shutil.copyfile(root / "tests/ble/host/usart.h", output / "usart.h")
     crc_defines = []
-    for size in [101, 512, 10001, 491520]:
+    for size in [101, 512, 10001, 360448]:
         image = struct.pack("<II", 0x20020000, 0x08008009) + bytes((i * 37 + 11) & 255 for i in range(8, size))
         crc_defines.append(f"#define TEST_CRC_{size} 0x{zlib.crc32(image):08X}U\n")
     (output / "crc_vectors.h").write_text("".join(crc_defines), encoding="ascii")
@@ -49,9 +49,9 @@ with tempfile.TemporaryDirectory(prefix="watch-bootloader-") as output:
     subprocess.run([
         gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
         "-Wno-int-to-pointer-cast", "-Wno-missing-field-initializers", "-DF411_BOOTLOADER",
-        "-I" + str(output), "-Iinterface", "-Iapplication",
+        "-I" + str(output), "-Iinterface", "-Iapplication", "-Icommon",
         "tests/bootloader/bootloader_harness.c", "interface/kt6368a.c",
-        "interface/int_bootloader.c", "application/app_bootloader.c", "-o", str(executable),
+        "interface/int_bootloader.c", "application/app_bootloader.c", "interface/bl24c02.c", "-o", str(executable),
     ], cwd=root, check=True)
     subprocess.run([str(executable)], cwd=root, check=True)
 

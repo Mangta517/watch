@@ -1,21 +1,54 @@
 /* 执行真实任务入口，模拟等待期间sensor获得调度，验证首帧和采集不等RTC/蓝牙。 */
 #include <stdint.h>
-static void startup_write_reg(uint32_t *reg, uint32_t value);
-#define WRITE_REG(reg, value)         startup_write_reg(&(reg), (value))
 #define app_diag_boot_set startup_boot_set
 #define app_diag_take_imu_calibration startup_take_imu_calibration
 #include "../../application/app_task.c"
 #include "bl24c02.h"
+
+static unsigned battery_log_calls;
+void app_battery_log_init(void)
+{
+    battery_log_calls = 0;
+}
+void app_battery_log_service(uint32_t seconds)
+{
+    (void)seconds;
+    ++battery_log_calls;
+}
 #include <assert.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
 
-IWDG_TypeDef host_iwdg;
+static uint32_t reset_feed_events;
+void app_reset_watchdog_feed(uint32_t now_ms)
+{
+    assert(now_ms == HAL_GetTick());
+    ++reset_feed_events;
+}
+
+void app_reset_capture_stop(uint32_t kind, uint32_t pc, uint32_t task_tag)
+{
+    (void)kind;
+    (void)pc;
+    (void)task_tag;
+    assert(0 && "normal startup must not enter a fault recorder");
+}
+
 static TaskFunction_t entries[3];
 static jmp_buf touch_stop;
 static unsigned int touch_inits, touch_samples;
 static uint32_t touch_work_ms;
+static uint8_t touch_sleep_test;
+static unsigned int touch_notifications, touch_blocks;
+static uint8_t lvgl_wait_test, wake_key_active;
+static unsigned lvgl_notifications, lvgl_waits, wake_polls, irq_notifications, irq_yields;
+static uint8_t background_test, background_sleeping;
+static uint32_t mock_imu_period = 10;
+static unsigned background_samples, motion_samples, background_wakes, background_sleeps;
+static uint32_t background_wake_ms, background_last_sample_ms, background_start_ms;
+static uint32_t background_baro_ms, background_battery_ms;
+static unsigned background_recovery_steps, mag_recovery_steps;
 static unsigned int task_count, fail_task;
 static uint8_t fail_devices, displayed, frame, rtc_done, ble_done, sensor_ran;
 static unsigned int hardware_count, service_count, battery_samples;
@@ -35,6 +68,12 @@ static uint32_t sleep_imu_sample_ms, sleep_heart_advance_ms;
 static uint32_t sleep_heart_duration_ms = 10000U;
 static unsigned int sleep_parks, sleep_resumes, sleep_heart_starts, sleep_history;
 static uint8_t sleep_first_seen;
+static uint8_t sleep_pose_seen;
+static unsigned int sleep_pose_samples;
+static uint32_t sleep_pose_ms;
+static uint8_t sleep_recovery_test, sleep_recovery_sample;
+static uint32_t sleep_recovery_last_ms;
+static unsigned sleep_recovery_steps;
 static uint8_t restored_mode, load_error, save_error, manual_request, complete_cal, fail_cal;
 static mpu6050_cal_state mock_cal_state;
 static const mpu6050_offset_struct stored_offset = {{20, -10, 30}, {66, -33, 99}};
@@ -148,8 +187,6 @@ static TickType_t tick;
 static TickType_t rtc_begin_tick, ble_begin_tick;
 static jmp_buf stop, sensor_stop;
 static unsigned int watchdog_inits, watchdog_enables, watchdog_feeds;
-static unsigned int idle_sleep_calls;
-static unsigned int iwdg_config_writes, iwdg_feeds;
 static uint32_t watchdog_enable_delay;
 static uint8_t first_frame_stall;
 static uint8_t first_frame_slow, first_frame_deadline;
@@ -160,24 +197,6 @@ static uint32_t watchdog_last_falling_ms;
 static uint8_t runtime_render, runtime_sensor_stalled;
 static uint32_t runtime_chunk_ms = 150U;
 static unsigned int runtime_chunks = 10U, render_yields;
-
-static void startup_write_reg(uint32_t *reg, uint32_t value)
-{
-    if (reg == &host_iwdg.KR && value == 0xAAAAU)
-    {
-        assert(iwdg_config_writes == 4U && iwdg_feeds == watchdog_feeds);
-        ++iwdg_feeds;
-    }
-    else
-    {
-        const uint32_t values[] = {0xCCCCU, 0x5555U, 6U, 0x0FFFU};
-        uint32_t *registers[] = {&host_iwdg.KR, &host_iwdg.KR, &host_iwdg.PR, &host_iwdg.RLR};
-        assert(iwdg_config_writes < 4U && reg == registers[iwdg_config_writes]);
-        assert(value == values[iwdg_config_writes]);
-        ++iwdg_config_writes;
-    }
-    *reg = value;
-}
 
 void tps3823_init(void)
 {
@@ -213,6 +232,7 @@ static void test_watchdog_progress(uint8_t wrap)
     }
     app_watchdog_begin();
     assert(watchdog_enables == 1 && watchdog_feeds == 0);
+    assert(reset_feed_events == 1U);
     tick += 100;
     app_watchdog_service();
     assert(watchdog_feeds == 1);
@@ -246,6 +266,7 @@ static void test_watchdog_progress(uint8_t wrap)
     tick += 100;
     app_watchdog_service();
     assert(watchdog_feeds == 5);
+    assert(reset_feed_events == watchdog_feeds + 1U);
     puts("Watchdog: protection before first frame, 100ms cadence, task stalls and tick/progress wrap: PASS");
 }
 
@@ -288,7 +309,19 @@ void __DMB(void)
 }
 BaseType_t xTaskCreate(TaskFunction_t entry, const char *name, uint16_t stack, void *arg, UBaseType_t priority, TaskHandle_t *handle)
 {
-    assert(arg == NULL && handle == NULL && task_count < 3);
+    assert(arg == NULL && task_count < 3);
+    if (task_count == 0)
+    {
+        assert(handle == &s_lvgl_task_handle);
+    }
+    else if (task_count == 1)
+    {
+        assert(handle == NULL);
+    }
+    else
+    {
+        assert(handle == &s_touch_task_handle);
+    }
     if (task_count == 0)
     {
         assert(strcmp(name, "lvgl") == 0 && stack == 1024 && priority == 3);
@@ -309,7 +342,88 @@ BaseType_t xTaskCreate(TaskFunction_t entry, const char *name, uint16_t stack, v
         return 0;
     }
     entries[task_count++] = entry;
+    if (handle != NULL)
+    {
+        if (task_count == 1)
+        {
+            *handle = &lvgl_notifications;
+        }
+        else
+        {
+            *handle = &touch_inits;
+        }
+    }
     return pdPASS;
+}
+
+BaseType_t xTaskNotifyGive(TaskHandle_t task)
+{
+    assert(task == &touch_inits);
+    ++touch_notifications;
+    return pdPASS;
+}
+
+void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken)
+{
+    assert(task == &lvgl_notifications && woken != NULL && *woken == pdFALSE);
+    ++irq_notifications;
+    ++lvgl_notifications;
+    *woken = pdTRUE;
+}
+
+void startup_yield_from_isr(BaseType_t woken)
+{
+    assert(woken == pdTRUE);
+    ++irq_yields;
+}
+
+uint8_t App_UI_IsWakeKeyActive(void)
+{
+    return wake_key_active;
+}
+
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
+{
+    if (lvgl_wait_test != 0)
+    {
+        uint32_t before = tick;
+        assert(clear == pdTRUE && wait == 100 && rtc_done != 0 && ble_done != 0 && wake_key_active == 0);
+        ++lvgl_waits;
+        if (lvgl_waits == 1)
+        {
+            assert(lvgl_notifications == 1);
+            lvgl_notifications = 0;
+            assert(tick == before);
+            return 1;
+        }
+        assert(lvgl_notifications == 0);
+        if (lvgl_waits == 2)
+        {
+            tick += 37;
+            app_task_wake_from_isr();
+            assert(lvgl_notifications == 1);
+            lvgl_notifications = 0;
+            ++app_sensor_watchdog_progress;
+            return 1;
+        }
+        assert(lvgl_waits == 3 && wake_polls == 3);
+        tick += wait;
+        ++app_sensor_watchdog_progress;
+        app_watchdog_service();
+        assert((uint32_t)(tick - watchdog_last_falling_ms) < 900);
+        longjmp(stop, 5);
+    }
+    assert(touch_sleep_test != 0 && clear == pdTRUE && wait == portMAX_DELAY);
+    assert(touch_samples == 1U && touch_inits == 1U);
+    ++touch_blocks;
+    if (touch_notifications == 0)
+    {
+        tick += 5000U; /* 整段熄屏不运行触摸轮询，直到PA4通知。 */
+        app_task_set_power_state(0, 0, 0, 0);
+    }
+    assert(touch_notifications == 1U);
+    touch_notifications = 0;
+    return 1;
 }
 void Error_Handler(void)
 {
@@ -333,11 +447,14 @@ TickType_t xTaskGetTickCount(void)
 void vTaskDelay(TickType_t ticks)
 {
     unsigned int feeds = watchdog_feeds;
-    unsigned int internal_feeds = iwdg_feeds;
-    assert((ticks == 5 || ticks == 1 || (power_profile != 0 && (s_power_state & APP_POWER_IDLE) != 0 && ticks == 20U)) && task_count == 3);
-    /* Tickless寄存器行为由tests/tickless覆盖，此处只验证任务进度喂狗。 */
-    assert(watchdog_feeds == feeds && iwdg_feeds == internal_feeds);
+    assert((ticks == 5 || ticks == 1 || ((power_profile != 0 || lvgl_wait_test != 0) && (s_power_state & APP_POWER_IDLE) != 0 && ticks == 20U)) && task_count == 3);
+    /* Tickless由独立硬件/内核模型验证；任务阻塞不能替代进度喂狗。 */
+    assert(watchdog_feeds == feeds);
     tick += ticks;
+    if (lvgl_wait_test != 0 && sensor_ran != 0)
+    {
+        ++app_sensor_watchdog_progress;
+    }
     if (ticks == 1)
     {
         ++render_yields;
@@ -367,6 +484,16 @@ void vTaskDelay(TickType_t ticks)
     }
     if (rtc_done && ble_done)
     {
+        if (lvgl_wait_test != 0)
+        {
+            assert(wake_key_active != 0 && ticks == 20);
+            if (++wake_polls == 3)
+            {
+                wake_key_active = 0;
+            }
+            ++app_sensor_watchdog_progress;
+            return;
+        }
         if (bluetooth_resume_test != 0 && bluetooth_resume_phase == 0)
         {
             bluetooth_resume_phase = 1;
@@ -381,13 +508,58 @@ void vTaskDelay(TickType_t ticks)
         assert((uint32_t)(tick - ble_begin_tick) < 2000U);
     }
 }
-void HAL_PWR_EnterSLEEPMode(uint32_t regulator, uint8_t entry)
-{
-    assert(regulator == PWR_MAINREGULATOR_ON && entry == PWR_SLEEPENTRY_WFI);
-    ++idle_sleep_calls;
-}
 void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
 {
+    if (background_test != 0)
+    {
+        assert(ticks == 20 || ticks == 40);
+        assert(++sensor_rounds == app_sensor_watchdog_progress);
+        app_watchdog_service();
+        if (sensor_elapsed_ms >= 6000 && sensor_elapsed_ms < 8000)
+        {
+            if (background_test == 1)
+            {
+                app_task_set_power_state(0, 1, 0, 0);
+            }
+            else if (cal_begins == 0)
+            {
+                manual_request = 1;
+            }
+        }
+        if (sensor_elapsed_ms >= 8000)
+        {
+            app_task_set_power_state(0, 0, 0, 0);
+        }
+        if (sensor_elapsed_ms >= 14500)
+        {
+            if (background_test == 1)
+            {
+                assert(background_samples >= 58 && background_samples <= 64);
+                assert(motion_samples >= 90);
+            }
+            else
+            {
+                assert(background_samples >= 68 && background_samples <= 73);
+                assert(motion_samples == 1);
+                assert(cal_begins == 1 && saves == 1 && mock_cal_state == MPU6050_CAL_DONE);
+            }
+            assert(background_wakes == 1 && background_sleeps == 2 && background_sleeping != 0);
+            assert((uint32_t)(tick - background_start_ms) == sensor_elapsed_ms);
+            assert(watchdog_feeds > 100 && battery_samples >= 14);
+            longjmp(sensor_stop, 1);
+        }
+        low_rate_mask = 0;
+        sensor_elapsed_ms += ticks;
+        tick += ticks;
+        *last = tick;
+        return;
+    }
+    if (touch_sleep_test != 0)
+    {
+        assert(touch_blocks == 1U && touch_samples == 2U && ticks == APP_TOUCH_PERIOD_MS);
+        assert(*last == tick);
+        longjmp(touch_stop, 1);
+    }
     if (sport_test != 0)
     {
         uint32_t finish_ms = 2000U;
@@ -443,6 +615,13 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
         }
         assert(++sensor_rounds == app_sensor_watchdog_progress);
         app_watchdog_service();
+        if (sleep_recovery_test != 0 && sensor_elapsed_ms >= 14500U)
+        {
+            assert(sleep_recovery_steps == 16U && sleep_recovery_sample != 0);
+            assert(sleep_imu != 0 && sleep_bus_parked != 0 && sleep_pose_samples >= 50);
+            assert(watchdog_feeds > 100U && battery_samples >= 14);
+            longjmp(sensor_stop, 1);
+        }
         if (sensor_elapsed_ms >= 1212000U)
         {
             app_task_set_power_state(0, 0, 0, 0);
@@ -453,7 +632,9 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
             assert(uptime_writes >= 2U && app_uptime_get_saved(&seconds) && seconds >= 1200U);
             assert(sleep_heart_starts == 2U && sleep_history == 2U);
             assert(sleep_parks >= 3U && sleep_resumes >= 2U);
-            assert(sleep_imu == 0 && sleep_baro == 0 && sleep_bus_parked == 0);
+            assert(sleep_pose_samples >= 5900 && sleep_pose_samples <= 6100);
+            assert(sleep_parks > 5900 && sleep_resumes > 5900);
+            assert(sleep_imu != 0 && sleep_baro == 0 && sleep_bus_parked == 0);
             assert(watchdog_feeds > 10000U && battery_samples > 1200U);
             longjmp(sensor_stop, 1);
         }
@@ -492,7 +673,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     assert(!rtc_done && !ble_done);
     ++sensor_rounds;
     sensor_elapsed_ms += ticks;
-    assert(recovery_steps == sensor_rounds * 3U);
+    assert(recovery_steps == sensor_rounds + background_recovery_steps + mag_recovery_steps);
     assert(app_sensor_watchdog_progress == sensor_rounds);
     if (power_profile != 0 && heart_enabled != 0 && sensor_rounds == 1U)
     {
@@ -555,6 +736,17 @@ void App_Display_Service(void)
     TickType_t callback_tick;
     assert(frame);
     ++service_count;
+    if (lvgl_wait_test != 0 && rtc_done != 0 && ble_done != 0)
+    {
+        if (lvgl_waits == 0)
+        {
+            app_task_wake_from_isr();
+        }
+        else if (lvgl_waits == 1 && wake_polls == 0)
+        {
+            wake_key_active = 1;
+        }
+    }
     if (runtime_render != 0)
     {
         if (service_count == 2U && runtime_render == 2U)
@@ -630,6 +822,14 @@ void kt6368a_init_begin(void)
 {
     assert(frame && task_count == 3);
     ble_begin_tick = tick;
+}
+void kt6368a_set_rx_callback(void (*callback)(void))
+{
+    assert(callback != NULL);
+}
+uint8_t kt6368a_rx_pending(void)
+{
+    return 0;
 }
 uint8_t kt6368a_init_is_pending(void)
 {
@@ -719,28 +919,6 @@ uint8_t app_heart_sleep_pending(void)
     }
     return 0;
 }
-void app_imu_set_sleep(uint8_t sleeping)
-{
-    assert(sleeping <= 1U);
-    if (sleep_test != 0)
-    {
-        assert(sleep_bus_parked == 0);
-        if (sleeping != 0)
-        {
-            assert(heart_enabled == 0);
-        }
-        sleep_imu = sleeping;
-        if (sleeping != 0 && sleep_first_seen == 0)
-        {
-            sleep_first_seen = 1;
-            sleep_first_ms = sensor_elapsed_ms;
-        }
-        if (sleeping == 0)
-        {
-            sleep_environment_ms = sensor_elapsed_ms;
-        }
-    }
-}
 uint8_t app_imu_is_calibrating(void)
 {
     return 0;
@@ -753,6 +931,10 @@ uint8_t spl006_set_sleep(uint8_t sleeping)
     {
         assert(sleep_bus_parked == 0);
         sleep_baro = sleeping;
+        if (sleeping == 0 && sleep_heart_mode != 0)
+        {
+            sleep_environment_ms = sensor_elapsed_ms;
+        }
     }
     return 0;
 }
@@ -784,6 +966,17 @@ void app_battery_init(void)
 }
 void app_battery_service(void)
 {
+    if (background_test != 0)
+    {
+        if (battery_samples != 0)
+        {
+            assert(sensor_elapsed_ms - background_battery_ms >= 1000);
+            assert(sensor_elapsed_ms - background_battery_ms <= 1040);
+            background_battery_ms = sensor_elapsed_ms;
+        }
+        ++battery_samples;
+        return;
+    }
     if (sleep_test != 0 || sport_test != 0)
     {
         ++battery_samples;
@@ -799,7 +992,15 @@ void app_battery_service(void)
 }
 void my_mpu6050_zero_offset_begin(uint32_t now)
 {
-    assert(now == tick && battery_samples == 1);
+    assert(now == tick);
+    if (background_test != 0)
+    {
+        assert(background_sleeping != 0 && battery_samples >= 6);
+    }
+    else
+    {
+        assert(battery_samples == 1);
+    }
     ++cal_begins;
     mock_cal_state = MPU6050_CAL_WAIT_STILL;
 }
@@ -819,14 +1020,58 @@ void app_aht21_init(void)
 void App_IMU_Service(void)
 {
     assert(hardware_count == 5 && !rtc_done && !ble_done);
+    if (background_test != 0)
+    {
+        assert(background_sleeping == (mock_imu_period == 200));
+        if (mock_imu_period != 200)
+        {
+            assert((uint32_t)(tick - background_wake_ms) >= 100);
+            if (motion_samples != 0)
+            {
+                assert((uint32_t)(tick - background_last_sample_ms) == 20);
+            }
+            ++motion_samples;
+        }
+        else
+        {
+            assert(mock_imu_period == 200);
+            if (background_samples != 0 && (uint32_t)(tick - background_last_sample_ms) < 600)
+            {
+                assert((uint32_t)(tick - background_last_sample_ms) >= 200);
+            }
+            ++background_samples;
+        }
+        background_last_sample_ms = tick;
+    }
     if (sport_active != 0)
     {
         ++sport_samples;
     }
     if (sleep_test != 0)
     {
-        assert(sleep_bus_parked == 0 && sleep_imu == 0);
+        assert(sleep_bus_parked == 0 && sleep_imu == (mock_imu_period == 200));
         sleep_imu_sample_ms = tick;
+        if (sleep_recovery_steps != 0 && sleep_recovery_sample == 0)
+        {
+            assert(sleep_recovery_steps == 16U && (uint32_t)(tick - sleep_recovery_last_ms) >= 200U);
+            sleep_recovery_sample = 1;
+        }
+        if (sleep_heart_mode != 0 && heart_enabled == 0)
+        {
+            assert(mock_imu_period == 200);
+            if (sleep_pose_seen != 0 && sleep_recovery_test == 0)
+            {
+                assert(sensor_elapsed_ms - sleep_pose_ms >= 200);
+                assert(sensor_elapsed_ms - sleep_pose_ms <= 300);
+            }
+            sleep_pose_ms = sensor_elapsed_ms;
+            sleep_pose_seen = 1;
+            ++sleep_pose_samples;
+        }
+        else
+        {
+            sleep_pose_seen = 0;
+        }
     }
     if (complete_cal != 0 && mock_cal_state == MPU6050_CAL_WAIT_STILL)
     {
@@ -839,10 +1084,37 @@ void App_IMU_Service(void)
 }
 uint32_t app_imu_set_sample_period(uint32_t period_ms)
 {
-    assert(period_ms == 10U || period_ms == 20U || period_ms == 40U);
+    assert(period_ms == 10U || period_ms == 20U || period_ms == 40U || period_ms == 200);
+    if (mock_imu_period != period_ms)
+    {
+        if (background_test != 0 && (mock_imu_period == 200 || period_ms == 200))
+        {
+            background_sleeping = period_ms == 200;
+            if (background_sleeping != 0)
+            {
+                ++background_sleeps;
+            }
+            else
+            {
+                ++background_wakes;
+                background_wake_ms = tick;
+            }
+        }
+        if (sleep_test != 0)
+        {
+            assert(sleep_bus_parked == 0);
+            sleep_imu = period_ms == 200;
+            if (sleep_imu != 0 && sleep_first_seen == 0)
+            {
+                sleep_first_seen = 1;
+                sleep_first_ms = sensor_elapsed_ms;
+            }
+        }
+        mock_imu_period = period_ms;
+    }
     if (power_profile != 0)
     {
-        uint32_t expected = 40U;
+        uint32_t expected = 200;
         if (restored_mode == 0 || (s_power_state & APP_POWER_MOTION) != 0)
         {
             expected = 20U;
@@ -863,6 +1135,21 @@ void app_heart_get_snapshot(app_heart_struct *heart)
 void App_Baro_Service(void)
 {
     assert(hardware_count == 5);
+    if (background_test != 0)
+    {
+        if (baro_calls == 0)
+        {
+            assert(sensor_elapsed_ms >= 500 && sensor_elapsed_ms < 540);
+        }
+        else
+        {
+            assert(sensor_elapsed_ms - background_baro_ms >= 1000);
+            assert(sensor_elapsed_ms - background_baro_ms <= 1040);
+        }
+        background_baro_ms = sensor_elapsed_ms;
+        ++baro_calls;
+        return;
+    }
     if (sport_test != 0)
     {
         assert(sport_active == 0 && sport_baro_sleeping == 0);
@@ -936,11 +1223,81 @@ void app_touch_service(void)
     ++touch_samples;
     tick += touch_work_ms;
 }
+uint8_t app_touch_is_sleeping(void)
+{
+    uint8_t sleeping = touch_sleep_test != 0 && (s_power_state & APP_POWER_SCREEN_OFF) != 0;
+    if (sleeping != 0 && touch_sleep_test == 2U)
+    {
+        /* PA4通知先于ulTaskNotifyTake到达，也不能丢失。 */
+        app_task_set_power_state(0, 0, 0, 0);
+    }
+    return sleeping;
+}
 int main(int argc, char **argv)
 {
     int result;
-    app_boot_watchdog_start();
-    assert(host_iwdg.PR == 6U && host_iwdg.RLR == 0x0FFFU && iwdg_feeds == 1U);
+    if (argc > 1 && strncmp(argv[1], "background_", 11) == 0)
+    {
+        background_test = 1;
+        restored_mode = 1;
+        tick = 1000;
+        if (strcmp(argv[1], "background_wrap") == 0)
+        {
+            tick = UINT32_MAX - 6000;
+        }
+        if (strcmp(argv[1], "background_calibration") == 0)
+        {
+            background_test = 2;
+            complete_cal = 1;
+        }
+        background_start_ms = tick;
+        displayed = 1;
+        app_watchdog_begin();
+        frame = 1;
+        app_task_set_power_state(0, 0, 0, 0);
+        if (setjmp(sensor_stop) == 0)
+        {
+            app_sensor_task(NULL);
+        }
+        puts("PASS: background accelerometer runs at 5Hz, Motion/calibration restores 50Hz after 100ms, and both transitions retain watchdog progress across wrap.");
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "lvgl_wake") == 0)
+    {
+        app_task_wake_from_isr();
+        assert(irq_notifications == 0 && irq_yields == 0);
+        lvgl_wait_test = 1;
+        app_task_set_power_state(1, 0, 1, 0);
+        if (setjmp(stop) == 0)
+        {
+            App_Task_Create();
+            App_Task_Start();
+            assert(0);
+        }
+        assert(lvgl_waits == 3 && irq_notifications == 2 && irq_yields == 2 && lvgl_notifications == 0);
+        assert(wake_polls == 3 && wake_key_active == 0 && watchdog_feeds > 30);
+        puts("PASS: PA4 IRQ ignores a missing task, preserves an early notification, interrupts a 100ms sleep, and keeps 20ms debounce polls and watchdog progress.");
+        return 0;
+    }
+    if (argc > 1 && strncmp(argv[1], "touch_sleep", 11) == 0)
+    {
+        touch_sleep_test = 1;
+        if (strcmp(argv[1], "touch_sleep_early") == 0)
+        {
+            touch_sleep_test = 2;
+        }
+        frame = sensor_ran = 1;
+        hardware_count = 5;
+        s_touch_task_handle = &touch_inits;
+        app_task_set_power_state(1, 0, 1, 0);
+        if (setjmp(touch_stop) == 0)
+        {
+            app_touch_task(NULL);
+        }
+        assert(touch_blocks == 1U && touch_samples == 2U && touch_notifications == 0);
+        puts("PASS: touch task blocks indefinitely after chip sleep; PA4 or a pre-arriving notification resumes normal polling without a catch-up loop.");
+        return 0;
+    }
     if (argc > 1 && strncmp(argv[1], "sport_", 6) == 0)
     {
         sport_test = 1;
@@ -963,6 +1320,7 @@ int main(int argc, char **argv)
         {
             app_sensor_task(NULL);
         }
+        assert(battery_log_calls > 100U);
         puts("PASS: sport 100Hz continues through screen-off, barometer/calibration storage stay idle, 10min uptime saves serialize and normal sampling resumes.");
         return 0;
     }
@@ -971,6 +1329,14 @@ int main(int argc, char **argv)
         sleep_test = 1;
         restored_mode = 1;
         tick = 1000U;
+        if (strncmp(argv[1], "sleep_recovery", 14) == 0)
+        {
+            sleep_recovery_test = 1;
+            if (strcmp(argv[1], "sleep_recovery_wrap") == 0)
+            {
+                tick = UINT32_MAX - 5500U;
+            }
+        }
         if (strcmp(argv[1], "sleep_wrap") == 0)
         {
             tick = UINT32_MAX - 1000U;
@@ -997,11 +1363,19 @@ int main(int argc, char **argv)
             app_sensor_task(NULL);
         }
         assert(sleep_first_seen != 0);
+        assert(battery_log_calls > 100U);
         if (complete_cal != 0)
         {
             assert(cal_begins == 1U && saves == 1U && sleep_first_ms >= 20U);
         }
-        puts("PASS: 20-minute sleep timeline, 10min environment/heart/uptime, bus parking, battery/watchdog, calibration and wake restore.");
+        if (sleep_recovery_test != 0)
+        {
+            puts("PASS: sleep defers IMU/bus parking through recovery and warmup; sampling, battery and watchdog continue across tick wrap.");
+        }
+        else
+        {
+            puts("PASS: 20-minute sleep timeline, 5Hz accelerometer, 10min environment/heart/uptime, bus parking, battery/watchdog, calibration and wake restore.");
+        }
         return 0;
     }
     if (argc > 1 && (strcmp(argv[1], "watchdog_progress") == 0 || strcmp(argv[1], "watchdog_wrap") == 0))
@@ -1192,6 +1566,15 @@ uint8_t my_mpu6050_recover_step(uint32_t now_ms)
 {
     assert(now_ms == tick);
     ++recovery_steps;
+    ++background_recovery_steps;
+    if (sleep_recovery_test != 0 && sensor_elapsed_ms >= 5000U && sleep_recovery_steps < 16U)
+    {
+        assert(sleep_bus_parked == 0);
+        ++sleep_recovery_steps;
+        sleep_recovery_last_ms = now_ms;
+        ++tick; /* I2C事务可能跨过tick，任务不能用较早的now_ms减去事务后的时间戳。 */
+        return 2;
+    }
     if (fail_devices != 0)
     {
         return 2; /* Recovering devices must not stop sensor progress. */
@@ -1215,6 +1598,7 @@ uint8_t spl006_recover_step(uint32_t now_ms)
 }
 uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
 {
+    ++mag_recovery_steps;
     assert(now_ms == tick);
     ++recovery_steps;
     if (fail_devices != 0)

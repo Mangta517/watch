@@ -8,7 +8,7 @@
 #endif
 
 /* Sleep保留SysTick时钟，用一次长计数唤醒；RTC负责补时。最多100ms，不越过喂狗周期。 */
-#define APP_TICKLESS_MAX_TICKS 100U
+#define APP_TICKLESS_MAX_TICKS 100
 
 static uint32_t s_rtc_fraction;
 extern __IO uint32_t uwTick;
@@ -31,7 +31,7 @@ void app_tickless_sleep(uint32_t expected_ticks)
     }
     SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk; /* 与原HAL Sleep入口一致，保留外设时钟。 */
     rtc_start = watch_rtc_get_subsecond();
-    if (rtc_start == UINT32_MAX || expected_ticks < 2U)
+    if (rtc_start == UINT32_MAX || expected_ticks < 2)
     {
         /* LSE启动/故障时保留1ms心跳，HAL超时和启动看门狗仍正常推进。 */
         __DSB();
@@ -59,17 +59,17 @@ void app_tickless_sleep(uint32_t expected_ticks)
         __enable_irq();
         return;
     }
-    if (remaining == 0U)
+    if (remaining == 0)
     {
-        remaining = SysTick->LOAD + 1U;
+        remaining = SysTick->LOAD + 1;
     }
     phase = counts_per_tick - remaining;
     rtc_start_cycle = DWT->CYCCNT;
     rtc_start = watch_rtc_get_subsecond();
 
     /* 在最近任务截止时间唤醒；到期的最后一个tick交ISR处理，step不越过解阻塞点。 */
-    SysTick->LOAD = remaining + counts_per_tick * (expected_ticks - 1U) - 1U;
-    SysTick->VAL = 0U;
+    SysTick->LOAD = remaining + counts_per_tick * (expected_ticks - 1) - 1;
+    SysTick->VAL = 0;
     resumed_cycle = DWT->CYCCNT;
     SysTick->CTRL = control;
     __DSB();
@@ -82,7 +82,7 @@ void app_tickless_sleep(uint32_t expected_ticks)
     if (rtc_start != UINT32_MAX && rtc_end != UINT32_MAX)
     {
         /* 单次小于1秒，模减同时覆盖跨秒/午夜；日历校时只能在任务恢复后发生。 */
-        scaled_counts = (uint64_t)((rtc_end - rtc_start) & (WATCH_RTC_SUBSECOND_HZ - 1U));
+        scaled_counts = (uint64_t)((rtc_end - rtc_start) & (WATCH_RTC_SUBSECOND_HZ - 1));
         scaled_counts = scaled_counts * configCPU_CLOCK_HZ + s_rtc_fraction;
         elapsed_counts = (uint32_t)(scaled_counts / WATCH_RTC_SUBSECOND_HZ);
         s_rtc_fraction = (uint32_t)(scaled_counts % WATCH_RTC_SUBSECOND_HZ);
@@ -93,7 +93,7 @@ void app_tickless_sleep(uint32_t expected_ticks)
         elapsed_counts = SysTick->LOAD - SysTick->VAL;
         if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
         {
-            elapsed_counts += SysTick->LOAD + 1U;
+            elapsed_counts += SysTick->LOAD + 1;
         }
         rtc_start_cycle = resumed_cycle;
     }
@@ -107,19 +107,19 @@ void app_tickless_sleep(uint32_t expected_ticks)
     remaining = counts_per_tick - elapsed_counts % counts_per_tick;
     if (complete_ticks >= expected_ticks)
     {
-        complete_ticks = expected_ticks - 1U;
-        pend_tick = 1U;
+        complete_ticks = expected_ticks - 1;
+        pend_tick = 1;
     }
 
     /* 长计数产生的pending不是普通1ms tick；先清除，再按实测值一次补齐。 */
     SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
-    SysTick->LOAD = remaining - 1U;
-    SysTick->VAL = 0U;
+    SysTick->LOAD = remaining - 1;
+    SysTick->VAL = 0;
     SysTick->CTRL = control;
     uwTick += complete_ticks;
     vTaskStepTick((TickType_t)complete_ticks);
-    SysTick->LOAD = counts_per_tick - 1U;
-    if (pend_tick != 0U)
+    SysTick->LOAD = counts_per_tick - 1;
+    if (pend_tick != 0)
     {
         SCB->ICSR = SCB_ICSR_PENDSTSET_Msk;
     }

@@ -2,7 +2,7 @@
 #define APP_CLOCK_H
 #include <stdint.h>
 
-#define APP_CLOCK_FRAME_IDLE_MS 200U
+#define APP_CLOCK_FRAME_IDLE_MS 200
 
 typedef enum
 {

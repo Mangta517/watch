@@ -27,7 +27,7 @@ static uint8_t parse_number(const char **cursor, int32_t *value)
     {
         if (++digits > 4)
         {
-            return 0;
+            return 1;
         }
         magnitude = magnitude * 10 + **cursor - '0';
         ++*cursor;
@@ -40,7 +40,7 @@ static uint8_t parse_number(const char **cursor, int32_t *value)
     {
         *value = magnitude;
     }
-    return digits != 0;
+    return digits == 0;
 }
 
 static void finish_frame(void)
@@ -48,8 +48,8 @@ static void finish_frame(void)
     const char *cursor = s_frame + 8;
     int32_t code, temperature, humidity;
     s_frame[s_length] = '\0';
-    if (!s_overflow && s_length >= 8 && memcmp(s_frame, "WEATHER,", 8) == 0 && parse_number(&cursor, &code) && *cursor++ == ',' &&
-        parse_number(&cursor, &temperature) && *cursor++ == ',' && parse_number(&cursor, &humidity) && cursor == s_frame + s_length &&
+    if (!s_overflow && s_length >= 8 && memcmp(s_frame, "WEATHER,", 8) == 0 && parse_number(&cursor, &code) == 0 && *cursor++ == ',' &&
+        parse_number(&cursor, &temperature) == 0 && *cursor++ == ',' && parse_number(&cursor, &humidity) == 0 && cursor == s_frame + s_length &&
         *cursor == '\0' && code >= 0 && code <= 99 && temperature >= -1000 && temperature <= 1000 && humidity >= 0 && humidity <= 100)
     {
         s_weather.code = (uint8_t)code;
@@ -64,7 +64,7 @@ static void finish_frame(void)
 
 void app_weather_service(uint32_t now_ms)
 {
-    if ((s_length || s_overflow) && (uint32_t)(now_ms - s_last_byte_ms) >= 200U)
+    if ((s_length || s_overflow) && (uint32_t)(now_ms - s_last_byte_ms) >= 200)
     {
         finish_frame();
     }

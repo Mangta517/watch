@@ -7,7 +7,7 @@
 
 #include "aht21.h"
 
-#define APP_AHT21_PERIOD_MS 2000U
+#define APP_AHT21_PERIOD_MS 2000
 
 typedef struct
 {
@@ -23,7 +23,7 @@ typedef struct
 void app_aht21_init(void);
 /* sensor 每轮调用；触发与读取分离，转换等待期间不占总线、不延时。 */
 void app_aht21_service(void);
-/* sensor任务切换周期；取消在途结果，下一次到期再触发，AHT21转换后自动待机。 */
+/* sensor任务切换固定周期；取消在途结果，下一次到期再触发，AHT21转换后自动待机。 */
 void app_aht21_set_period(uint32_t period_ms);
 void app_aht21_get_snapshot(app_aht21_struct *snapshot);
 

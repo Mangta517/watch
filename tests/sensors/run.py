@@ -13,7 +13,7 @@ if not gcc:
 sources = ["tests/sensors/sensor_harness.c", "interface/lsm303dlhc.c",
            "interface/mpu6050.c", "interface/spl006.c",
            "interface/bl24c02.c", "application/app_mag_store.c", "application/app_imu_store.c", "application/app_uptime.c",
-           "common/common_imu.c", "application/app_imu.c", "application/app_baro.c"]
+           "common/common_imu.c", "common/common_activity.c", "application/app_imu.c", "application/app_baro.c"]
 with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     battery_exe = str(Path(out) / "battery.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -51,11 +51,15 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
             "-include", "tests/sensors/host/platform.h"]
     args += ["-I" + p for p in ["tests/sensors/host", "Core/Inc", "application", "interface", "common"]]
     subprocess.run(args + sources + ["-lm", "-o", exe], cwd=root, check=True)
+    subprocess.run([exe, "activity"], cwd=root, check=True)
+    subprocess.run([exe, "background_mag_sleep_retry"], cwd=root, check=True)
     subprocess.run([exe, "uptime"], cwd=root, check=True)
     subprocess.run([exe, "async_save"], cwd=root, check=True)
     subprocess.run([exe, "polling"], cwd=root, check=True)
     subprocess.run([exe, "power_profile"], cwd=root, check=True)
     subprocess.run([exe, "mpu_stale"], cwd=root, check=True)
+    subprocess.run([exe, "mpu_sleep_recovery"], cwd=root, check=True)
+    subprocess.run([exe, "mag_sleep_recovery"], cwd=root, check=True)
     subprocess.run([exe, "recovery"], cwd=root, check=True)
     subprocess.run([exe], cwd=root, check=True)
     subprocess.run([exe, "restored"], cwd=root, check=True)

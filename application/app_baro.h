@@ -19,9 +19,9 @@ extern "C"
 
 #include <stdint.h>
 
-#define APP_BARO_HISTORY_POINTS 24U
-#define APP_BARO_HISTORY_PERIOD_MS 600000U
-#define APP_BARO_HISTORY_NONE INT16_MIN
+#define APP_BARO_HISTORY_POINTS    24
+#define APP_BARO_HISTORY_PERIOD_MS 600000
+#define APP_BARO_HISTORY_NONE      INT16_MIN
 
     typedef struct
     {

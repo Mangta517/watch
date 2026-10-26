@@ -5,20 +5,6 @@
 
 static DMA_HandleTypeDef hdma_usart1_rx;
 
-static void boot_watchdog_start(void)
-{
-    /* 仅升级分支使用；256分频、4095重装，LSI容差下约22～62秒。 */
-    WRITE_REG(IWDG->KR, 0xCCCCU);
-    WRITE_REG(IWDG->KR, 0x5555U);
-    WRITE_REG(IWDG->PR, 6U);
-    WRITE_REG(IWDG->RLR, 0x0FFFU);
-    while (IWDG->SR != 0U)
-    {
-        /* 寄存器无法同步时不喂狗，由IWDG复位。 */
-    }
-    WRITE_REG(IWDG->KR, 0xAAAAU);
-}
-
 static void boot_gpio_init(void)
 {
     GPIO_InitTypeDef gpio = {0};
@@ -119,12 +105,12 @@ void int_bootloader_jump_to_app(void)
     uint32_t stack;
     uint32_t reset;
     uint32_t i;
-    if (int_bootloader_app_is_valid() == 0U)
+    if (int_bootloader_app_is_valid() == 0)
     {
         return;
     }
     stack = *(volatile uint32_t *)APP_START_ADDR;
-    reset = *(volatile uint32_t *)(APP_START_ADDR + 4U);
+    reset = *(volatile uint32_t *)(APP_START_ADDR + 4);
     int_bootloader_stop();
     (void)HAL_UART_DeInit(&huart1);
     (void)HAL_DMA_DeInit(&hdma_usart1_rx);
@@ -134,7 +120,7 @@ void int_bootloader_jump_to_app(void)
     SysTick->CTRL = 0;
     SysTick->LOAD = 0;
     SysTick->VAL = 0;
-    for (i = 0; i < 8U; ++i)
+    for (i = 0; i < 8; ++i)
     {
         NVIC->ICER[i] = 0xFFFFFFFFU;
         NVIC->ICPR[i] = 0xFFFFFFFFU;
@@ -153,7 +139,7 @@ int main(void)
     boot_gpio_init(); /* 最先保持PA3供电。 */
     HAL_Init();
     __HAL_FLASH_DATA_CACHE_DISABLE(); /* 回读必须访问Flash实际内容。 */
-    if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) != GPIO_PIN_RESET && int_bootloader_app_is_valid() != 0U)
+    if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) != GPIO_PIN_RESET && int_bootloader_app_is_valid() != 0)
     {
         /* 普通启动不初始化蓝牙，APP继续使用自己的启动顺序。 */
         __disable_irq();
@@ -164,9 +150,8 @@ int main(void)
         SysTick->LOAD = 0;
         SysTick->VAL = 0;
         SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk | SCB_ICSR_PENDSVCLR_Msk;
-        boot_jump(*(volatile uint32_t *)APP_START_ADDR, *(volatile uint32_t *)(APP_START_ADDR + 4U));
+        boot_jump(*(volatile uint32_t *)APP_START_ADDR, *(volatile uint32_t *)(APP_START_ADDR + 4));
     }
-    boot_watchdog_start();
     boot_clock_init();
     MX_USART1_UART_Init();
     boot_dma_init();
@@ -178,8 +163,6 @@ int main(void)
     for (;;)
     {
         app_bootloader_work();
-        /* 接收超时由状态机处理；IWDG覆盖主循环停滞。 */
-        WRITE_REG(IWDG->KR, 0xAAAAU);
     }
 }
 

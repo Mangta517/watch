@@ -6,6 +6,11 @@
 #undef main
 #include <string.h>
 
+void app_reset_assert_stop(void)
+{
+    abort();
+}
+
 static uint32_t timeout_host_ipsr;
 static unsigned int timeout_notifications;
 static unsigned int startup_progress_calls;
@@ -69,8 +74,9 @@ void vTaskDelay(TickType_t ticks)
 
 static void startup_progress(void)
 {
-    assert(timeout_host_ipsr == 0 && s_flush_drv == NULL);
-    elapsed_ms += startup_render_ms;
+    assert(timeout_host_ipsr == 0 && s_flush_drv != NULL);
+    /* 提交后的任务开销与DMA重叠；第一笔仍刻意丢弃全部回调。 */
+    vTaskDelay(startup_render_ms);
     ++startup_progress_calls;
 }
 
@@ -78,6 +84,7 @@ int main(int argc, char **argv)
 {
     lv_disp_t *display;
     uint32_t started;
+    uint32_t timeout_wait = 100;
     unsigned int progress_calls;
     scheduler_state = taskSCHEDULER_RUNNING;
     lv_init();
@@ -91,6 +98,14 @@ int main(int argc, char **argv)
     {
         startup_render_ms = 150U;
     }
+    if (startup_render_ms < timeout_wait)
+    {
+        timeout_wait -= startup_render_ms;
+    }
+    else
+    {
+        timeout_wait = 0;
+    }
     lv_port_disp_set_progress_callback(startup_progress);
     started = elapsed_ms;
     lv_refr_now(display);
@@ -101,8 +116,8 @@ int main(int argc, char **argv)
         disp_wait(display->driver);
     }
     assert(startup_progress_calls >= 10U && startup_progress_calls == dma_starts);
-    assert((uint32_t)(elapsed_ms - started) >= 100U + startup_render_ms * startup_progress_calls);
-    assert((uint32_t)(elapsed_ms - started) < 300U + startup_render_ms * startup_progress_calls);
+    assert((uint32_t)(elapsed_ms - started) >= timeout_wait + startup_render_ms * startup_progress_calls);
+    assert((uint32_t)(elapsed_ms - started) < timeout_wait + 200 + startup_render_ms * startup_progress_calls);
     assert(dma_stops == 1U && spi_aborts == 1U && s_flush_drv == NULL && s_redraw_pending != 0);
     HAL_SPI_TxCpltCallback(&hspi1);
     lv_port_disp_service();

@@ -82,7 +82,14 @@ em7028_result em7028_read_raw(uint16_t *value)
     }
     else
     {
-        read_fault.kind = read_result == EM7028_ERROR ? EM7028_FAULT_READ : EM7028_FAULT_DATA_CHANGED;
+        if (read_result == EM7028_ERROR)
+        {
+            read_fault.kind = EM7028_FAULT_READ;
+        }
+        else
+        {
+            read_fault.kind = EM7028_FAULT_DATA_CHANGED;
+        }
         read_fault.reg = 0x29;
     }
     return read_result;
@@ -169,7 +176,7 @@ static void short_secondary_wave(unsigned duration_ms)
         raw = (uint16_t)(40000.0f + 12000.0f * expf(-powf((phase - 0.18f) / 0.025f, 2.0f)) +
                          12000.0f * expf(-powf((phase - 0.36f) / 0.025f, 2.0f)));
         app_heart_service();
-        if (elapsed >= 8000U)
+        if (elapsed >= 8000)
         {
             app_heart_get_snapshot(&heart);
             assert(heart.state == APP_HEART_VALID && heart.bpm >= 57 && heart.bpm <= 63);
@@ -184,39 +191,39 @@ static void window_peak_tests(void)
     app_heart_struct heart;
     unsigned elapsed;
     uint32_t step;
-    tick = UINT32_MAX - 3000U;
+    tick = UINT32_MAX - 3000;
     begin();
-    for (elapsed = 0; elapsed < 72000U; elapsed += 30U)
+    for (elapsed = 0; elapsed < 72000; elapsed += 30)
     {
-        tick += 30U;
+        tick += 30;
         raw = (uint16_t)(30000.0f + 100.0f * sinf((float)elapsed * 6.2831853f / 1000.0f) +
                          160.0f * sinf((float)elapsed * 6.2831853f / 90.0f));
         app_heart_service();
         app_heart_get_snapshot(&heart);
-        if (elapsed >= 8000U)
+        if (elapsed >= 8000)
         {
-            assert(heart.state == APP_HEART_VALID && heart.bpm >= 57U && heart.bpm <= 63U);
-            assert(heart.interval_ms >= 930U && heart.interval_ms <= 1080U);
+            assert(heart.state == APP_HEART_VALID && heart.bpm >= 57 && heart.bpm <= 63);
+            assert(heart.interval_ms >= 930 && heart.interval_ms <= 1080);
         }
     }
     /* 非固定采样间隔使用实际HAL tick，不能按样本下标估算心率。 */
     begin();
     elapsed = 0;
-    while (elapsed < 18000U)
+    while (elapsed < 18000)
     {
-        step = 30U;
-        if (elapsed % 70U == 30U)
+        step = 30;
+        if (elapsed % 70 == 30)
         {
-            step = 40U;
+            step = 40;
         }
         elapsed += step;
         tick += step;
         raw = (uint16_t)(30000.0f + 100.0f * sinf((float)elapsed * 90.0f * 6.2831853f / 60000.0f));
         app_heart_service();
         app_heart_get_snapshot(&heart);
-        if (elapsed >= 8000U)
+        if (elapsed >= 8000)
         {
-            assert(heart.state == APP_HEART_VALID && heart.bpm >= 87U && heart.bpm <= 93U);
+            assert(heart.state == APP_HEART_VALID && heart.bpm >= 87 && heart.bpm <= 93);
         }
     }
     puts("PASS: seven-point peaks retain 60BPM with 90ms ripple, 72s/tick wrap and timestamped uneven sampling.");
@@ -239,13 +246,13 @@ static void continuity_tests(void)
         if (elapsed - cycle_start >= period)
         {
             cycle_start += period;
-            period_index = (period_index + 1U) % (sizeof(periods) / sizeof(periods[0]));
+            period_index = (period_index + 1) % (sizeof(periods) / sizeof(periods[0]));
             period = periods[period_index];
         }
         tick += 30;
         raw = (uint16_t)(30000.0f + 300.0f * sinf((float)(elapsed - cycle_start) * 6.2831853f / (float)period));
         app_heart_service();
-        if (elapsed >= 5000U)
+        if (elapsed >= 5000)
         {
             app_heart_get_snapshot(&heart);
             assert(heart.state == APP_HEART_VALID && heart.bpm >= 60 && heart.bpm <= 80);
@@ -259,7 +266,7 @@ static void continuity_tests(void)
         if (elapsed - cycle_start >= period)
         {
             cycle_start += period;
-            period_index = (period_index + 1U) % (sizeof(irregular_periods) / sizeof(irregular_periods[0]));
+            period_index = (period_index + 1) % (sizeof(irregular_periods) / sizeof(irregular_periods[0]));
             period = irregular_periods[period_index];
         }
         tick += 30;
@@ -276,7 +283,7 @@ static void continuity_tests(void)
     for (i = 1; i <= 20; ++i)
     {
         tick += 30;
-        raw = (uint16_t)(50000U - i * 1000U);
+        raw = (uint16_t)(50000 - i * 1000);
         app_heart_service();
     }
     app_heart_get_snapshot(&heart);
@@ -285,7 +292,7 @@ static void continuity_tests(void)
     while (app_heart_read_samples(&sample, 1) != 0)
     {
     }
-    assert(sample.raw == 30000U && sample.filtered == 0.0f);
+    assert(sample.raw == 30000 && sample.filtered == 0.0f);
     pulse_wave(60, 12000, 800.0f, 30000);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_VALID && heart.bpm >= 57 && heart.bpm <= 63);
@@ -305,7 +312,7 @@ static void delayed_weak_beat_tests(void)
         for (elapsed = 0; elapsed < 7000; elapsed += 30)
         {
             strength = 800.0f;
-            if (elapsed < 1000U)
+            if (elapsed < 1000)
             {
                 strength = (float)amplitude;
             }
@@ -317,7 +324,7 @@ static void delayed_weak_beat_tests(void)
             app_heart_get_snapshot(&heart);
             assert(heart.state == APP_HEART_VALID && heart.bpm >= 55 && heart.bpm <= 63);
         }
-        assert(heart.interval_ms >= 970U && heart.interval_ms <= 1030U);
+        assert(heart.interval_ms >= 970 && heart.interval_ms <= 1030);
     }
     /* 门限降低后，平直信号和持续高频波也必须在旧波峰超时后撤销输出。 */
     for (mode = 0; mode < 2; ++mode)
@@ -334,7 +341,7 @@ static void delayed_weak_beat_tests(void)
             }
             app_heart_service();
             app_heart_get_snapshot(&heart);
-            if (elapsed >= 2700U)
+            if (elapsed >= 2700)
             {
                 assert(heart.state != APP_HEART_VALID && heart.bpm == 0);
             }
@@ -362,7 +369,7 @@ static void recovery_tests(void)
     for (i = 0; i < 30; ++i)
     {
         tick += 30;
-        raw = (uint16_t)(35674U + i);
+        raw = (uint16_t)(35674 + i);
         app_heart_service();
         app_heart_get_snapshot(&heart);
         assert(heart.state == APP_HEART_MEASURING && heart.bpm == 0 && heart.interval_ms == 0);
@@ -389,7 +396,7 @@ static void recovery_tests(void)
     wave(60, 12000, 80.0f);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_VALID && heart.bpm >= 57 && heart.bpm <= 63);
-    assert((uint32_t)(tick - restart_tick) == 12000U);
+    assert((uint32_t)(tick - restart_tick) == 12000);
     /* 周期真的改变后允许重新确认，不能永久锁在上一次BPM。 */
     wave(120, 12000, 80.0f);
     app_heart_get_snapshot(&heart);
@@ -424,9 +431,9 @@ static void sport_tests(void)
     app_heart_service();
     assert(running != 0);
     before = reads;
-    for (elapsed = 10U; elapsed <= 60000U; elapsed += 10U)
+    for (elapsed = 10; elapsed <= 60000; elapsed += 10)
     {
-        tick += 10U;
+        tick += 10;
         raw = (uint16_t)(2000.0f + 80.0f * sinf((float)elapsed * 90.0f * 6.2831853f / 60000.0f));
         app_heart_service();
         app_heart_get_snapshot(&heart);
@@ -436,8 +443,8 @@ static void sport_tests(void)
             ++valid;
         }
     }
-    assert(reads - before == 2000U && valid > 1000U);
-    assert(heart.bpm >= 86U && heart.bpm <= 94U);
+    assert(reads - before == 2000 && valid > 1000);
+    assert(heart.bpm >= 86 && heart.bpm <= 94);
     assert(app_heart_read_samples(samples, 2) == 0);
     app_heart_set_sport_mode(0);
     app_heart_service();
@@ -455,9 +462,9 @@ static void sport_tests(void)
     app_heart_service();
     before = starts;
     start_result = EM7028_OK;
-    for (elapsed = 0; elapsed < 20U; ++elapsed)
+    for (elapsed = 0; elapsed < 20; ++elapsed)
     {
-        tick += 10U;
+        tick += 10;
         app_heart_service();
     }
     app_heart_get_snapshot(&heart);
@@ -465,7 +472,7 @@ static void sport_tests(void)
     app_heart_set_sport_mode(0);
     app_heart_set_sport_mode(1);
     app_heart_service();
-    assert(running != 0 && starts == before + 1U);
+    assert(running != 0 && starts == before + 1);
     app_heart_set_sport_mode(0);
     app_heart_service();
     puts("PASS: sport PPG continuously reads every 30ms for 60s, suppresses BLE queue, restores manual request and latches faults until retry.");
@@ -480,12 +487,12 @@ static void sleep_tests(void)
     stop_result = start_result = read_result = EM7028_OK;
     app_heart_set_enabled(1);
     app_heart_service();
-    tick = UINT32_MAX - 1000U;
+    tick = UINT32_MAX - 1000;
     app_heart_set_sleep_mode(1);
     app_heart_service();
     assert(running == 0 && app_heart_sleep_pending() == 0);
     before = reads;
-    tick += 599999U;
+    tick += 599999;
     app_heart_service();
     assert(running == 0 && reads == before);
     ++tick;
@@ -494,11 +501,11 @@ static void sleep_tests(void)
     assert(running != 0);
     cycle_ms = tick;
     raw = 2000;
-    for (elapsed = 20U; elapsed <= 10000U; elapsed += 20U)
+    for (elapsed = 20; elapsed <= 10000; elapsed += 20)
     {
-        tick += 20U;
+        tick += 20;
         app_heart_service();
-        if (elapsed < 10000U)
+        if (elapsed < 10000)
         {
             assert(running != 0);
         }
@@ -506,22 +513,22 @@ static void sleep_tests(void)
     app_heart_get_snapshot(&heart);
     assert(running == 0 && heart.enabled == 0 && heart.state == APP_HEART_NO_SIGNAL);
     assert(app_heart_sleep_pending() == 0 && app_heart_read_samples(samples, 2) == 0);
-    tick = cycle_ms + 599999U;
+    tick = cycle_ms + 599999;
     assert(app_heart_sleep_pending() == 0);
     ++tick;
     app_heart_service();
     assert(running != 0);
-    for (elapsed = 20U; elapsed <= 10000U && running != 0; elapsed += 20U)
+    for (elapsed = 20; elapsed <= 10000 && running != 0; elapsed += 20)
     {
-        tick += 20U;
+        tick += 20;
         raw = (uint16_t)(2000.0f + 80.0f * sinf((float)elapsed * 90.0f * 6.2831853f / 60000.0f));
         app_heart_service();
     }
     app_heart_get_snapshot(&heart);
-    assert(running == 0 && elapsed < 10000U && heart.state == APP_HEART_VALID);
-    assert(heart.bpm >= 86U && heart.bpm <= 94U && heart.enabled == 0);
+    assert(running == 0 && elapsed < 10000 && heart.state == APP_HEART_VALID);
+    assert(heart.bpm >= 86 && heart.bpm <= 94 && heart.enabled == 0);
     assert(app_heart_read_samples(samples, 2) == 0);
-    tick += 5000U;
+    tick += 5000;
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_VALID); /* 自动结果保留到下一轮，不当作实时流。 */
     app_heart_set_sleep_mode(0);
@@ -531,7 +538,7 @@ static void sleep_tests(void)
     app_heart_set_sleep_mode(1);
     app_heart_service();
     start_result = EM7028_ERROR;
-    tick += 600000U;
+    tick += 600000;
     app_heart_service();
     assert(running == 0 && app_heart_sleep_pending() == 0);
     start_result = EM7028_OK;
@@ -565,22 +572,22 @@ int main(void)
     for (i = 0; i < 40; ++i)
     {
         tick += 30;
-        raw = (uint16_t)(30000U + i);
+        raw = (uint16_t)(30000 + i);
         app_heart_service();
     }
     assert(app_heart_read_samples(samples, 4) == 4);
     for (i = 0; i < 4; ++i)
     {
-        assert(samples[i].raw == 30008U + i);
-        assert(samples[i].sequence == 8U + i && samples[i].elapsed_ms == (9U + i) * 30U);
+        assert(samples[i].raw == 30008 + i);
+        assert(samples[i].sequence == 8 + i && samples[i].elapsed_ms == (9 + i) * 30);
         assert(samples[i].state == APP_HEART_MEASURING && samples[i].bpm == 0);
         assert(isfinite(samples[i].filtered) && isfinite(samples[i].dc) && samples[i].dc >= 30000.0f);
     }
     assert(app_heart_read_samples(samples, 32) == 28);
     for (i = 0; i < 28; ++i)
     {
-        assert(samples[i].raw == 30012U + i && samples[i].sequence == 12U + i);
-        assert(samples[i].elapsed_ms == (13U + i) * 30U);
+        assert(samples[i].raw == 30012 + i && samples[i].sequence == 12 + i);
+        assert(samples[i].elapsed_ms == (13 + i) * 30);
     }
     assert(app_heart_read_samples(samples, 1) == 0);
     read_result = EM7028_NOT_READY;
@@ -591,7 +598,7 @@ int main(void)
     tick += 30;
     app_heart_service();
     assert(app_heart_read_samples(samples, 1) == 1);
-    assert(samples[0].sequence == 40 && samples[0].elapsed_ms == 1260U);
+    assert(samples[0].sequence == 40 && samples[0].elapsed_ms == 1260);
     tick += 30;
     app_heart_service();
     app_heart_set_enabled(0);
@@ -607,18 +614,25 @@ int main(void)
         begin();
         app_heart_get_snapshot(&heart);
         assert(heart.state == APP_HEART_MEASURING && heart.bpm == 0);
-        wave(rates[i], 12000, i == 1 ? -80.0f : 80.0f);
+        if (i == 1)
+        {
+            wave(rates[i], 12000, -80.0f);
+        }
+        else
+        {
+            wave(rates[i], 12000, 80.0f);
+        }
         app_heart_get_snapshot(&heart);
         printf("Synthetic %u BPM: state %u, period %u ms, output %u BPM\n", rates[i], (unsigned)heart.state, (unsigned)heart.interval_ms,
                (unsigned)heart.bpm);
         fflush(stdout);
         assert(heart.state == APP_HEART_VALID);
-        assert(heart.signal_x10 >= 80U);
+        assert(heart.signal_x10 >= 80);
         assert(heart.bpm >= rates[i] - 3 && heart.bpm <= rates[i] + 3);
         assert(app_heart_read_samples(samples, 32) == 32);
         assert(samples[31].raw == heart.raw && samples[31].bpm == heart.bpm);
         assert(samples[31].state == heart.state && samples[31].interval_ms == heart.interval_ms);
-        assert(samples[31].elapsed_ms == 12000U && samples[31].sequence == 399U);
+        assert(samples[31].elapsed_ms == 12000 && samples[31].sequence == 399);
         printf("PASS: synthetic %u BPM -> %u BPM\n", rates[i], (unsigned)heart.bpm);
     }
     expect_rejected = 1;
@@ -646,7 +660,14 @@ int main(void)
     for (i = 0; i < 2; ++i)
     {
         begin();
-        drift_wave(60, 16000, 80.0f, i == 0 ? 150.0f : -150.0f);
+        if (i == 0)
+        {
+            drift_wave(60, 16000, 80.0f, 150.0f);
+        }
+        else
+        {
+            drift_wave(60, 16000, 80.0f, -150.0f);
+        }
         app_heart_get_snapshot(&heart);
         printf("Drifting background: direction %u, AC %.1f, period %u ms, BPM %u\n", i, (double)heart.signal_x10 / 10.0,
                (unsigned)heart.interval_ms, (unsigned)heart.bpm);
@@ -656,14 +677,28 @@ int main(void)
     for (i = 0; i < 2; ++i)
     {
         begin();
-        drift_wave(60, 10000, 0.0f, i == 0 ? 150.0f : -150.0f);
+        if (i == 0)
+        {
+            drift_wave(60, 10000, 0.0f, 150.0f);
+        }
+        else
+        {
+            drift_wave(60, 10000, 0.0f, -150.0f);
+        }
         app_heart_get_snapshot(&heart);
         assert(heart.state == APP_HEART_NO_SIGNAL && heart.bpm == 0 && heart.interval_ms == 0);
     }
     for (i = 0; i < 2; ++i)
     {
         begin();
-        pulse_wave(60, 16000, i == 0 ? 80.0f : -80.0f, 2000);
+        if (i == 0)
+        {
+            pulse_wave(60, 16000, 80.0f, 2000);
+        }
+        else
+        {
+            pulse_wave(60, 16000, -80.0f, 2000);
+        }
         app_heart_get_snapshot(&heart);
         printf("Narrow pulse: polarity %u, state %u, raw %u, AC %.1f, BPM %u\n", i, (unsigned)heart.state, (unsigned)heart.raw,
                (double)heart.signal_x10 / 10.0, (unsigned)heart.bpm);
@@ -688,7 +723,7 @@ int main(void)
     wave(60, 8000, 2.0f);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_NO_SIGNAL && heart.bpm == 0);
-    assert(heart.raw >= 1998 && heart.raw <= 2002 && heart.signal_x10 < 80U);
+    assert(heart.raw >= 1998 && heart.raw <= 2002 && heart.signal_x10 < 80);
     begin();
     wave(60, 8000, 6.0f);
     app_heart_get_snapshot(&heart);
@@ -697,12 +732,19 @@ int main(void)
     for (i = 0; i < 400; ++i)
     {
         tick += 30;
-        raw = i % 2 == 0 ? 2300 : 1700;
+        if (i % 2 == 0)
+        {
+            raw = 2300;
+        }
+        else
+        {
+            raw = 1700;
+        }
         app_heart_service();
     }
     app_heart_get_snapshot(&heart);
     assert(heart.state != APP_HEART_VALID && heart.bpm == 0);
-    assert(heart.interval_ms == 0U); /* 60ms高频波不再通过七点波峰确认。 */
+    assert(heart.interval_ms == 0); /* 60ms高频波不再通过七点波峰确认。 */
     begin();
     pulse_wave(90, 16000, 1200.0f, 30000);
     app_heart_get_snapshot(&heart);
@@ -749,35 +791,35 @@ int main(void)
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_ERROR && heart.enabled == 0);
     start_result = EM7028_OK;
-    tick = UINT32_MAX - 2000U;
+    tick = UINT32_MAX - 2000;
     begin();
     wave(90, 12000, 80.0f);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_VALID && heart.bpm >= 87 && heart.bpm <= 93);
     assert(app_heart_read_samples(samples, 32) == 32);
-    assert(samples[31].elapsed_ms == 12000U && samples[31].sequence == 399U);
+    assert(samples[31].elapsed_ms == 12000 && samples[31].sequence == 399);
     for (i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i)
     {
         unsigned elapsed, initial_reads, valid = 0;
         begin();
         initial_reads = reads;
-        for (elapsed = 10U; elapsed <= 24000U; elapsed += 10U)
+        for (elapsed = 10; elapsed <= 24000; elapsed += 10)
         {
-            tick += 10U;
+            tick += 10;
             raw = (uint16_t)(2000.0f + 80.0f * sinf((float)elapsed * (float)rates[i] * 6.2831853f / 60000.0f));
             app_heart_service();
             app_heart_get_snapshot(&heart);
-            if (elapsed >= 8000U)
+            if (elapsed >= 8000)
             {
                 assert(heart.state == APP_HEART_VALID);
                 assert(abs((int)heart.bpm - (int)rates[i]) <= 4);
                 ++valid;
             }
         }
-        assert(reads - initial_reads == 800U);
+        assert(reads - initial_reads == 800);
         app_heart_get_snapshot(&heart);
         printf("Low-power synthetic %u BPM: state %u, output %u BPM\n", rates[i], heart.state, heart.bpm);
-        assert(valid > 100U);
+        assert(valid > 100);
         assert(heart.state == APP_HEART_VALID && abs((int)heart.bpm - (int)rates[i]) <= 4);
     }
     app_heart_set_enabled(0);

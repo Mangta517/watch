@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-#define APP_TOUCH_PERIOD_MS 5U
-#define APP_TOUCH_STACK_WORDS 256U
+#define APP_TOUCH_PERIOD_MS   5
+#define APP_TOUCH_STACK_WORDS 256
 
 typedef struct
 {
@@ -18,5 +18,7 @@ void app_touch_service(void);
 /* 仅LVGL任务调用：短临界区读事件，不访问I2C或等待触摸任务。 */
 void app_touch_read(app_touch_struct *sample);
 void app_touch_set_enabled(uint8_t enabled);
+/* 仅touch任务调用：确认已发送休眠命令，随后可阻塞等待亮屏通知。 */
+uint8_t app_touch_is_sleeping(void);
 
 #endif

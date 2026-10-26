@@ -39,7 +39,7 @@ static SemaphoreHandle_t s_baro_mux; /* 保护快照 */
 static app_baro_struct s_baro_data;  /* 最新数据 (锁内赋值) */
 static uint8_t s_online;             /* 1=快照有效 */
 static uint32_t s_sample_ms;
-static uint8_t s_err_streak;         /* 连续总线失败计数 (仅 Service 读写) */
+static uint8_t s_err_streak; /* 连续总线失败计数 (仅 Service 读写) */
 static app_baro_history_struct s_history;
 static uint32_t s_history_ms;
 static uint8_t s_service_valid;
@@ -123,10 +123,10 @@ void app_baro_record_history(void)
     /* 运动模式暂停气压后，经过的十分钟位置留空，不能用恢复后的数值补造历史。 */
     for (i = 0; i < slots; ++i)
     {
-        memmove(s_history.altitude_m, s_history.altitude_m + 1, (APP_BARO_HISTORY_POINTS - 1U) * sizeof(int16_t));
-        s_history.altitude_m[APP_BARO_HISTORY_POINTS - 1U] = APP_BARO_HISTORY_NONE;
+        memmove(s_history.altitude_m, s_history.altitude_m + 1, (APP_BARO_HISTORY_POINTS - 1) * sizeof(int16_t));
+        s_history.altitude_m[APP_BARO_HISTORY_POINTS - 1] = APP_BARO_HISTORY_NONE;
     }
-    s_history.altitude_m[APP_BARO_HISTORY_POINTS - 1U] = altitude;
+    s_history.altitude_m[APP_BARO_HISTORY_POINTS - 1] = altitude;
     ++s_history.sequence;
     baro_unlock();
 }
@@ -199,7 +199,7 @@ void App_Baro_Service(void)
         }
         else
         {
-            app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_ERROR, 0x10000U, read_started);
+            app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_ERROR, 0x10000, read_started);
         }
         s_err_streak = 0;
     }

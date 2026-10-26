@@ -6,7 +6,7 @@
   *          App_IMU_Init()/App_IMU_Service() 由 sensor 任务体调用,
   *          App_IMU_GetSnapshot() 供 UI 等消费方在自己的任务上下文取数。
   *          并发模式: 单生产者(sensor 任务)写 → 互斥锁保护快照 → 消费者加锁取。
-  *          MPU6050按使用状态100/50/25Hz轮询并递推四元数，运动模式欧拉角100Hz，普通最多50Hz。
+  *          MPU6050后台5Hz仅采加速度；姿态/校准50Hz、运动/心率100Hz时递推四元数。
   ******************************************************************************
 ***/
 #include "app_imu.h"
@@ -17,6 +17,7 @@
 #include "semphr.h"
 #include "task.h" /* 磁力计轮询与数据年龄使用RTOS tick */
 
+#include "common_activity.h"
 #include "common_imu.h" /* Common_IMU_GetEulerAngle 四元数姿态融合 */
 #include "app_mag_store.h"
 #include "bl24c02.h"
@@ -32,8 +33,8 @@
 #define APP_IMU_OFFLINE_STREAK 3
 
 /* 初始化断采门限50ms；运行时为当前周期的5倍，恢复首帧按标称周期积分。 */
-#define APP_IMU_MAX_GAP_MS 50U
-#define APP_IMU_EULER_PERIOD_MS 20U /* 普通档欧拉角最多50Hz；运动档同步改为10ms。 */
+#define APP_IMU_MAX_GAP_MS      50
+#define APP_IMU_EULER_PERIOD_MS 20 /* 普通档欧拉角最多50Hz；运动档同步改为10ms。 */
 
 /* ---- 陀螺仪残余零漂抑制 ----
  * 上电 zero_offset 只吃掉初始零偏；温漂仍可能引起姿态误差，
@@ -71,10 +72,11 @@ static app_imu_struct s_imu_data;   /* 最新快照 (锁内赋值) */
 static uint8_t s_online;            /* 1=快照有效 */
 static uint8_t s_err_streak;        /* 连续读失败计数 (仅 Service 读写, 不跨任务) */
 static uint32_t s_last_sample_ms;   /* 最近有效MPU帧的HAL读取时刻 */
-static uint8_t s_have_sample;      /* 是否可用上一帧时刻计算解算间隔 */
+static uint8_t s_have_sample;       /* 是否可用上一帧时刻计算解算间隔 */
 static uint32_t s_euler_ms;
 static uint32_t s_euler_period_ms = APP_IMU_EULER_PERIOD_MS;
 static uint8_t s_have_euler;
+static common_activity_struct s_activity;
 static uint32_t s_sample_period_ms = MPU6050_SAMPLE_PERIOD_MS;
 static uint32_t s_max_gap_ms = APP_IMU_MAX_GAP_MS;
 static uint32_t s_mag_poll_ms = APP_MAG_POLL_MS;
@@ -87,6 +89,7 @@ static Euler_struct s_euler = {0};
 static lsm303dlhc_mag_struct s_mag;
 static TickType_t s_mag_poll_tick, s_mag_sample_tick;
 static uint8_t s_mag_valid;
+static uint8_t s_mag_sleep_pending; /* 模式写入失败时保留请求，由后续sensor轮次重试。 */
 static uint8_t s_mag_err_streak;  /* 连续磁读失败计数 (仅 sensor 任务读写) */
 static uint8_t s_mag_cal_request; /* 仅在快照锁内跨任务传递 */
 static app_mag_cal_state s_mag_cal_state;
@@ -293,6 +296,7 @@ void App_IMU_Init(void)
         Error_Handler();
     }
     Common_IMU_Reset();
+    memset(&s_activity, 0, sizeof(s_activity));
     s_last_sample_ms = 0;
     s_have_euler = 0;
     s_have_sample = 0;
@@ -305,6 +309,7 @@ void App_IMU_Init(void)
     s_max_gap_ms = APP_IMU_MAX_GAP_MS;
     s_mag_poll_ms = APP_MAG_POLL_MS;
     s_mag_max_age_ms = APP_MAG_MAX_AGE_MS;
+    s_mag_sleep_pending = 0;
     bl24c02_init();
     result = app_mag_store_load(&calibration);
     if (result == APP_MAG_STORE_OK)
@@ -346,7 +351,7 @@ void app_imu_set_sleep(uint8_t sleeping)
     app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_set_sleep(sleeping));
     if (sleeping == 0)
     {
-        /* 间歇采样保留四元数；只丢弃旧时间基准，避免每秒把航向重新拉回0。 */
+        /* 间歇采样保留四元数；只丢弃旧时间基准，避免每次后台唤醒把航向重新拉回0。 */
         s_have_sample = s_have_euler = s_mag_valid = 0;
         s_mag_poll_tick = xTaskGetTickCount() - pdMS_TO_TICKS(s_mag_poll_ms);
     }
@@ -355,50 +360,67 @@ void app_imu_set_sleep(uint8_t sleeping)
 uint32_t app_imu_set_sample_period(uint32_t period_ms)
 {
     uint8_t calibrating;
-    uint16_t mag_rate = 300U;
+    uint16_t mag_rate = 300;
     imu_lock();
     calibrating = s_mag_cal_state == APP_MAG_CAL_RUNNING || s_mag_cal_request == APP_MAG_CMD_START;
     imu_unlock();
-    if (calibrating != 0 || (period_ms != 10U && period_ms != 40U))
+    if (calibrating != 0 || (period_ms != 10 && period_ms != 40 && period_ms != 200))
     {
-        period_ms = 20U;
+        period_ms = 20;
     }
     if (my_mpu6050_set_sample_period(period_ms) != 0)
     {
-        period_ms = 20U; /* 重配置期间继续推进其他服务，不阻塞任务。 */
+        period_ms = 20; /* 重配置期间继续推进其他服务，不阻塞任务。 */
     }
     if (period_ms != s_sample_period_ms)
     {
+        if (period_ms == 200 || s_sample_period_ms == 200)
+        {
+            s_mag_sleep_pending = 1;
+            s_mag_valid = 0;
+            imu_lock();
+            s_online = 0;
+            imu_unlock();
+        }
         s_sample_period_ms = period_ms;
-        s_max_gap_ms = period_ms * 5U;
+        s_max_gap_ms = period_ms * 5;
         s_have_sample = s_have_euler = 0;
     }
-    if (period_ms == 10U)
+    if (s_mag_sleep_pending != 0)
     {
-        s_euler_period_ms = 10U;
-        mag_rate = 750U;
+        s_mag_sleep_pending = lsm303dlhc_mag_set_sleep(period_ms == 200);
+        app_diag_sensor_init(APP_DIAG_MAG, s_mag_sleep_pending);
+    }
+    if (period_ms == 200)
+    {
+        return period_ms; /* 磁力计保持休眠，加速度帧不参与四元数和陀螺仪零漂更新。 */
+    }
+    if (period_ms == 10)
+    {
+        s_euler_period_ms = 10;
+        mag_rate = 750;
     }
     else
     {
         s_euler_period_ms = APP_IMU_EULER_PERIOD_MS;
-        if (period_ms == 40U)
+        if (period_ms == 40)
         {
-            mag_rate = 75U;
+            mag_rate = 75;
         }
     }
     if (lsm303dlhc_mag_set_rate(mag_rate) == 0)
     {
-        s_mag_poll_ms = 40U;
-        s_mag_max_age_ms = 120U;
-        if (mag_rate == 750U)
+        s_mag_poll_ms = 40;
+        s_mag_max_age_ms = 120;
+        if (mag_rate == 750)
         {
             s_mag_poll_ms = APP_MAG_POLL_MS;
             s_mag_max_age_ms = APP_MAG_MAX_AGE_MS;
         }
-        else if (mag_rate == 75U)
+        else if (mag_rate == 75)
         {
-            s_mag_poll_ms = 160U;
-            s_mag_max_age_ms = 400U;
+            s_mag_poll_ms = 160;
+            s_mag_max_age_ms = 400;
         }
     }
     return period_ms;
@@ -418,7 +440,12 @@ void App_IMU_Service(void)
     app_mag_fusion_state mag_fusion_state = APP_MAG_FUSION_IMU_NO_DATA;
 
     /* 1. 同一sensor任务先取磁参考，再以一笔事务轮询MPU最新帧。 */
-    mag_online = mag_service(now, mag_body);
+    mag_online = 0;
+    memset(mag_body, 0, sizeof(mag_body));
+    if (s_sample_period_ms != 200)
+    {
+        mag_online = mag_service(now, mag_body);
+    }
     field_squared = mag_body[0] * mag_body[0] + mag_body[1] * mag_body[1] + mag_body[2] * mag_body[2];
     read_started = app_diag_clock_count();
     read_result = my_mpu6050_get_data(&raw);
@@ -433,6 +460,28 @@ void App_IMU_Service(void)
     else
     {
         app_diag_sensor_record(APP_DIAG_MPU, APP_DIAG_ERROR, read_result, read_started);
+    }
+    if (read_result == 0)
+    {
+        common_activity_update(&s_activity, (float)raw.Accel.Accel_x / MPU6050_ACCEL_LSB_PER_G,
+                               (float)raw.Accel.Accel_y / MPU6050_ACCEL_LSB_PER_G,
+                               (float)raw.Accel.Accel_z / MPU6050_ACCEL_LSB_PER_G, my_mpu6050_sample_ms());
+    }
+    if (s_sample_period_ms == 200)
+    {
+        imu_lock();
+        if (read_result == 0)
+        {
+            s_imu_data.raw = raw;
+        }
+        s_imu_data.steps = s_activity.steps;
+        s_imu_data.wrist_raise_sequence = s_activity.wrist_sequence;
+        s_imu_data.wrist_raise_ms = s_activity.wrist_ms;
+        s_imu_data.mag_online = s_imu_data.mag_fused = 0;
+        s_imu_data.mag_fusion_state = APP_MAG_FUSION_NO_DATA;
+        s_online = s_have_sample = s_have_euler = 0;
+        imu_unlock();
+        return;
     }
     cal_before = my_mpu6050_zero_offset_state();
     cal_after = my_mpu6050_zero_offset_step(&raw, read_result == 0, HAL_GetTick());
@@ -521,6 +570,9 @@ void App_IMU_Service(void)
         s_have_sample = 0;
         s_have_euler = 0;
     }
+    s_imu_data.steps = s_activity.steps;
+    s_imu_data.wrist_raise_sequence = s_activity.wrist_sequence;
+    s_imu_data.wrist_raise_ms = s_activity.wrist_ms;
     s_imu_data.mag = s_mag;
     memcpy(s_imu_data.mag_body_uT, mag_body, sizeof(mag_body));
     s_imu_data.mag_online = mag_online;

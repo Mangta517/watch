@@ -17,8 +17,8 @@
 #include "my_i2c.h"
 
 /* 按84MHz调整原100MHz位延时；仅SENSOR总线加倍，不改变触摸和EEPROM的节拍。 */
-#define MY_I2C_DELAY_LOOPS        67U
-#define MY_I2C_SENSOR_DELAY_LOOPS 134U
+#define MY_I2C_DELAY_LOOPS        67
+#define MY_I2C_SENSOR_DELAY_LOOPS 134
 
 /* ================================================================ 总线表 */
 typedef struct
@@ -103,7 +103,7 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
 {
     GPIO_InitTypeDef gpio = {0};
     uint32_t primask = __get_PRIMASK();
-    uint8_t direction = as_input + 1U;
+    uint8_t direction = as_input + 1;
     if (s_sda_direction[bus] == direction)
     {
         return;
@@ -135,7 +135,7 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
 static uint8_t my_i2c_scl_released(my_i2c_bus_t bus)
 {
     uint8_t guard;
-    for (guard = 0; guard < 16U; ++guard)
+    for (guard = 0; guard < 16; ++guard)
     {
         if (HAL_GPIO_ReadPin(my_i2c_pin[bus].scl_port, my_i2c_pin[bus].scl_pin) == GPIO_PIN_SET)
         {
@@ -161,7 +161,7 @@ uint8_t my_i2c_recover(my_i2c_bus_t bus)
     }
     my_i2c_sda_dir(bus, 1);
     sda_hi(bus);
-    for (i = 0; i < 9U; ++i)
+    for (i = 0; i < 9; ++i)
     {
         scl_lo(bus);
         my_i2c_delay(bus);

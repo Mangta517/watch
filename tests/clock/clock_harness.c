@@ -5,8 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 
-static uint32_t rtc_seconds, backup;
+static uint32_t rtc_seconds;
 RTC_TypeDef host_rtc;
+#define backup host_rtc.BKP0R
 static uint32_t rtc_subsecond, prescaler_changes;
 static uint32_t tick, lse_ready;
 uint32_t HAL_GetTick(void)
@@ -23,9 +24,11 @@ uint32_t mock_lse_flag(uint32_t flag)
     return lse_ready;
 }
 static uint8_t power_enabled, backup_enabled, rtc_enabled, shadow_locked;
-static uint32_t set_calls, date_calls;
+static uint32_t set_calls, date_calls, get_time_calls;
+static uint8_t drop_lse_on_read;
 static HAL_StatusTypeDef oscillator_status = HAL_OK;
 static HAL_StatusTypeDef set_status = HAL_OK;
+static HAL_StatusTypeDef get_status = HAL_OK;
 
 void mock_power_enable(void)
 {
@@ -44,6 +47,10 @@ HAL_StatusTypeDef HAL_RCC_OscConfig(RCC_OscInitTypeDef *oscillator)
 {
     assert(backup_enabled && oscillator->OscillatorType == RCC_OSCILLATORTYPE_LSE);
     assert(oscillator->LSEState == RCC_LSE_ON && oscillator->PLL.PLLState == RCC_PLL_NONE);
+    if (oscillator_status == HAL_OK)
+    {
+        lse_ready = 1;
+    }
     return oscillator_status;
 }
 HAL_StatusTypeDef HAL_RCCEx_PeriphCLKConfig(RCC_PeriphCLKInitTypeDef *clock)
@@ -94,11 +101,20 @@ HAL_StatusTypeDef HAL_RTC_SetDate(RTC_HandleTypeDef *rtc, RTC_DateTypeDef *date,
 HAL_StatusTypeDef HAL_RTC_GetTime(RTC_HandleTypeDef *rtc, RTC_TimeTypeDef *time, uint32_t format)
 {
     assert(rtc->Instance == RTC && format == RTC_FORMAT_BIN && !shadow_locked);
+    ++get_time_calls;
+    if (get_status != HAL_OK)
+    {
+        return get_status;
+    }
     shadow_locked = 1;
     time->Hours = rtc_seconds / 3600;
     time->Minutes = rtc_seconds / 60 % 60;
     time->Seconds = rtc_seconds % 60;
     time->SubSeconds = 32767U - rtc_subsecond;
+    if (drop_lse_on_read != 0)
+    {
+        lse_ready = 0;
+    }
     return HAL_OK;
 }
 HAL_StatusTypeDef HAL_RTC_GetDate(RTC_HandleTypeDef *rtc, RTC_DateTypeDef *date, uint32_t format)
@@ -125,11 +141,16 @@ static void feed(const char *text, uint32_t ms)
 int main(int argc, char **argv)
 {
     watch_time_struct time;
-    uint32_t calls, seconds;
+    watch_rtc_status_struct status;
+    uint32_t calls, seconds, read_calls;
     static const uint8_t nul_frame[] = {'1', '2', ':', '3', '0', 0, '\n'};
     assert(!watch_rtc_is_synced());
     assert(watch_rtc_get_time(&time) == HAL_ERROR);
     assert(watch_rtc_get_subsecond() == UINT32_MAX);
+    backup = 0x12345678;
+    watch_rtc_get_status(&status);
+    assert(status.ready == 0 && status.lse_ready == 0 && status.synced == 0 && status.read_status == HAL_ERROR);
+    assert(status.marker == backup && status.time.hours == 0 && set_calls == 0 && date_calls == 0);
     assert(watch_rtc_init() == HAL_OK && !watch_rtc_is_synced());
     assert(set_calls == 1 && date_calls == 1);
     calls = set_calls;
@@ -151,6 +172,21 @@ int main(int argc, char **argv)
     assert(watch_rtc_init() == HAL_OK && rtc_seconds == seconds && set_calls == calls && date_calls == 1);
     assert(prescaler_changes == 1U && host_rtc.PRER == 32767U);
     lse_ready = 1;
+    watch_rtc_get_status(&status);
+    assert(status.ready && status.lse_ready && status.synced && status.read_status == HAL_OK);
+    assert(status.marker == 0x52544331 && status.time.hours == 14 && status.time.minutes == 36 && status.time.seconds == 1);
+    assert(set_calls == calls && date_calls == 1 && !shadow_locked);
+    backup = 0x52544330;
+    watch_rtc_get_status(&status);
+    assert(status.synced == 0 && status.read_status == HAL_OK && backup == 0x52544330);
+    assert(rtc_seconds == seconds && set_calls == calls && date_calls == 1);
+    backup = 0x52544331;
+    get_status = HAL_ERROR;
+    watch_rtc_get_status(&status);
+    assert(status.synced && status.read_status == HAL_ERROR && status.time.hours == 0);
+    assert(set_calls == calls && backup == 0x52544331 && !shadow_locked);
+    get_status = HAL_OK;
+    puts("PASS: read-only RTC status exposes raw marker, LSE, readiness and read errors without changing time or backup.");
     rtc_subsecond = 12345U;
     assert(watch_rtc_get_subsecond() == 12345U && !shadow_locked);
     rtc_subsecond = 32767U;
@@ -160,6 +196,34 @@ int main(int argc, char **argv)
     lse_ready = 0;
     assert(watch_rtc_get_subsecond() == UINT32_MAX);
     assert(watch_rtc_is_synced());
+    read_calls = get_time_calls;
+    time.hours = 1;
+    time.minutes = 2;
+    time.seconds = 3;
+    assert(watch_rtc_get_time(&time) == HAL_ERROR);
+    assert(time.hours == 1 && time.minutes == 2 && time.seconds == 3);
+    watch_rtc_get_status(&status);
+    assert(status.ready && !status.lse_ready && status.synced && status.read_status == HAL_ERROR);
+    assert(status.time.hours == 0 && status.time.minutes == 0 && status.time.seconds == 0);
+    assert(status.marker == 0x52544331 && backup == 0x52544331);
+    assert(get_time_calls == read_calls && set_calls == calls && date_calls == 1 && rtc_seconds == seconds && !shadow_locked);
+    lse_ready = 1;
+    assert(watch_rtc_get_time(&time) == HAL_OK && time.hours == 14 && time.minutes == 36 && time.seconds == 1);
+    drop_lse_on_read = 1;
+    time.hours = 1;
+    time.minutes = 2;
+    time.seconds = 3;
+    assert(watch_rtc_get_time(&time) == HAL_ERROR && !shadow_locked);
+    assert(time.hours == 1 && time.minutes == 2 && time.seconds == 3);
+    drop_lse_on_read = 0;
+    lse_ready = 1;
+    watch_rtc_get_status(&status);
+    assert(status.ready && status.lse_ready && status.synced && status.read_status == HAL_OK);
+    assert(status.time.hours == 14 && status.time.minutes == 36 && status.time.seconds == 1);
+    assert(status.marker == 0x52544331 && backup == 0x52544331);
+    assert(set_calls == calls && date_calls == 1 && rtc_seconds == seconds && !shadow_locked);
+    puts("PASS: runtime LSE loss reports read error without HAL reads or output changes; loss during read unlocks shadows; "
+         "recovery retains time and marker.");
     feed("24:00\n", 500);
     assert(app_clock_get_result() == APP_CLOCK_INVALID && rtc_seconds == seconds);
     feed("12:60\r\n", 600);
@@ -206,7 +270,7 @@ int main(int argc, char **argv)
             assert(app_clock_get_result() == APP_CLOCK_INVALID && set_calls == calls && rtc_seconds == seconds);
         }
     }
-    assert(watch_rtc_set_time(12, 34, 60) == HAL_ERROR && set_calls == calls);
+    assert(watch_rtc_set_time(12, 34, 60) == 1 && set_calls == calls);
     set_status = HAL_ERROR;
     feed("18:20:59\n", 2200);
     assert(app_clock_get_result() == APP_CLOCK_RTC_ERROR && set_calls == calls && rtc_seconds == seconds);
@@ -228,6 +292,7 @@ int main(int argc, char **argv)
          "and tick wrap.");
     calls = set_calls;
     tick = UINT32_MAX - 1000U;
+    lse_ready = 0;
     watch_rtc_init_begin();
     assert(watch_rtc_init_is_pending());
     tick += 4999U;

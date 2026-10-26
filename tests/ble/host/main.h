@@ -29,6 +29,7 @@ typedef struct
 #define GPIOA                          ((void *)1)
 #define GPIOB                          ((void *)2)
 #define USART1                         ((void *)3)
+#define USART1_IRQn                    37
 #define BLE_EN_GPIO_Port               GPIOA
 #define BLE_EN_Pin                     (1U << 8)
 #define BLE_TX_Pin                     (1U << 9)
@@ -50,6 +51,7 @@ void __disable_irq(void);
 void __set_PRIMASK(uint32_t mask);
 void __DMB(void);
 void HAL_GPIO_Init(void *port, GPIO_InitTypeDef *gpio);
+void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority);
 void HAL_GPIO_WritePin(void *port, uint16_t pin, GPIO_PinState value);
 GPIO_PinState HAL_GPIO_ReadPin(void *port, uint16_t pin);
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size);

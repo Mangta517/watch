@@ -19,7 +19,7 @@ static void spl006_delay_ms(uint32_t ms)
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
         /* 多等一拍，避免tick边界缩短硬件最小等待；等待期间让出CPU。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
     }
     else
     {
@@ -74,8 +74,8 @@ enum
 };
 static struct
 {
-    uint32_t phase_ms, fault_ms, sample_ms;
-    uint8_t phase, index, faults;
+    uint32_t phase_ms, fault_ms, sample_ms, sleep_ms;
+    uint8_t phase, index, faults, sleeping;
     uint8_t coef[16];
 } spl_recovery;
 
@@ -97,7 +97,7 @@ static uint8_t spl006_recover_failed(void)
 
 static void spl006_read_fault(void)
 {
-    if (spl_recovery.faults < 3U && ++spl_recovery.faults == 3U)
+    if (spl_recovery.faults < 3 && ++spl_recovery.faults == 3)
     {
         spl_recovery.fault_ms = HAL_GetTick();
     }
@@ -140,10 +140,14 @@ uint8_t spl006_recover_step(uint32_t now_ms)
         {SPL06_CFG_REG, SPL06_P_SHIFT | SPL06_T_SHIFT},
         {SPL06_MEAS_CFG, SPL06_MEAS_BG_PRSTMP}};
     uint8_t status;
+    if (spl_recovery.sleeping != 0)
+    {
+        return 2; /* standby期间不推进恢复，避免重新启动背景转换。 */
+    }
     if (spl006_coef_ready != 0)
     {
         if ((uint32_t)(now_ms - spl_recovery.sample_ms) >= SPL006_SAMPLE_MAX_AGE_MS ||
-            (spl_recovery.faults >= 3U && (uint32_t)(now_ms - spl_recovery.fault_ms) >= 1000U))
+            (spl_recovery.faults >= 3 && (uint32_t)(now_ms - spl_recovery.fault_ms) >= 1000))
         {
             spl006_recover_begin();
             return 2;
@@ -153,7 +157,7 @@ uint8_t spl006_recover_step(uint32_t now_ms)
     switch (spl_recovery.phase)
     {
     case SPL_RECOVER_FAILED:
-        if ((uint32_t)(now_ms - spl_recovery.phase_ms) >= 1000U)
+        if ((uint32_t)(now_ms - spl_recovery.phase_ms) >= 1000)
         {
             spl006_recover_begin();
             return 2;
@@ -176,12 +180,12 @@ uint8_t spl006_recover_step(uint32_t now_ms)
         return 2;
     case SPL_RECOVER_SENSOR:
     case SPL_RECOVER_COEF_READY:
-        if ((uint32_t)(now_ms - spl_recovery.phase_ms) >= 500U)
+        if ((uint32_t)(now_ms - spl_recovery.phase_ms) >= 500)
         {
             return spl006_recover_failed();
         }
-        if ((spl_recovery.phase == SPL_RECOVER_SENSOR && (uint32_t)(now_ms - spl_recovery.phase_ms) < 20U) ||
-            (spl_recovery.phase == SPL_RECOVER_COEF_READY && (uint32_t)(now_ms - spl_recovery.phase_ms) < 50U))
+        if ((spl_recovery.phase == SPL_RECOVER_SENSOR && (uint32_t)(now_ms - spl_recovery.phase_ms) < 20) ||
+            (spl_recovery.phase == SPL_RECOVER_COEF_READY && (uint32_t)(now_ms - spl_recovery.phase_ms) < 50))
         {
             return 2;
         }
@@ -233,34 +237,56 @@ uint8_t spl006_set_sleep(uint8_t sleeping)
 {
     uint8_t mode = SPL06_MEAS_BG_PRSTMP;
     uint8_t discard[6];
+    uint8_t result = 0;
+    uint32_t now_ms, elapsed_ms;
     if (sleeping != 0)
     {
         mode = 0; /* MEAS_CFG: standby，停止背景转换，保留出厂系数。 */
     }
-    else
+    else if (spl006_coef_ready != 0)
     {
         /* 清掉休眠前的P/T就绪标志，调用方等待新的1Hz转换后再读取。 */
         if (spl006_bus_read(SPL06_PRS_B2, discard, sizeof(discard)) != 0)
         {
-            spl006_recover_begin();
-            return 1;
+            result = 1;
         }
     }
-    if (spl006_write_reg(SPL06_MEAS_CFG, mode) != 0)
+    /* 恢复尚未完成时，唤醒只解除暂停；背景转换由最后一个配置步骤启动。 */
+    if (result == 0 && (sleeping != 0 || spl006_coef_ready != 0) && spl006_write_reg(SPL06_MEAS_CFG, mode) != 0)
+    {
+        result = 1;
+    }
+    now_ms = HAL_GetTick();
+    if (sleeping != 0 && spl_recovery.sleeping == 0)
+    {
+        spl_recovery.sleep_ms = now_ms;
+        spl_recovery.sleeping = 1;
+    }
+    else if (sleeping == 0 && spl_recovery.sleeping != 0)
+    {
+        /* standby只暂停故障和恢复等待，跨窗口的未就绪/NACK必须继续累计。 */
+        elapsed_ms = now_ms - spl_recovery.sleep_ms;
+        spl_recovery.sample_ms += elapsed_ms;
+        spl_recovery.phase_ms += elapsed_ms;
+        if (spl_recovery.faults >= 3)
+        {
+            spl_recovery.fault_ms += elapsed_ms;
+        }
+        spl_recovery.sleeping = 0;
+    }
+    if (result != 0)
     {
         spl006_recover_begin();
-        return 1;
     }
-    spl_recovery.sample_ms = HAL_GetTick();
-    spl_recovery.faults = 0;
-    return 0;
+    return result;
 }
 
 uint8_t spl006_init(void)
 {
     uint8_t result;
+    spl_recovery.sleeping = 0;
     spl006_recover_begin();
-    while ((result = spl006_recover_step(HAL_GetTick())) == 2U)
+    while ((result = spl006_recover_step(HAL_GetTick())) == 2)
     {
         if (spl_recovery.phase == SPL_RECOVER_SENSOR)
         {
@@ -337,20 +363,20 @@ uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw)
     int32_t pressure, temperature;
     if (spl006_coef_ready == 0)
     {
-        return 0x0202U;
+        return 0x0202;
     }
     if (spl006_read_reg(SPL06_MEAS_CFG, &status) != 0)
     {
         spl006_read_fault();
-        return 0x0202U;
+        return 0x0202;
     }
     if ((status & SPL06_PRS_RDY) == 0)
     {
-        result |= 1U;
+        result |= 1;
     }
     if ((status & SPL06_TMP_RDY) == 0)
     {
-        result |= 0x0100U;
+        result |= 0x0100;
     }
     if (result != 0)
     {
@@ -360,7 +386,7 @@ uint16_t spl006_read_sample(int32_t *pressure_raw, int32_t *temperature_raw)
     if (spl006_bus_read(SPL06_PRS_B2, data, sizeof(data)) != 0)
     {
         spl006_read_fault();
-        return 0x0202U;
+        return 0x0202;
     }
     pressure = ((int32_t)data[0] << 16) | ((int32_t)data[1] << 8) | data[2];
     temperature = ((int32_t)data[3] << 16) | ((int32_t)data[4] << 8) | data[5];

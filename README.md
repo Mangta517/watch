@@ -10,15 +10,15 @@
 | --- | --- |
 | 主频与电压档 | APP 固定 84MHz / Scale 2，Flash 2 等待周期；亮屏、测量和待机都使用此配置 |
 | CPU Sleep | 所有应用任务等待时，由 FreeRTOS IDLE 进入 Sleep；亮屏、运动、心率与校准期间也可进入，中断唤醒后继续执行 |
-| 无触摸待机 | 连续 5 秒无触摸，背光降到 2%，表盘暂停读取 RTC 及更新指针/数字时间；RTC 继续走时，触摸后恢复原亮度并显示当前时间 |
-| 显示与触摸轮询 | 活跃约 5ms，自动待机和 PA4 熄屏后约 20ms |
-| MPU6050 | 心率测量及独立运动模式 100Hz，姿态页与校准 50Hz，后台姿态 25Hz；低通滤波及融合时间步长随档位调整 |
-| 磁力计 | 心率测量及独立运动模式 75Hz，活动/校准 30Hz，后台 7.5Hz |
+| 无触摸待机 | 连续 10 秒无操作后，与 PA4 手动熄屏共用处理：背光 0%、保留蓝牙供电/UART、暂停绘图，LCD/触摸芯片休眠且触摸任务阻塞；PA4 或辅助抬腕亮屏，恢复原亮度和当前 RTC 时间 |
+| 显示与触摸轮询 | 活跃约 5ms；熄屏无按键时等待 PA4 通知或约 100ms 期限，按键消抖/按住期间保持 20ms，触摸休眠后阻塞 |
+| MPU6050 | 心率测量及独立运动模式 100Hz，姿态页与校准 50Hz；无姿态需求的亮屏页面与普通熄屏使用 5Hz 加速度低功耗循环，关闭陀螺仪和温度，持续计步及辅助抬腕；自动心率窗口保留 100Hz |
+| 磁力计 | 心率测量及独立运动模式 75Hz，活动/校准 30Hz；5Hz 加速度后台模式下保持 sleep，进入姿态/校准/运动/心率场景恢复 |
 | 心率读取 | 测量期间 sensor 每 10ms 服务，约 30ms 读取一次 PPG；心率测量期间 MPU 为 100Hz，校准期间保留 50Hz |
 | 零偏校准 | 保留 100 帧静止确认和 100 帧平均，50Hz 下约 4 秒；两个阶段超时分别为 6 秒、4 秒 |
-| 电池估算 | 以 4.0V 为满电点，保留启动均值、电压滤波和本次开机百分比只降不升的策略；估算曲线不代表充电芯片的硬件限压 |
+| 电池估算 | 以 4.0V 为满电点，2026-10-25按未充电日志局部校正 3.6～4.0V 段；低压端待完整放电标定，保留启动均值、滤波和本次开机百分比只降不升 |
 
-Sleep 保留 1ms SysTick、UART、DMA、背光 PWM 和 RTC，未启用 Tickless；实际节电幅度需上板测量。PA4 手动熄屏时背光为 0%，暂停 LVGL 绘图/动画且禁用触摸，需要再次按 PA4 亮屏。自动待机保留触摸唤醒。气压与电池仍约 1 秒服务一次，温湿度约 2 秒触发一次。
+Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍，以 RTC 亚秒差值测量休眠时间，唤醒后同时补齐 HAL 和 FreeRTOS 时间。单次最多 100ms，UART、DMA、背光 PWM 和 RTC 保持工作；RTC 未就绪时退回 1ms Sleep。实际节电幅度需上板测量。自动待机与 PA4 手动熄屏行为一致，普通模式保留 PA8 供电及 PA9/PA10 UART，支持 PA4 或放下后抬腕亮屏；LCD 先等在途 DMA 完成或超时安全收尾再进入休眠，亮屏发 Sleep Out 后至少等待 120ms。触摸恢复由独立任务复位并等待约 310ms，不阻塞 sensor。亮屏时气压、电池约 1 秒服务一次，温湿度约 2 秒触发一次；普通熄屏电池保持约 1 秒一次，环境与自动心率每 10 分钟测量，无姿态需求时 MPU 自主进行 5Hz 加速度采样，sensor 每 200ms 读取新帧。步数按本次开机累计，不写 EEPROM；首页脚印图标旁显示数值，向上图标提示辅助抬腕。活动、运动和心率所需采样频率保持原配置。
 
 心率测量已恢复约 30ms 读取，40～200 BPM 合成回归在稳定段逐帧检查有效输出，包含 200 BPM；范围外的估算仍不钳位。实板心率精度、总线时序及功耗尚需测量。具体实现见 [界面与低功耗说明](docs/watch-ui.md)。
 
@@ -34,9 +34,11 @@ Sleep 保留 1ms SysTick、UART、DMA、背光 PWM 和 RTC，未启用 Tickless�
 
 | 工程 / Target | Flash 起始地址 | 可用空间 | 用途 |
 | --- | --- | --- | --- |
-| [f411ceu6](MDK-ARM/f411ceu6.uvprojx) | `0x08000000` | 512KiB | 独立 APP，直接通过调试器下载 |
+| [f411ceu6](MDK-ARM/f411ceu6.uvprojx) | `0x08000000` | 384KiB | 独立 APP，直接通过调试器下载 |
 | [f411_bootloader](MDK-ARM/f411_bootloader.uvprojx) | `0x08000000` | 32KiB | 蓝牙升级引导程序 |
-| [f411ceu6_upgrade_app](MDK-ARM/f411ceu6_upgrade_app.uvprojx) | `0x08008000` | 480KiB | 与 Bootloader 配套的升级 APP，向量表偏移 `0x8000` |
+| [f411ceu6_upgrade_app](MDK-ARM/f411ceu6_upgrade_app.uvprojx) | `0x08008000` | 352KiB | 与 Bootloader 配套的升级 APP，向量表偏移 `0x8000` |
+
+最后128KiB（sector 7）保留给电压历史；普通APP/升级APP及Bootloader均已限制边界，旧Bootloader须通过SWD同步更新。下载时使用按扇区擦除，整片擦除会清掉日志。
 
 直接运行手表可选择独立 APP。部署 OTA 时，先通过 SWD 下载 Bootloader，再下载升级 APP 或进入 SPP 模式发送其 BIN；下载升级 APP 时保留 Bootloader 所在扇区。独立 APP 与 Bootloader 地址重叠，应按上表选择部署组合。
 
@@ -45,6 +47,7 @@ Sleep 保留 1ms SysTick、UART、DMA、背光 PWM 和 RTC，未启用 Tickless�
 | 内容 | 文档 |
 | --- | --- |
 | 界面、低功耗、电池条和电量估算 | [docs/watch-ui.md](docs/watch-ui.md) |
+| 电压历史记录、蓝牙导出与清空 | [docs/battery-log.md](docs/battery-log.md) |
 | 蓝牙、校时和天气协议 | [docs/bluetooth.md](docs/bluetooth.md) |
 | 启动流程与等待优化 | [docs/startup-optimization.md](docs/startup-optimization.md) |
 | 运行诊断 | [docs/diagnostics.md](docs/diagnostics.md) |
@@ -55,13 +58,14 @@ Sleep 保留 1ms SysTick、UART、DMA、背光 PWM 和 RTC，未启用 Tickless�
 | 心率与故障诊断 | [docs/em7028.md](docs/em7028.md) |
 | 温湿度 | [docs/aht21.md](docs/aht21.md) |
 
-四套常用主机检查在项目根目录运行：
+常用主机检查在项目根目录运行：
 
 ```powershell
 python -X utf8 tests/clock/run.py
 python -X utf8 tests/sensors/run.py
 python -X utf8 tests/startup/run.py
 python -X utf8 tests/ui/run.py
+python -X utf8 tests/battery_log/run.py
 ```
 
 需要 Python、桌面 GCC；UI 渲染还需要 Pillow。主机测试、Keil 编译和实板测试是三种不同证据，不能相互代替。

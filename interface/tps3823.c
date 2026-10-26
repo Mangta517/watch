@@ -3,7 +3,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define TPS3823_RESET_RELEASE_MS 301U /* 手册复位延时最大 300ms，留出时间裕量。 */
+#define TPS3823_RESET_RELEASE_MS 301 /* 手册复位延时最大 300ms，留出时间裕量。 */
 
 static uint8_t tps3823_enabled;
 
@@ -38,7 +38,7 @@ void tps3823_enable(void)
     /* 等待正常上电复位延时；非A版若已被WDI跳变锁存，必须断电，等待不能解锁。 */
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
-        vTaskDelay(pdMS_TO_TICKS(TPS3823_RESET_RELEASE_MS) + 1U);
+        vTaskDelay(pdMS_TO_TICKS(TPS3823_RESET_RELEASE_MS) + 1);
     }
     else
     {
@@ -63,7 +63,7 @@ void tps3823_feed(void)
     {
         /* 每次均产生有效下降沿；84MHz下16个NOP的高脉宽超过手册100ns。 */
         HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_SET);
-        for (i = 0; i < 16U; ++i)
+        for (i = 0; i < 16; ++i)
         {
             __NOP();
         }

@@ -7,9 +7,9 @@
 #include <math.h>
 #include <string.h>
 
-float RtA = 57.2957795f;
-float Gyro_G = 1.0f / MPU6050_GYRO_LSB_PER_DPS;
-float Gyro_Gr = 1.0f / MPU6050_GYRO_LSB_PER_DPS / 180.0f * 3.1415926f;
+const float RtA = 57.2957795f;
+const float Gyro_G = 1.0f / MPU6050_GYRO_LSB_PER_DPS;
+static const float Gyro_Gr = 1.0f / MPU6050_GYRO_LSB_PER_DPS / 180.0f * 3.1415926f;
 
 static Quaternion_Struct s_q = {1, 0, 0, 0};
 static float s_error_i[3];

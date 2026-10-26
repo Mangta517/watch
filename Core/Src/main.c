@@ -28,6 +28,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_task.h"    /* 应用层任务管理: 全工程唯一的 FreeRTOS 任务创建/调度器启动入口 */
+#include "app_reset.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -121,7 +122,7 @@ int main(void)
     power_gpio.Pull = GPIO_PULLDOWN;
     power_gpio.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(POWER_EN_GPIO_Port, &power_gpio);
-    app_boot_watchdog_start(); /* 覆盖HAL/时钟、LCD/触摸初始化及UI建树。 */
+    app_reset_init(); /* 在HAL和RTC初始化前保存复位源及上次备份记录。 */
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -146,19 +147,19 @@ int main(void)
   MX_USART1_UART_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-  /* main 只做 CubeMX 初始化; 任务归口 app_task, 背光/屏幕/触摸由应用层接管 */
-  App_Task_Create();   /* 创建全部 FreeRTOS 任务 (含 lvgl 测试任务) */
-  App_Task_Start();    /* 不返回: 启动调度器 */
+    /* main 只做 CubeMX 初始化; 任务归口 app_task, 背光/屏幕/触摸由应用层接管 */
+    App_Task_Create();   /* 创建全部 FreeRTOS 任务 (含 lvgl 测试任务) */
+    App_Task_Start();    /* 不返回: 启动调度器 */
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
+    while (1)
+    {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+    }
   /* USER CODE END 3 */
 }
 
@@ -221,10 +222,15 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
+    __disable_irq();
+#if defined(__CC_ARM)
+    app_reset_capture_stop(APP_RESET_ERROR_HANDLER, (uint32_t)__return_address(), 0);
+#else
+    app_reset_capture_stop(APP_RESET_ERROR_HANDLER, (uint32_t)(uintptr_t)__builtin_return_address(0), 0);
+#endif
+    while (1)
+    {
+    }
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT

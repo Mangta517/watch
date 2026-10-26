@@ -8,7 +8,7 @@
   *          ② SPI1_TX DMA(DMA2_Stream2) 已由 CubeMX 配置 → 提供 Watch 同款
   *             "阻塞整块发送" + "DMA 异步刷屏(经 TxCplt 回调报完成)" 双路径;
   *          ③ 背光为 TIM3_CH3/PB0, OCPolarity=HIGH → CCR 正映射 (不反转);
-  *             CubeMX 已配 PSC=99/ARR=300 → 1MHz/300 ≈ 3.33kHz, LCD_Open_Light
+ *             CubeMX 已配 PSC=83/ARR=300 → 1MHz/301 ≈ 3.32kHz, LCD_Open_Light
   *             里仍按 LCD_BL_ARR 重写一次 ARR 作防御 (AutoReloadPreload=DISABLE,
   *             立即生效), 保证与驱动宏一致。
   *          依赖: hspi1(spi.c, Mode3: CPOL=High/CPHA=2Edge, MSB, DIV2), htim3(tim.c),
@@ -29,18 +29,17 @@
 #define LCD_RES_Clr() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_RESET)
 #define LCD_RES_Set() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_SET)
 
-/* SPI 单笔传输超时(ms)。HAL 用 HAL_GetTick 计时, 内核运行后由 it.c 的
- * SysTick_Handler → HAL_IncTick 持续维护。总线异常时不会永久卡死。 */
-#define LCD_SPI_TMO 1000
-/* 最大65534字节在50MHz下约10.5ms；100ms后仍无回调则按失败收尾。 */
-#define LCD_DMA_TIMEOUT_MS 100U
+/* 最大65534字节在42MHz下约12.5ms；50ms保留调度余量并限制故障阻塞时间。 */
+#define LCD_SPI_TMO 50
+/* 最大65534字节在42MHz下约12.5ms；100ms后仍无回调则按失败收尾。 */
+#define LCD_DMA_TIMEOUT_MS 100
 
 static void lcd_delay_ms(uint32_t ms)
 {
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
         /* 多等一拍，避免调用落在tick末尾时缩短硬件最小等待时间。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
     }
     else
     {
@@ -87,7 +86,7 @@ void LCD_WR_REG(uint8_t reg)
 /******************************************************************************
  * 地址窗口 (自动加 Y 偏移; 0x2A 高16bit恒0, 0x2B 按16bit发)
  *****************************************************************************/
-static HAL_StatusTypeDef lcd_address_set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
+static uint8_t lcd_address_set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
 {
     uint8_t data[11];
     uint8_t i;
@@ -105,25 +104,27 @@ static HAL_StatusTypeDef lcd_address_set(uint16_t x1, uint16_t y1, uint16_t x2, 
     data[8] = (uint8_t)(y2 >> 8);
     data[9] = (uint8_t)y2;
     data[10] = 0x2C;
-    for (i = 0; i < sizeof(data); ++i)
+    /* 命令单字节、同组4字节参数连续发送，保持原有DC电平和线上字节序。 */
+    for (i = 0; i < sizeof(data); i += 5)
     {
-        if (i == 0 || i == 5 || i == 10)
-        {
-            LCD_DC_Clr();
-        }
+        LCD_DC_Clr();
         status = HAL_SPI_Transmit(&hspi1, &data[i], 1, LCD_SPI_TMO);
         LCD_DC_Set();
         if (status != HAL_OK)
         {
-            return status;
+            return 1;
+        }
+        if (i < 10 && HAL_SPI_Transmit(&hspi1, &data[i + 1], 4, LCD_SPI_TMO) != HAL_OK)
+        {
+            return 1;
         }
     }
-    return HAL_OK;
+    return 0;
 }
 
 void LCD_Address_Set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
 {
-    if (lcd_address_set(x1, y1, x2, y2) != HAL_OK)
+    if (lcd_address_set(x1, y1, x2, y2) != 0)
     {
         Error_Handler();
     }
@@ -135,19 +136,19 @@ void LCD_Address_Set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
 /* LVGL flush: 把 w*h 个 RGB565 像素发到指定窗口 (字节序由 LV_COLOR_16_SWAP=1 保证)。
  * HAL_SPI_Transmit 的 Size 是 uint16_t, 超过 64KB 的块自动分片;
  * GRAM 游标在窗口内自动前进, 分片之间不需要重设地址。 */
-static HAL_StatusTypeDef lcd_color_fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p)
+static uint8_t lcd_color_fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p)
 {
     uint32_t bytes = (uint32_t)(xend - xsta + 1) * (uint32_t)(yend - ysta + 1) * 2;
     const uint8_t *p = (const uint8_t *)color_p;
     HAL_StatusTypeDef st = HAL_OK;
 
-    st = lcd_address_set(xsta, ysta, xend, yend);
-    if (st != HAL_OK)
+    if (lcd_address_set(xsta, ysta, xend, yend) != 0)
     {
-        return st;
+        return 1;
     }
     while (bytes > 0xFFFF)
-    { /* 每片 <=64KB-2, 保证整像素边界 */
+    {
+        /* 每片 <=64KB-2, 保证整像素边界 */
         st = HAL_SPI_Transmit(&hspi1, (uint8_t *)p, 0xFFFE, LCD_SPI_TMO);
         if (st != HAL_OK)
         {
@@ -160,12 +161,12 @@ static HAL_StatusTypeDef lcd_color_fill(uint16_t xsta, uint16_t ysta, uint16_t x
     {
         st = HAL_SPI_Transmit(&hspi1, (uint8_t *)p, (uint16_t)bytes, LCD_SPI_TMO);
     }
-    return st;
+    return st != HAL_OK;
 }
 
 void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p)
 {
-    if (lcd_color_fill(xsta, ysta, xend, yend, color_p) != HAL_OK)
+    if (lcd_color_fill(xsta, ysta, xend, yend, color_p) != 0)
     {
         Error_Handler();
     }
@@ -190,15 +191,16 @@ void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb)
 void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p)
 {
     uint32_t bytes = (uint32_t)(xend - xsta + 1) * (uint32_t)(yend - ysta + 1) * 2;
-    HAL_StatusTypeDef status;
+    uint8_t result;
 
     s_lcd_flush_started_ms = HAL_GetTick();
     s_lcd_flush_active = 1;
 
     if (bytes > 0xFFFE)
-    { /* F4 HAL Size 为 uint16: 超 64KB 罕见大块, 退回阻塞分片 */
-        status = lcd_color_fill(xsta, ysta, xend, yend, color_p);
-        if (status == HAL_OK)
+    {
+        /* F4 HAL Size 为 uint16: 超 64KB 罕见大块, 退回阻塞分片 */
+        result = lcd_color_fill(xsta, ysta, xend, yend, color_p);
+        if (result == 0)
         {
             s_lcd_flush_active = 0;
             if (s_lcd_flush_done_cb != NULL)
@@ -209,13 +211,13 @@ void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t ye
     }
     else
     {
-        status = lcd_address_set(xsta, ysta, xend, yend);
-        if (status == HAL_OK)
+        result = lcd_address_set(xsta, ysta, xend, yend);
+        if (result == 0)
         {
-            status = HAL_SPI_Transmit_DMA(&hspi1, (uint8_t *)color_p, (uint16_t)bytes);
+            result = HAL_SPI_Transmit_DMA(&hspi1, (uint8_t *)color_p, (uint16_t)bytes) != HAL_OK;
         }
     }
-    if (status != HAL_OK)
+    if (result != 0)
     {
         s_lcd_flush_failed = 1;
     }
@@ -282,8 +284,8 @@ void LCD_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, uint16
 
     for (i = 0; i < 64; i++)
     {
-        buf[i * 2U] = (uint8_t)(color >> 8);
-        buf[i * 2U + 1U] = (uint8_t)color;
+        buf[i * 2] = (uint8_t)(color >> 8);
+        buf[i * 2 + 1] = (uint8_t)color;
     }
 
     LCD_Address_Set(xsta, ysta, xend, yend);
@@ -316,7 +318,7 @@ void LCD_DrawPoint(uint16_t x, uint16_t y, uint16_t color)
 }
 
 /******************************************************************************
- * 背光 (TIM3_CH3 PWM PB0, ARR=300, 频率约3.33kHz, 高电平点亮)
+ * 背光 (TIM3_CH3 PWM PB0, ARR=300, 频率约3.32kHz, 高电平点亮)
  *****************************************************************************/
 void LCD_Open_Light(void)
 {
@@ -452,5 +454,5 @@ void LCD_ST7789_SleepIn(void)
 void LCD_ST7789_SleepOut(void)
 {
     LCD_WR_REG(0x11);
-    lcd_delay_ms(100);
+    lcd_delay_ms(120); /* 与初始化Sleep Out相同，等待面板恢复后再绘图、开背光。 */
 }

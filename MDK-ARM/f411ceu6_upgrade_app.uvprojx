@@ -18,7 +18,7 @@
           <Vendor>STMicroelectronics</Vendor>
           <PackID>Keil.STM32F4xx_DFP.3.0.0</PackID>
           <PackURL>https://www.keil.com/pack/</PackURL>
-          <Cpu>IRAM(0x20000000-0x2001FFFF) IROM(0x8008000-0x807FFFF)  CLOCK(25000000) FPU2 CPUTYPE("Cortex-M4") TZ</Cpu>
+          <Cpu>IRAM(0x20000000-0x2001FFFF) IROM(0x8008000-0x805FFFF)  CLOCK(25000000) FPU2 CPUTYPE("Cortex-M4") TZ</Cpu>
           <FlashUtilSpec></FlashUtilSpec>
           <StartupFile></StartupFile>
           <FlashDriverDll></FlashDriverDll>
@@ -249,7 +249,7 @@
               <IROM>
                 <Type>1</Type>
                 <StartAddress>0x8008000</StartAddress>
-                <Size>0x78000</Size>
+                <Size>0x58000</Size>
               </IROM>
               <XRAM>
                 <Type>0</Type>
@@ -274,7 +274,7 @@
               <OCR_RVCT4>
                 <Type>1</Type>
                 <StartAddress>0x8008000</StartAddress>
-                <Size>0x78000</Size>
+                <Size>0x58000</Size>
               </OCR_RVCT4>
               <OCR_RVCT5>
                 <Type>1</Type>
@@ -1026,6 +1026,26 @@
               <FilePath>..\application\app_diag.c</FilePath>
             </File>
             <File>
+              <FileName>app_reset.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_reset.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_reset.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\application\app_reset.h</FilePath>
+            </File>
+            <File>
+              <FileName>app_reset_ble.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_reset_ble.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_reset_ble.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\application\app_reset_ble.h</FilePath>
+            </File>
+            <File>
               <FileName>app_touch.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\application\app_touch.c</FilePath>
@@ -1099,6 +1119,16 @@
               <FileName>app_uptime.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\application\app_uptime.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_battery_log.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_battery_log.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_battery_log_ble.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_battery_log_ble.c</FilePath>
             </File>
             <File>
               <FileName>app_mag_store.h</FileName>
@@ -1224,6 +1254,11 @@
               <FileName>bl24c02.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\interface\bl24c02.c</FilePath>
+            </File>
+            <File>
+              <FileName>int_battery_log.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\interface\int_battery_log.c</FilePath>
             </File>
             <File>
               <FileName>bl24c02.h</FileName>
@@ -2224,6 +2259,11 @@
               <FileName>common_imu.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\common\common_imu.c</FilePath>
+            </File>
+            <File>
+              <FileName>common_activity.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\common\common_activity.c</FilePath>
             </File>
             <File>
               <FileName>common_imu.h</FileName>

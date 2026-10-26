@@ -17,10 +17,10 @@ extern "C"
 #endif
 
 #define KT6368A_BLE_NAME       "F411-Watch"
-#define KT6368A_RX_BUFFER_SIZE 1024U /* 环形缓冲有效容量1023字节 */
-#define KT6368A_TX_MAX_SIZE    512U
-#define KT6368A_BOOT_DELAY_MS  1200U /* 蓝牙模块上电等待时间 */
-#define KT6368A_AT_TIMEOUT_MS  500U
+#define KT6368A_RX_BUFFER_SIZE 1024 /* 环形缓冲有效容量1023字节 */
+#define KT6368A_TX_MAX_SIZE    512
+#define KT6368A_BOOT_DELAY_MS  1200 /* 蓝牙模块上电等待时间 */
+#define KT6368A_AT_TIMEOUT_MS  500
 
     /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。
  * 兼容旧调用方的阻塞入口；手表启动使用下方begin/service。配置BLE名称、开启BLE并查询验证。
@@ -31,7 +31,7 @@ extern "C"
     /* LVGL循环分步启动：20ms放电/1200ms上电/AT查询/参数保存均不长时间等待。
      * pending期间由本状态机独占UART RX，业务write返回BUSY。 */
     void kt6368a_init_begin(void);
-    /* LVGL任务的PA4消抖切换：0断电/停UART/释放PA9/PA10，1重新分步启动。 */
+    /* LVGL任务的SPORT启停切换：0断电/停UART/释放PA9/PA10，1重新分步启动；熄屏不调用。 */
     void kt6368a_set_enabled(uint8_t enabled);
     HAL_StatusTypeDef kt6368a_init_service(void);
     uint8_t kt6368a_init_is_pending(void);
@@ -60,6 +60,9 @@ extern "C"
     uint8_t kt6368a_tx_is_busy(void);
     uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result);
     uint16_t kt6368a_read(uint8_t *data, uint16_t size);
+    uint8_t kt6368a_rx_pending(void);
+    /* 接收启动前注册；积累128字节时在UART ISR调用一次，Bootloader可不注册。 */
+    void kt6368a_set_rx_callback(void (*callback)(void));
     void kt6368a_flush_rx(void);
     uint32_t kt6368a_get_rx_dropped(void);
     uint32_t kt6368a_get_rx_errors(void);

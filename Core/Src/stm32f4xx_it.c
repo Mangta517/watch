@@ -24,6 +24,8 @@
 /* USER CODE BEGIN Includes */
 #include "FreeRTOS.h"
 #include "task.h"
+#include "app_reset.h"
+#include "app_task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,6 +58,16 @@ extern void xPortPendSVHandler(void);    /* FreeRTOS(CM4F port) PendSV 处理函
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* 异常入口先取得硬件压栈地址和EXC_RETURN；记录过程不使用LVGL、I2C或UART。 */
+void app_fault_stop(const uint32_t *stack, uint32_t exc_return, uint32_t kind)
+{
+    __disable_irq();
+    app_reset_capture_fault(kind, stack, exc_return);
+    for (;;)
+    {
+    }
+}
+
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -78,70 +90,70 @@ void NMI_Handler(void)
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
-   while (1)
-  {
-  }
+    while (1)
+    {
+    }
   /* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
 /**
   * @brief This function handles Hard fault interrupt.
   */
-void HardFault_Handler(void)
+__asm void HardFault_Handler(void)
 {
-  /* USER CODE BEGIN HardFault_IRQn 0 */
-
-  /* USER CODE END HardFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-    /* USER CODE END W1_HardFault_IRQn 0 */
-  }
+    extern app_fault_stop;
+    TST lr, #4
+    ITE EQ
+    MRSEQ r0, MSP
+    MRSNE r0, PSP
+    MOV r1, lr
+    MOVS r2, #1
+    B app_fault_stop
 }
 
 /**
   * @brief This function handles Memory management fault.
   */
-void MemManage_Handler(void)
+__asm void MemManage_Handler(void)
 {
-  /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
-  /* USER CODE END MemoryManagement_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
-    /* USER CODE END W1_MemoryManagement_IRQn 0 */
-  }
+    extern app_fault_stop;
+    TST lr, #4
+    ITE EQ
+    MRSEQ r0, MSP
+    MRSNE r0, PSP
+    MOV r1, lr
+    MOVS r2, #2
+    B app_fault_stop
 }
 
 /**
   * @brief This function handles Pre-fetch fault, memory access fault.
   */
-void BusFault_Handler(void)
+__asm void BusFault_Handler(void)
 {
-  /* USER CODE BEGIN BusFault_IRQn 0 */
-
-  /* USER CODE END BusFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_BusFault_IRQn 0 */
-    /* USER CODE END W1_BusFault_IRQn 0 */
-  }
+    extern app_fault_stop;
+    TST lr, #4
+    ITE EQ
+    MRSEQ r0, MSP
+    MRSNE r0, PSP
+    MOV r1, lr
+    MOVS r2, #3
+    B app_fault_stop
 }
 
 /**
   * @brief This function handles Undefined instruction or illegal state.
   */
-void UsageFault_Handler(void)
+__asm void UsageFault_Handler(void)
 {
-  /* USER CODE BEGIN UsageFault_IRQn 0 */
-
-  /* USER CODE END UsageFault_IRQn 0 */
-  while (1)
-  {
-    /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
-    /* USER CODE END W1_UsageFault_IRQn 0 */
-  }
+    extern app_fault_stop;
+    TST lr, #4
+    ITE EQ
+    MRSEQ r0, MSP
+    MRSNE r0, PSP
+    MOV r1, lr
+    MOVS r2, #4
+    B app_fault_stop
 }
 
 /**
@@ -153,7 +165,7 @@ void SVC_Handler(void)
 
   /* USER CODE END SVCall_IRQn 0 */
   /* USER CODE BEGIN SVCall_IRQn 1 */
-  vPortSVCHandler();    /* 交给 FreeRTOS: 首个任务启动入口 */
+    vPortSVCHandler();    /* 交给 FreeRTOS: 首个任务启动入口 */
   /* USER CODE END SVCall_IRQn 1 */
 }
 
@@ -179,7 +191,7 @@ void PendSV_Handler(void)
 
   /* USER CODE END PendSV_IRQn 0 */
   /* USER CODE BEGIN PendSV_IRQn 1 */
-  xPortPendSVHandler(); /* 交给 FreeRTOS: 上下文切换 */
+    xPortPendSVHandler(); /* 交给 FreeRTOS: 上下文切换 */
   /* USER CODE END PendSV_IRQn 1 */
 }
 
@@ -193,14 +205,14 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
-  /* 心跳中断(与 Watch 工程一致的做法):
-   * 运行时SysTick每1ms进入一次；Tickless休眠的跳过时间由app_tickless同时补齐HAL/RTOS。
-   * FreeRTOS 调度器启动后, 再把节拍交给 xPortSysTickHandler 做任务时间片轮转。
-   * 调度器未启动时不执行调度处理, 避免启动阶段冲突。 */
-  if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
-  {
-    xPortSysTickHandler();
-  }
+    /* 心跳中断(与 Watch 工程一致的做法):
+     * 运行时SysTick每1ms进入一次；Tickless休眠的跳过时间由app_tickless同时补齐HAL/RTOS。
+     * FreeRTOS 调度器启动后, 再把节拍交给 xPortSysTickHandler 做任务时间片轮转。
+     * 调度器未启动时不执行调度处理, 避免启动阶段冲突。 */
+    if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
+    {
+        xPortSysTickHandler();
+    }
   /* USER CODE END SysTick_IRQn 1 */
 }
 
@@ -221,7 +233,7 @@ void EXTI4_IRQHandler(void)
   /* USER CODE END EXTI4_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(WAKE_Pin);
   /* USER CODE BEGIN EXTI4_IRQn 1 */
-
+    app_task_wake_from_isr();
   /* USER CODE END EXTI4_IRQn 1 */
 }
 

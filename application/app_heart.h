@@ -32,12 +32,12 @@ typedef struct
 typedef struct
 {
     uint32_t elapsed_ms; /* 本次START后的板端读取时刻，与心率算法使用同一HAL tick；不是器件内部转换时间 */
-    float filtered;     /* 去背景/低通及可用运动参考消除后的有符号信号，ADC计数 */
-    float dc;           /* 背景基线，ADC计数 */
+    float filtered;      /* 去背景/低通及可用运动参考消除后的有符号信号，ADC计数 */
+    float dc;            /* 背景基线，ADC计数 */
     uint16_t raw;
     uint16_t bpm;
     uint16_t interval_ms;
-    uint16_t sequence;  /* 成功读取的样本序号，0～65535循环，重新START归零 */
+    uint16_t sequence; /* 成功读取的样本序号，0～65535循环，重新START归零 */
     app_heart_state state;
 } app_heart_sample_struct;
 

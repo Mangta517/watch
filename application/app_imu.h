@@ -54,6 +54,9 @@ extern "C"
     /* IMU 快照: 原始 LSB + 融合姿态角 + 同一轮服务的磁参考状态 */
     typedef struct
     {
+        uint32_t steps;                /* 本次开机累计步数；不写EEPROM。 */
+        uint32_t wrist_raise_sequence; /* 仅在放下后抬起时递增，供UI消费。 */
+        uint32_t wrist_raise_ms;       /* 最近抬腕事件的HAL时间，避免陈旧事件亮屏。 */
         Accel_Gyro_struct raw;     /* 原始读数 (已减零偏; 加速度 ±4g, 陀螺仪 ±1000°/s) */
         float pitch_deg;           /* 俯仰角 (°), 四元数融合 */
         float roll_deg;            /* 横滚角 (°), 四元数融合 */
@@ -80,9 +83,9 @@ extern "C"
  *        仅由 app_task 的 sensor 任务体按周期调用, 其他上下文勿调
  */
     void App_IMU_Service(void);
-    /* 仅sensor任务：运动10ms，普通20/40ms；磁校准强制20ms，返回本轮调度周期。 */
+    /* 仅sensor任务：后台200ms为加速度低功耗，运动10ms，姿态/校准20ms。 */
     uint32_t app_imu_set_sample_period(uint32_t period_ms);
-    /* sensor任务控制器件休眠；唤醒后丢弃旧磁参考，重新从重力建立姿态。 */
+    /* 兼容器件完全休眠接口；唤醒只丢弃旧时间/磁参考，保留四元数。 */
     void app_imu_set_sleep(uint8_t sleeping);
     /* 校准命令、采集或校准记录保存尚未完成时返回1。 */
     uint8_t app_imu_is_calibrating(void);

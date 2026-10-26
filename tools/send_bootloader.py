@@ -7,8 +7,8 @@ import zlib
 
 
 def build_command(image):
-    if not 8 <= len(image) <= 0x78000:
-        raise ValueError("BIN must contain 8..491520 bytes")
+    if not 8 <= len(image) <= 0x58000:
+        raise ValueError("BIN must contain 8..360448 bytes")
     stack, reset = struct.unpack_from("<II", image)
     if not (0x20000000 < stack <= 0x20020000 and stack & 7 == 0 and
             reset & 1 and 0x08008008 <= (reset & ~1) < 0x08008000 + len(image)):

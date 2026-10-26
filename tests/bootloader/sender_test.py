@@ -51,7 +51,7 @@ class SenderTest(unittest.TestCase):
         self.assertEqual(b"".join(connection.writes[1:]), self.image)
 
     def test_invalid_file_is_rejected_before_start(self):
-        for image in [b"", b"x" * 8, b"x" * (0x78000 + 1), struct.pack("<II", 0x20020000, 0x08000339) + b"x" * 20]:
+        for image in [b"", b"x" * 8, b"x" * (0x58000 + 1), struct.pack("<II", 0x20020000, 0x08000339) + b"x" * 20]:
             connection = Connection(image)
             with self.assertRaises(ValueError):
                 sender.send_image(connection, image)

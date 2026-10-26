@@ -9,20 +9,20 @@
 #include "semphr.h"
 #include <string.h>
 
-#define APP_AHT21_TIMEOUT_MS 200U
+#define APP_AHT21_TIMEOUT_MS 200
 
 static SemaphoreHandle_t s_aht21_mux;
 static app_aht21_struct s_aht21_data;
-static uint32_t s_attempt_ms;
-static uint8_t s_pending;
+static uint32_t s_period_start_ms, s_conversion_ms;
+static uint8_t s_pending, s_sample_due;
 static uint8_t s_recover_needed, s_recovering;
 static uint32_t s_period_ms = APP_AHT21_PERIOD_MS;
 
 void app_aht21_set_period(uint32_t period_ms)
 {
     s_period_ms = period_ms;
-    s_attempt_ms = HAL_GetTick();
-    s_pending = 0;
+    s_period_start_ms = HAL_GetTick();
+    s_pending = s_sample_due = 0;
     if (s_recovering != 0)
     {
         s_recovering = 0;
@@ -48,14 +48,14 @@ void app_aht21_init(void)
     memset(&s_aht21_data, 0, sizeof(s_aht21_data));
     s_aht21_data.result = result;
     xSemaphoreGive(s_aht21_mux);
-    s_pending = 0;
+    s_pending = s_sample_due = 0;
     s_recover_needed = result != AHT21_OK;
     s_recovering = 0;
     s_period_ms = APP_AHT21_PERIOD_MS;
-    s_attempt_ms = HAL_GetTick();
+    s_period_start_ms = HAL_GetTick();
     if (s_recover_needed == 0)
     {
-        s_attempt_ms -= s_period_ms;
+        s_period_start_ms -= s_period_ms;
     }
 }
 
@@ -64,7 +64,7 @@ void app_aht21_service(void)
     aht21_struct sample;
     aht21_result result;
     uint32_t now = HAL_GetTick();
-    uint32_t elapsed = now - s_attempt_ms;
+    uint32_t elapsed = now - s_period_start_ms;
     uint32_t read_started;
     if (s_aht21_mux == NULL)
     {
@@ -79,11 +79,7 @@ void app_aht21_service(void)
         }
         s_recovering = 0;
         s_recover_needed = result != AHT21_OK;
-        s_attempt_ms = now;
-        if (result == AHT21_OK)
-        {
-            s_attempt_ms -= s_period_ms;
-        }
+        s_sample_due = result == AHT21_OK;
         app_diag_sensor_init(APP_DIAG_AHT, (uint32_t)result);
         xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
         s_aht21_data.result = result;
@@ -95,6 +91,7 @@ void app_aht21_service(void)
     {
         if (elapsed >= s_period_ms)
         {
+            s_period_start_ms += elapsed / s_period_ms * s_period_ms;
             aht21_recover_begin(now);
             s_recovering = 1;
         }
@@ -102,12 +99,20 @@ void app_aht21_service(void)
     }
     if (s_pending != 0)
     {
+        elapsed = now - s_conversion_ms;
         if (elapsed < AHT21_CONVERSION_MS)
         {
             return;
         }
         read_started = app_diag_clock_count();
-        result = aht21_read(&sample);
+        if (elapsed > APP_AHT21_TIMEOUT_MS)
+        {
+            result = AHT21_TIMEOUT; /* 跨窗口的旧转换不能读回后再标成当前采样。 */
+        }
+        else
+        {
+            result = aht21_read(&sample);
+        }
         if (result == AHT21_BUSY && elapsed < APP_AHT21_TIMEOUT_MS)
         {
             app_diag_sensor_record(APP_DIAG_AHT, APP_DIAG_NOT_READY, (uint32_t)result, read_started);
@@ -129,7 +134,6 @@ void app_aht21_service(void)
         if (result == AHT21_CALIBRATION_ERROR)
         {
             s_recover_needed = 1;
-            s_attempt_ms = HAL_GetTick();
         }
         xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
         s_aht21_data.measuring = 0;
@@ -143,15 +147,21 @@ void app_aht21_service(void)
         }
         xSemaphoreGive(s_aht21_mux);
     }
-    else if (elapsed >= s_period_ms)
+    else if (s_sample_due != 0 || elapsed >= s_period_ms)
     {
+        if (s_sample_due == 0)
+        {
+            /* 固定周期不跟随事务耗时后移；超期只测一次，不补跑旧采样。 */
+            s_period_start_ms += elapsed / s_period_ms * s_period_ms;
+        }
+        s_sample_due = 0;
         read_started = app_diag_clock_count();
         result = aht21_trigger();
         if (result != AHT21_OK)
         {
             app_diag_sensor_record(APP_DIAG_AHT, APP_DIAG_ERROR, (uint32_t)result, read_started);
         }
-        s_attempt_ms = HAL_GetTick();
+        s_conversion_ms = HAL_GetTick();
         s_pending = result == AHT21_OK;
         xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
         s_aht21_data.measuring = s_pending;

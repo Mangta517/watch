@@ -31,7 +31,7 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
     output_enabled = 1;
 }
 
-static void app_boot_watchdog_start(void)
+static void app_reset_init(void)
 {
     assert(step++ == 3 && output_enabled && output_high);
 }
@@ -59,6 +59,6 @@ int main(void)
 {
     boot_entry();
     assert(step == 7 && !button_pressed && output_high && output_enabled);
-    puts("PASS: PA3 output preset before HAL/clock initialization, short-press power hold.");
+    puts("PASS: PA3 power hold and reset capture precede HAL/clock initialization.");
     return 0;
 }

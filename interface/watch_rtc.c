@@ -1,8 +1,8 @@
 #include "watch_rtc.h"
 #include <stddef.h>
 
-#define WATCH_RTC_INITIALIZED 0x52544330U
-#define WATCH_RTC_SYNCED      0x52544331U
+#define WATCH_RTC_INITIALIZED 0x52544330
+#define WATCH_RTC_SYNCED      0x52544331
 
 static RTC_HandleTypeDef watch_rtc;
 static uint8_t rtc_ready;
@@ -76,7 +76,7 @@ HAL_StatusTypeDef watch_rtc_init(void)
     watch_rtc.Instance = RTC;
     watch_rtc.Init.HourFormat = RTC_HOURFORMAT_24;
     watch_rtc.Init.AsynchPrediv = 0;
-    watch_rtc.Init.SynchPrediv = WATCH_RTC_SUBSECOND_HZ - 1U;
+    watch_rtc.Init.SynchPrediv = WATCH_RTC_SUBSECOND_HZ - 1;
     watch_rtc.Init.OutPut = RTC_OUTPUT_DISABLE;
     watch_rtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
     watch_rtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
@@ -86,13 +86,13 @@ HAL_StatusTypeDef watch_rtc_init(void)
         return status;
     }
     /* HAL_RTC_Init会跳过已初始化的备份域；升级旧固件时只迁移分频，保留日期/时间/备份标记。 */
-    if (RTC->PRER != WATCH_RTC_SUBSECOND_HZ - 1U)
+    if (RTC->PRER != WATCH_RTC_SUBSECOND_HZ - 1)
     {
         __HAL_RTC_WRITEPROTECTION_DISABLE(&watch_rtc);
         status = RTC_EnterInitMode(&watch_rtc);
         if (status == HAL_OK)
         {
-            RTC->PRER = WATCH_RTC_SUBSECOND_HZ - 1U;
+            RTC->PRER = WATCH_RTC_SUBSECOND_HZ - 1;
             status = RTC_ExitInitMode(&watch_rtc);
         }
         __HAL_RTC_WRITEPROTECTION_ENABLE(&watch_rtc);
@@ -127,13 +127,13 @@ HAL_StatusTypeDef watch_rtc_init(void)
     return HAL_OK;
 }
 
-HAL_StatusTypeDef watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t seconds)
+uint8_t watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t seconds)
 {
     RTC_TimeTypeDef time = {0};
     HAL_StatusTypeDef status;
     if (!rtc_ready || hours > 23 || minutes > 59 || seconds > 59)
     {
-        return HAL_ERROR;
+        return 1;
     }
     time.Hours = hours;
     time.Minutes = minutes;
@@ -145,7 +145,7 @@ HAL_StatusTypeDef watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t sec
     {
         HAL_RTCEx_BKUPWrite(&watch_rtc, RTC_BKP_DR0, WATCH_RTC_SYNCED);
     }
-    return status;
+    return status != HAL_OK;
 }
 
 HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time)
@@ -153,7 +153,8 @@ HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time)
     RTC_TimeTypeDef rtc_time = {0};
     RTC_DateTypeDef date = {0};
     HAL_StatusTypeDef status;
-    if (!rtc_ready || time == NULL)
+    /* HAL读取寄存器不会检查LSE，停振时不得把冻结的时间当作有效值。 */
+    if (!rtc_ready || time == NULL || __HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) == 0)
     {
         return HAL_ERROR;
     }
@@ -168,6 +169,10 @@ HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time)
     {
         return status;
     }
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) == 0)
+    {
+        return HAL_ERROR;
+    }
     time->hours = rtc_time.Hours;
     time->minutes = rtc_time.Minutes;
     time->seconds = rtc_time.Seconds;
@@ -177,6 +182,18 @@ HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time)
 uint8_t watch_rtc_is_synced(void)
 {
     return rtc_ready && HAL_RTCEx_BKUPRead(&watch_rtc, RTC_BKP_DR0) == WATCH_RTC_SYNCED;
+}
+
+void watch_rtc_get_status(watch_rtc_status_struct *status)
+{
+    status->time.hours = 0;
+    status->time.minutes = 0;
+    status->time.seconds = 0;
+    status->marker = RTC->BKP0R;
+    status->ready = rtc_ready;
+    status->lse_ready = __HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) != 0;
+    status->synced = rtc_ready && status->marker == WATCH_RTC_SYNCED;
+    status->read_status = watch_rtc_get_time(&status->time);
 }
 
 uint32_t watch_rtc_get_subsecond(void)
@@ -196,5 +213,5 @@ uint32_t watch_rtc_get_subsecond(void)
     {
         return UINT32_MAX;
     }
-    return WATCH_RTC_SUBSECOND_HZ - 1U - time.SubSeconds;
+    return WATCH_RTC_SUBSECOND_HZ - 1 - time.SubSeconds;
 }

@@ -19,7 +19,7 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data);
 /**********************
  *  STATIC VARIABLES
  **********************/
-lv_indev_t *indev_touchpad;
+static lv_indev_t *indev_touchpad;
 
 /**********************
  *   GLOBAL FUNCTIONS

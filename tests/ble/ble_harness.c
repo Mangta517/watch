@@ -33,6 +33,21 @@ static char current_ble[3], current_spp[3];
 static char pending[256];
 static size_t pending_pos, pending_size;
 static const char *custom_reply;
+#if !defined(F411_BOOTLOADER)
+static uint32_t uart_irq_priority;
+static uint8_t rx_callback_registered;
+
+static void rx_callback(void)
+{
+    assert(uart_irq_priority == 12);
+}
+
+void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority)
+{
+    assert(irq == USART1_IRQn && priority == 12 && subpriority == 0);
+    uart_irq_priority = priority;
+}
+#endif
 
 static void inject(uint8_t byte)
 {
@@ -121,6 +136,12 @@ HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *uart, uint8_t *data, u
 {
     assert(uart == &huart1 && size == 1);
     assert(uart_clock_enabled != 0);
+#if !defined(F411_BOOTLOADER)
+    if (rx_callback_registered != 0)
+    {
+        assert(uart_irq_priority == 12);
+    }
+#endif
     if (fail_rx)
     {
         return HAL_ERROR;
@@ -142,6 +163,9 @@ HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *uart)
 HAL_StatusTypeDef HAL_UART_Init(UART_HandleTypeDef *uart)
 {
     assert(uart == &huart1 && uart_clock_enabled == 0);
+#if !defined(F411_BOOTLOADER)
+    uart_irq_priority = 0; /* 与真实MSP相同，重新初始化会恢复优先级0。 */
+#endif
     uart_clock_enabled = 1;
     ++uart_starts;
     return HAL_OK;
@@ -207,19 +231,19 @@ static void async_tx_tests(void)
     async_start_result = HAL_ERROR;
     assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_ERROR);
     async_start_result = HAL_OK;
-    tick = UINT32_MAX - 5U;
+    tick = UINT32_MAX - 5;
     assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_OK);
     for (unsigned i = 0; i < 10; ++i)
     {
         advance();
     }
     assert(kt6368a_take_tx_result(&result) && result == HAL_TIMEOUT);
-    assert(tx_target == NULL && tx_aborts == aborts + 1U && rx_armed && mask == 0);
+    assert(tx_target == NULL && tx_aborts == aborts + 1 && rx_armed && mask == 0);
     HAL_UART_TxCpltCallback(&huart1);
     assert(!kt6368a_take_tx_result(&result));
     assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_OK);
     kt6368a_power_off();
-    assert(tx_target == NULL && !rx_armed && tx_aborts == aborts + 2U);
+    assert(tx_target == NULL && !rx_armed && tx_aborts == aborts + 2);
     assert(kt6368a_take_tx_result(&result) && result == HAL_ERROR);
     assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_BUSY);
     assert(kt6368a_power_on() == HAL_OK);
@@ -246,7 +270,7 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data, uin
     }
     memcpy(command, data, size);
     command[size] = '\0';
-    if (size >= 6U && strncmp(command, "AT+T", 4) == 0)
+    if (size >= 6 && strncmp(command, "AT+T", 4) == 0)
     {
         ++query_count;
         if (drop_queries != 0)
@@ -294,21 +318,51 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data, uin
         writes++;
         if (!reject_setting)
         {
-            char *value = command[4] == 'D' ? saved_name : saved_ble_name;
-            memcpy(value, command + 5, size - 7U);
-            value[size - 7U] = '\0';
+            char *value;
+            if (command[4] == 'D')
+            {
+                value = saved_name;
+            }
+            else
+            {
+                value = saved_ble_name;
+            }
+            memcpy(value, command + 5, size - 7);
+            value[size - 7] = '\0';
         }
-        reply(reject_setting ? "ER+4\r\n" : "OK\r\n");
+        if (reject_setting)
+        {
+            reply("ER+4\r\n");
+        }
+        else
+        {
+            reply("OK\r\n");
+        }
     }
     else if (strncmp(command, "AT+B4", 5) == 0 || strncmp(command, "AT+B5", 5) == 0)
     {
         writes++;
         if (!reject_setting)
         {
-            char *value = command[4] == '4' ? saved_ble : saved_spp;
+            char *value;
+            if (command[4] == '4')
+            {
+                value = saved_ble;
+            }
+            else
+            {
+                value = saved_spp;
+            }
             memcpy(value, command + 5, 2);
         }
-        reply(reject_setting ? "ER+4\r\n" : "OK\r\n");
+        if (reject_setting)
+        {
+            reply("ER+4\r\n");
+        }
+        else
+        {
+            reply("OK\r\n");
+        }
     }
     else
     {
@@ -328,7 +382,7 @@ static HAL_StatusTypeDef run_staged_startup(void)
     {
         uint32_t before = tick;
         status = kt6368a_init_service();
-        assert((uint32_t)(tick - before) < 10U);
+        assert((uint32_t)(tick - before) < 10);
         for (unsigned j = 0; j < 5; ++j)
         {
             advance();
@@ -348,7 +402,7 @@ static void staged_startup_tests(void)
     strcpy(saved_spp, TEST_INITIAL_SPP);
     old_writes = writes;
     old_boots = boots;
-    tick = UINT32_MAX - 500U;
+    tick = UINT32_MAX - 500;
     assert(run_staged_startup() == HAL_OK);
     assert(writes == old_writes + 3 && boots == old_boots + 2);
     assert(strcmp(current_ble_name, KT6368A_BLE_NAME) == 0);
@@ -360,13 +414,13 @@ static void staged_startup_tests(void)
     query_count = 0;
     drop_queries = 1;
     old_boots = boots;
-    assert(run_staged_startup() == HAL_OK && query_count == 4U && boots == old_boots + 1);
+    assert(run_staged_startup() == HAL_OK && query_count == 4 && boots == old_boots + 1);
     query_count = 0;
     query_uart_error = 1;
-    assert(run_staged_startup() == HAL_OK && query_count == 4U);
+    assert(run_staged_startup() == HAL_OK && query_count == 4);
     silent = 1;
     query_count = 0;
-    assert(run_staged_startup() == HAL_TIMEOUT && query_count == 3U);
+    assert(run_staged_startup() == HAL_TIMEOUT && query_count == 3);
     silent = 0;
     fail_tx = 1;
     assert(run_staged_startup() == HAL_ERROR);
@@ -382,7 +436,7 @@ static void staged_startup_tests(void)
     puts("PASS: staged Bluetooth boot/config/reboot, pending TX gate, wrap, no HAL_Delay, failures and recovery");
 }
 
-static void screen_power_tests(void)
+static void explicit_power_tests(void)
 {
     uint32_t before, delays = delay_calls;
     unsigned stops = uart_stops;
@@ -392,37 +446,37 @@ static void screen_power_tests(void)
     assert(kt6368a_write_async(frame, sizeof(frame), 100) == HAL_OK);
     kt6368a_set_enabled(0);
     assert(!powered && !rx_armed && tx_target == NULL && !uart_clock_enabled);
-    assert(uart_stops == stops + 1U && uart_gpio_mode == GPIO_MODE_ANALOG && !kt6368a_init_is_pending());
+    assert(uart_stops == stops + 1 && uart_gpio_mode == GPIO_MODE_ANALOG && !kt6368a_init_is_pending());
     assert(kt6368a_take_tx_result(&result) && result == HAL_ERROR);
     old_boots = boots;
-    tick += 5000U;
+    tick += 5000;
     assert(kt6368a_init_service() == HAL_ERROR && boots == old_boots && !powered);
     kt6368a_set_enabled(1);
     assert(kt6368a_init_is_pending() && !powered);
-    tick += 20U;
+    tick += 20;
     assert(kt6368a_init_service() == HAL_BUSY && powered && uart_clock_enabled && rx_armed);
     /* 上电等待中再次熄屏：取消启动，后续service不得拉起模块。 */
     kt6368a_set_enabled(0);
     old_boots = boots;
-    tick += 2000U;
+    tick += 2000;
     (void)kt6368a_init_service();
     assert(!powered && !uart_clock_enabled && !rx_armed && boots == old_boots);
-    tick = UINT32_MAX - 600U;
+    tick = UINT32_MAX - 600;
     before = tick;
     kt6368a_set_enabled(1);
-    for (unsigned i = 0; i < 1200U && kt6368a_init_is_pending(); ++i)
+    for (unsigned i = 0; i < 1200 && kt6368a_init_is_pending(); ++i)
     {
         (void)kt6368a_init_service();
-        for (unsigned j = 0; j < 5U; ++j)
+        for (unsigned j = 0; j < 5; ++j)
         {
             advance();
         }
     }
     assert(kt6368a_get_init_status() == HAL_OK && !kt6368a_init_is_pending());
-    assert((uint32_t)(tick - before) >= 1200U && powered && rx_armed && uart_clock_enabled);
-    assert(delay_calls == delays && uart_starts != 0U);
+    assert((uint32_t)(tick - before) >= 1200 && powered && rx_armed && uart_clock_enabled);
+    assert(delay_calls == delays && uart_starts != 0);
     assert(kt6368a_write((const uint8_t *)"hello", 5, 10) == HAL_OK);
-    puts("PASS: screen off cuts power/UART/GPIO, aborts TX, cancels startup; wake restores UART/RX nonblocking across tick wrap.");
+    puts("PASS: explicit disable cuts power/UART/GPIO, aborts TX and cancels startup; enable restores UART/RX nonblocking across tick wrap.");
 }
 
 int main(void)
@@ -432,6 +486,19 @@ int main(void)
     int before, i;
     uint32_t errors;
 
+#if !defined(F411_BOOTLOADER)
+    /* 首次CubeMX已初始化与SPORT恢复后重新初始化，都须在接收前改好优先级。 */
+    rx_callback_registered = 1;
+    kt6368a_set_rx_callback(rx_callback);
+    assert(kt6368a_power_on() == HAL_OK && uart_irq_priority == 12 && uart_starts == 0);
+    kt6368a_power_off();
+    assert(kt6368a_power_on() == HAL_OK && uart_irq_priority == 12 && uart_starts == 1);
+    kt6368a_power_off();
+    kt6368a_set_rx_callback(NULL);
+    rx_callback_registered = 0;
+    boots = 0;
+    puts("PASS: UART RX callback priority is 12 before first reception and after MSP reinitialization.");
+#endif
     assert(kt6368a_get_init_status() == HAL_ERROR);
     /* 从相反SPP配置迁移到当前APP/升级模式，重新上电后生效，SPP名称保持不变。 */
     assert(kt6368a_init() == HAL_OK);
@@ -532,7 +599,7 @@ int main(void)
     fail_rx = 1;
     assert(kt6368a_power_on() == HAL_ERROR && !powered);
     fail_rx = 0;
-    tick = UINT32_MAX - 600U;
+    tick = UINT32_MAX - 600;
     assert(kt6368a_power_on() == HAL_OK); /* HAL tick回绕不影响启动判断 */
     assert(!kt6368a_is_connected());
     connected = 1;
@@ -543,6 +610,6 @@ int main(void)
     assert(kt6368a_get_init_status() == HAL_TIMEOUT);
     puts("KT6368A: config persistence, RX wrap/overflow, UART error recovery, AT framing/timeouts, power gating and absence of status GPIO checks passed.");
     staged_startup_tests();
-    screen_power_tests();
+    explicit_power_tests();
     return 0;
 }

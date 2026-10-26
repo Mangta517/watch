@@ -7,8 +7,8 @@
 #include "lvgl.h"
 #include <string.h>
 
-#define APP_DIAG_MAX_TASKS 8U
-#define APP_DIAG_FRAME_MS 100U
+#define APP_DIAG_MAX_TASKS 8
+#define APP_DIAG_FRAME_MS  100
 
 typedef struct
 {
@@ -72,11 +72,11 @@ void app_diag_clock_init(void)
     uint8_t i;
     if ((RCC->CFGR & RCC_CFGR_PPRE1) != 0)
     {
-        timer_hz *= 2U;
+        timer_hz *= 2;
     }
     __HAL_RCC_TIM2_CLK_ENABLE();
     TIM2->CR1 = 0;
-    TIM2->PSC = timer_hz / 10000U - 1U;
+    TIM2->PSC = timer_hz / 10000 - 1;
     TIM2->ARR = UINT32_MAX;
     TIM2->EGR = TIM_EGR_UG;
     TIM2->SR = 0;
@@ -133,7 +133,7 @@ void app_diag_task_begin(uint8_t id)
     taskENTER_CRITICAL();
     if (stats->have_start != 0)
     {
-        period = (now - stats->started) * 100U;
+        period = (now - stats->started) * 100;
         stats->period_last = period;
         if (stats->period_min == 0 || period < stats->period_min)
         {
@@ -152,7 +152,7 @@ void app_diag_task_begin(uint8_t id)
 void app_diag_task_end(uint8_t id, uint32_t target_ms)
 {
     app_diag_task_struct *stats = &s_tasks[id];
-    uint32_t work = (app_diag_clock_count() - stats->started) * 100U;
+    uint32_t work = (app_diag_clock_count() - stats->started) * 100;
     taskENTER_CRITICAL();
     stats->work_last = work;
     stats->target_ms = target_ms;
@@ -160,7 +160,7 @@ void app_diag_task_end(uint8_t id, uint32_t target_ms)
     {
         stats->work_max = work;
     }
-    if (work > target_ms * 1000U)
+    if (work > target_ms * 1000)
     {
         ++stats->overruns;
     }
@@ -179,11 +179,11 @@ void app_diag_sensor_recovery(uint8_t id, uint8_t state)
 {
     app_diag_sensor_struct *stats = &s_sensors[id];
     taskENTER_CRITICAL();
-    if (state == 2U && stats->recovery_state != 2U)
+    if (state == 2 && stats->recovery_state != 2)
     {
         ++stats->recovery_attempts;
     }
-    if (stats->recovery_state == 2U && state != 2U)
+    if (stats->recovery_state == 2 && state != 2)
     {
         stats->init_result = state;
     }
@@ -195,7 +195,7 @@ void app_diag_sensor_record(uint8_t id, uint8_t outcome, uint32_t result, uint32
 {
     app_diag_sensor_struct *stats = &s_sensors[id];
     uint32_t now_ms = HAL_GetTick();
-    uint32_t work_us = (app_diag_clock_count() - started) * 100U;
+    uint32_t work_us = (app_diag_clock_count() - started) * 100;
     taskENTER_CRITICAL();
     stats->result = result;
     stats->work_last_us = work_us;
@@ -292,7 +292,7 @@ void app_diag_receive(const uint8_t *data, uint16_t size)
             }
             app_diag_reset_receive();
         }
-        else if (s_rx_length < sizeof(s_rx_command) - 1U)
+        else if (s_rx_length < sizeof(s_rx_command) - 1)
         {
             s_rx_command[s_rx_length++] = (char)data[i];
         }
@@ -341,11 +341,11 @@ static void diag_snapshot(void)
         words[1] = s_task_status[i].eCurrentState;
         if (id == 0)
         {
-            words[2] = 1024U * sizeof(StackType_t);
+            words[2] = 1024 * sizeof(StackType_t);
         }
         else if (id == 1)
         {
-            words[2] = 512U * sizeof(StackType_t);
+            words[2] = 512 * sizeof(StackType_t);
         }
         else if (id == 2)
         {
@@ -360,7 +360,7 @@ static void diag_snapshot(void)
         s_previous_runtime[id] = s_task_status[i].ulRunTimeCounter;
         if (delta != 0)
         {
-            words[4] = (uint32_t)((uint64_t)runtime * 1000U / delta);
+            words[4] = (uint32_t)((uint64_t)runtime * 1000 / delta);
         }
         if (id < APP_DIAG_TASK_COUNT)
         {
@@ -418,7 +418,7 @@ static void diag_snapshot(void)
     s_system_words[9] = s_tx_ok;
     s_system_words[10] = s_tx_failed;
     s_system_words[11] = s_task_count;
-    s_system_words[12] = 100U;
+    s_system_words[12] = 100;
     s_system_words[13] = APP_DIAG_FRAME_MS;
     s_system_words[14] = s_enabled;
     s_system_words[15] = total;
@@ -431,7 +431,7 @@ static void diag_snapshot(void)
 
 static uint16_t diag_crc16(const uint8_t *data, uint16_t size)
 {
-    uint16_t crc = 0xFFFFU;
+    uint16_t crc = 0xFFFF;
     uint16_t i;
     uint8_t bit;
     for (i = 0; i < size; ++i)
@@ -439,9 +439,9 @@ static uint16_t diag_crc16(const uint8_t *data, uint16_t size)
         crc ^= (uint16_t)data[i] << 8;
         for (bit = 0; bit < 8; ++bit)
         {
-            if ((crc & 0x8000U) != 0)
+            if ((crc & 0x8000) != 0)
             {
-                crc = (uint16_t)((crc << 1) ^ 0x1021U);
+                crc = (uint16_t)((crc << 1) ^ 0x1021);
             }
             else
             {
@@ -513,14 +513,14 @@ void app_diag_service(void)
         words = s_system_words;
         count = 16;
     }
-    else if (s_row == s_task_count + APP_DIAG_SENSOR_COUNT + 1U)
+    else if (s_row == s_task_count + APP_DIAG_SENSOR_COUNT + 1)
     {
         frame[4] = 4;
         id = 0;
         words = s_boot_words;
         count = APP_BOOT_FIELD_COUNT;
     }
-    else if (s_row == s_task_count + APP_DIAG_SENSOR_COUNT + 2U)
+    else if (s_row == s_task_count + APP_DIAG_SENSOR_COUNT + 2)
     {
         frame[4] = 5;
         id = 0;
@@ -540,13 +540,13 @@ void app_diag_service(void)
     diag_put_u32(frame + 8, s_snapshot_ms);
     for (i = 0; i < count; ++i)
     {
-        diag_put_u32(frame + 12U + i * 4U, words[i]);
+        diag_put_u32(frame + 12 + i * 4, words[i]);
     }
-    size = 12U + count * 4U;
+    size = 12 + count * 4;
     crc = diag_crc16(frame, size);
     frame[size++] = (uint8_t)crc;
     frame[size++] = (uint8_t)(crc >> 8);
-    status = kt6368a_write_async(frame, size, 10U);
+    status = kt6368a_write_async(frame, size, 10);
     if (status == HAL_BUSY)
     {
         return; /* 保留本行和序号，下轮重试。 */
@@ -562,7 +562,7 @@ void app_diag_service(void)
     s_last_send_ms = now;
     ++s_sequence;
     ++s_row;
-    if (s_row >= s_task_count + APP_DIAG_SENSOR_COUNT + 4U)
+    if (s_row >= s_task_count + APP_DIAG_SENSOR_COUNT + 4)
     {
         s_row = 0;
         s_snapshot_ready = 0;

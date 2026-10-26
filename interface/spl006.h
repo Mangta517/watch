@@ -24,8 +24,8 @@ extern "C"
 #include <stdint.h>
 
 /* ------------------------------------------------------------ 器件 I2C 地址 */
-#define SPL006_SAMPLE_MAX_AGE_MS 3000U /* 当前1Hz配置允许三个采样周期；改变ODR时同步调整。 */
-#define SPL006_ADDR 0x76 /* 7 位地址: 本板 SDO 接地 */
+#define SPL006_SAMPLE_MAX_AGE_MS 3000 /* 当前1Hz配置允许三个采样周期；改变ODR时同步调整。 */
+#define SPL006_ADDR              0x76 /* 7 位地址: 本板 SDO 接地 */
 
 /* ------------------------------------------------------------ 寄存器映射 */
 #define SPL06_PRS_B2   0x00 /* 压力数据高字节 (23:16) */
@@ -95,6 +95,7 @@ extern "C"
  * (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR); 内含 HAL_Delay, 由
  *  sensor任务启动时调用一次，不能在ISR或UI任务调用) */
     uint8_t spl006_init(void);
+    /* standby暂停恢复及超时计时；唤醒保留跨环境窗口的未就绪和通信故障累计。 */
     uint8_t spl006_set_sleep(uint8_t sleeping);
     /* sensor每拍调用：0=就绪，1=失败冷却，2=推进中；每次至多一笔I2C事务。 */
     void spl006_recover_begin(void);

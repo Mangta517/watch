@@ -16,3 +16,12 @@ with tempfile.TemporaryDirectory(prefix="watch-ble-") as out:
         "interface/kt6368a.c", "-o", exe,
     ], cwd=root, check=True)
     subprocess.run([exe], cwd=root, check=True)
+    sleep_exe = str(Path(out) / "rx-sleep.exe")
+    subprocess.run([
+        gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-flto", "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections",
+        "-Itests/ble/host", "-Itests/startup/host", "-Iapplication", "-Iinterface", "-Icommon",
+        "-IMiddlewares/LVGL/lvgl/examples/porting",
+        "tests/ble/rx_sleep_harness.c", "-o", sleep_exe,
+    ], cwd=root, check=True)
+    subprocess.run([sleep_exe], cwd=root, check=True)

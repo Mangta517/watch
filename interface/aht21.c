@@ -8,15 +8,17 @@
 #include "task.h"
 #include <stddef.h>
 
-#define AHT21_STATUS_BUSY       0x80U
-#define AHT21_STATUS_CALIBRATED 0x08U
+#define AHT21_STATUS_BUSY       0x80
+#define AHT21_STATUS_CALIBRATED 0x08
+/* 熄屏每100ms才推进一拍，五个恢复阶段及调度余量须落在1.6s环境窗口内。 */
+#define AHT21_RECOVERY_TIMEOUT_MS 1000
 
 static void aht21_delay_ms(uint32_t ms)
 {
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
         /* 多等一拍，避免tick边界缩短硬件最小等待；等待期间让出CPU。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
     }
     else
     {
@@ -33,7 +35,7 @@ static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
         return AHT21_I2C_ERROR;
     }
     my_i2c_start(MY_I2C_BUS_SENSOR);
-    my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)((AHT21_ADDR << 1) | 1U));
+    my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)((AHT21_ADDR << 1) | 1));
     if (my_i2c_wait_ack(MY_I2C_BUS_SENSOR) != 0)
     {
         my_i2c_stop(MY_I2C_BUS_SENSOR);
@@ -41,13 +43,13 @@ static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
     }
     for (i = 0; i < size; ++i)
     {
-        if (i == size - 1U)
+        if (i == size - 1)
         {
-            data[i] = my_i2c_read_byte(MY_I2C_BUS_SENSOR, 1U);
+            data[i] = my_i2c_read_byte(MY_I2C_BUS_SENSOR, 1);
         }
         else
         {
-            data[i] = my_i2c_read_byte(MY_I2C_BUS_SENSOR, 0U);
+            data[i] = my_i2c_read_byte(MY_I2C_BUS_SENSOR, 0);
         }
     }
     my_i2c_stop(MY_I2C_BUS_SENSOR);
@@ -56,16 +58,16 @@ static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
 
 static uint8_t aht21_crc8(const uint8_t *data)
 {
-    uint8_t crc = 0xFFU;
+    uint8_t crc = 0xFF;
     uint8_t i, bit;
-    for (i = 0; i < 6U; ++i)
+    for (i = 0; i < 6; ++i)
     {
         crc ^= data[i];
-        for (bit = 0; bit < 8U; ++bit)
+        for (bit = 0; bit < 8; ++bit)
         {
-            if ((crc & 0x80U) != 0)
+            if ((crc & 0x80) != 0)
             {
-                crc = (uint8_t)((crc << 1) ^ 0x31U);
+                crc = (uint8_t)((crc << 1) ^ 0x31);
             }
             else
             {
@@ -78,9 +80,9 @@ static uint8_t aht21_crc8(const uint8_t *data)
 
 aht21_result aht21_init(void)
 {
-    static const uint8_t config[2] = {0x08U, 0x00U};
+    static const uint8_t config[2] = {0x08, 0x00};
     uint8_t status;
-    aht21_delay_ms(40U);
+    aht21_delay_ms(40);
     if (aht21_read_bytes(&status, 1) != AHT21_OK)
     {
         return AHT21_I2C_ERROR;
@@ -91,11 +93,11 @@ aht21_result aht21_init(void)
     }
     if ((status & AHT21_STATUS_CALIBRATED) == 0)
     {
-        if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, AHT21_ADDR, 0xBEU, config, sizeof(config)) != 0)
+        if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, AHT21_ADDR, 0xBE, config, sizeof(config)) != 0)
         {
             return AHT21_I2C_ERROR;
         }
-        aht21_delay_ms(10U);
+        aht21_delay_ms(10);
         if (aht21_read_bytes(&status, 1) != AHT21_OK)
         {
             return AHT21_I2C_ERROR;
@@ -137,20 +139,20 @@ void aht21_recover_begin(uint32_t now_ms)
 
 aht21_result aht21_recover_step(uint32_t now_ms)
 {
-    static const uint8_t config[2] = {0x08U, 0x00U};
+    static const uint8_t config[2] = {0x08, 0x00};
     uint8_t status;
     aht21_result result;
     if (aht_recovery.phase == AHT_RECOVER_DONE)
     {
         return aht_recovery.result;
     }
-    if ((uint32_t)(now_ms - aht_recovery.started_ms) >= 200U)
+    if ((uint32_t)(now_ms - aht_recovery.started_ms) >= AHT21_RECOVERY_TIMEOUT_MS)
     {
         result = AHT21_TIMEOUT;
     }
     else if (aht_recovery.phase == AHT_RECOVER_WAIT_POWER)
     {
-        if ((uint32_t)(now_ms - aht_recovery.phase_ms) >= 40U)
+        if ((uint32_t)(now_ms - aht_recovery.phase_ms) >= 40)
         {
             aht_recovery.phase = AHT_RECOVER_STATUS;
         }
@@ -158,7 +160,7 @@ aht21_result aht21_recover_step(uint32_t now_ms)
     }
     else if (aht_recovery.phase == AHT_RECOVER_CONFIG)
     {
-        if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, AHT21_ADDR, 0xBEU, config, sizeof(config)) != 0)
+        if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, AHT21_ADDR, 0xBE, config, sizeof(config)) != 0)
         {
             result = AHT21_I2C_ERROR;
         }
@@ -171,7 +173,7 @@ aht21_result aht21_recover_step(uint32_t now_ms)
     }
     else if (aht_recovery.phase == AHT_RECOVER_VERIFY_WAIT)
     {
-        if ((uint32_t)(now_ms - aht_recovery.phase_ms) >= 10U)
+        if ((uint32_t)(now_ms - aht_recovery.phase_ms) >= 10)
         {
             aht_recovery.phase = AHT_RECOVER_VERIFY;
         }
@@ -204,8 +206,8 @@ aht21_result aht21_recover_step(uint32_t now_ms)
 
 aht21_result aht21_trigger(void)
 {
-    static const uint8_t params[2] = {0x33U, 0x00U};
-    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, AHT21_ADDR, 0xACU, params, sizeof(params)) != 0)
+    static const uint8_t params[2] = {0x33, 0x00};
+    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, AHT21_ADDR, 0xAC, params, sizeof(params)) != 0)
     {
         return AHT21_I2C_ERROR;
     }
@@ -236,7 +238,7 @@ aht21_result aht21_read(aht21_struct *sample)
         return AHT21_CALIBRATION_ERROR;
     }
     sample->humidity_raw = ((uint32_t)data[1] << 12) | ((uint32_t)data[2] << 4) | ((uint32_t)data[3] >> 4);
-    sample->temperature_raw = ((uint32_t)(data[3] & 0x0FU) << 16) | ((uint32_t)data[4] << 8) | (uint32_t)data[5];
+    sample->temperature_raw = ((uint32_t)(data[3] & 0x0F) << 16) | ((uint32_t)data[4] << 8) | (uint32_t)data[5];
     sample->humidity_rh = (float)sample->humidity_raw * 100.0f / 1048576.0f;
     sample->temperature_c = (float)sample->temperature_raw * 200.0f / 1048576.0f - 50.0f;
     sample->status = data[0];

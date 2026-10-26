@@ -5,12 +5,14 @@
  */
 #include "bl24c02.h"
 #include "my_i2c.h"
+#ifndef F411_BOOTLOADER
 #include "FreeRTOS.h"
 #include "task.h"
+#endif
 #include "main.h"
 #include <stddef.h>
 
-#define BL24C02_READY_TIMEOUT_MS 10U
+#define BL24C02_READY_TIMEOUT_MS 10
 
 static bl24c02_error s_error;
 static uint16_t s_address;
@@ -129,6 +131,17 @@ bl24c02_error bl24c02_get_error(uint16_t *address)
 
 static uint8_t bl24c02_wait_ready(void)
 {
+#ifdef F411_BOOTLOADER
+    uint32_t start = HAL_GetTick();
+    while (my_i2c_probe(MY_I2C_BUS_EEPROM, BL24C02_ADDR) != 0)
+    {
+        if ((uint32_t)(HAL_GetTick() - start) >= BL24C02_READY_TIMEOUT_MS)
+        {
+            return 1;
+        }
+        HAL_Delay(1);
+    }
+#else
     TickType_t start = xTaskGetTickCount();
     while (my_i2c_probe(MY_I2C_BUS_EEPROM, BL24C02_ADDR) != 0)
     {
@@ -138,6 +151,7 @@ static uint8_t bl24c02_wait_ready(void)
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
+#endif
     return 0;
 }
 

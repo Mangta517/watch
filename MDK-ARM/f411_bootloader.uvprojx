@@ -585,6 +585,16 @@
               <FileType>1</FileType>
               <FilePath>../interface/int_bootloader.c</FilePath>
             </File>
+            <File>
+              <FileName>bl24c02.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../interface/bl24c02.c</FilePath>
+            </File>
+            <File>
+              <FileName>my_i2c.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../common/my_i2c.c</FilePath>
+            </File>
           </Files>
         </Group>
       </Groups>

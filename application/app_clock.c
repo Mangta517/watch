@@ -53,7 +53,7 @@ static void app_clock_finish(void)
         else
         {
             ++parser.received_count; /* 合法手机消息确认通信已建立，RTC写入失败也计入。 */
-            if (watch_rtc_set_time(value[0], value[1], value[2]) == HAL_OK)
+            if (watch_rtc_set_time(value[0], value[1], value[2]) == 0)
             {
                 parser.result = APP_CLOCK_SYNCED;
             }

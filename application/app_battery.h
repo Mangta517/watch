@@ -7,9 +7,9 @@
 
 #include "main.h"
 
-#define APP_BATTERY_PERIOD_MS 1000U
+#define APP_BATTERY_PERIOD_MS 1000
 /* PA1 的 1M/1M 分压为1:2；参考电压使用3V3标称值，上板后可按实测VDDA校准。 */
-#define APP_BATTERY_VREF_MV 3300U
+#define APP_BATTERY_VREF_MV 3300
 
 typedef struct
 {

@@ -18,14 +18,14 @@ static uint8_t command_overflow;
 
 static void app_bootloader_message(const char *message)
 {
-    (void)kt6368a_write((const uint8_t *)message, (uint16_t)strlen(message), 1000U);
+    (void)kt6368a_write((const uint8_t *)message, (uint16_t)strlen(message), 1000);
 }
 
 static void app_bootloader_fail(void)
 {
     int_bootloader_stop();
     app_bootloader_message("app rec error,system reset; reconnect and send start again\n");
-    HAL_Delay(500U); /* 失败路径同样先给模块发送回执，再复位断开连接。 */
+    HAL_Delay(500); /* 失败路径同样先给模块发送回执，再复位断开连接。 */
     NVIC_SystemReset();
 }
 
@@ -50,7 +50,7 @@ static void app_bootloader_parse_command(void)
     uint8_t valid = 1;
     char response[80];
 
-    if (command_overflow != 0U || command_length <= 6U || memcmp(command, "start:", 6) != 0)
+    if (command_overflow != 0 || command_length <= 6 || memcmp(command, "start:", 6) != 0)
     {
         valid = 0;
     }
@@ -62,17 +62,17 @@ static void app_bootloader_parse_command(void)
             {
                 break;
             }
-            if (command[i] < '0' || command[i] > '9' || length > (APP_MAX_SIZE - (uint32_t)(command[i] - '0')) / 10U)
+            if (command[i] < '0' || command[i] > '9' || length > (APP_MAX_SIZE - (uint32_t)(command[i] - '0')) / 10)
             {
                 valid = 0;
                 break;
             }
-            length = length * 10U + (uint32_t)(command[i] - '0');
+            length = length * 10 + (uint32_t)(command[i] - '0');
         }
-        if (valid != 0U && i < command_length)
+        if (valid != 0 && i < command_length)
         {
             /* CRC字段必须恰好8位十六进制，不能把残缺字段降级为旧协议。 */
-            if (i == 6U || command_length - i != 9U)
+            if (i == 6 || command_length - i != 9)
             {
                 valid = 0;
             }
@@ -103,7 +103,7 @@ static void app_bootloader_parse_command(void)
             }
         }
     }
-    if (valid != 0U && length >= 8U && length <= APP_MAX_SIZE)
+    if (valid != 0 && length >= 8 && length <= APP_MAX_SIZE)
     {
         uart1_rx_app_len = length;
         uart1_rx_app_crc = crc;
@@ -132,12 +132,12 @@ static void app_bootloader_run(void)
         command_errors = kt6368a_get_rx_errors();
         command_dropped = kt6368a_get_rx_dropped();
     }
-    while (budget-- != 0U && kt6368a_read(&byte, 1) != 0U)
+    while (budget-- != 0 && kt6368a_read(&byte, 1) != 0)
     {
         command_last_tick = HAL_GetTick();
         if (byte == '\r' || byte == '\n')
         {
-            if (command_length != 0U || command_overflow != 0U)
+            if (command_length != 0 || command_overflow != 0)
             {
                 app_bootloader_parse_command();
                 return;
@@ -153,7 +153,7 @@ static void app_bootloader_run(void)
         }
     }
     /* 保留F407的空闲结束命令用法，不强制主机添加换行。 */
-    if ((command_length != 0U || command_overflow != 0U) &&
+    if ((command_length != 0 || command_overflow != 0) &&
         (uint32_t)(HAL_GetTick() - command_last_tick) >= BOOTLOADER_RX_IDLE_MS)
     {
         app_bootloader_parse_command();
@@ -165,63 +165,63 @@ void app_bootloader_work(void)
     char response[48];
     switch (boot_state)
     {
-        case BOOTLOADER_STATE_DEFAULT:
-            app_bootloader_init();
+    case BOOTLOADER_STATE_DEFAULT:
+        app_bootloader_init();
+        break;
+    case BOOTLOADER_STATE_INIT:
+        app_bootloader_run();
+        break;
+    case BOOTLOADER_STATE_RUN:
+        /* 长度决定擦除范围；擦除结束前主机必须等待ready，不能提前发送BIN。 */
+        kt6368a_flush_rx();
+        if (int_bootloader_stop() != 0 || int_bootloader_erase(uart1_rx_app_len) != 0 ||
+            bootloader_start_dma(uart1_rx_app_len) != 0)
+        {
+            app_bootloader_fail();
             break;
-        case BOOTLOADER_STATE_INIT:
-            app_bootloader_run();
+        }
+        if (uart1_rx_crc_enabled != 0)
+        {
+            int_bootloader_expect_crc(uart1_rx_app_crc);
+        }
+        else
+        {
+            app_bootloader_message("Warning: legacy transfer without CRC\r\n");
+        }
+        boot_state = BOOTLOADER_STATE_REC_DATA;
+        app_bootloader_message("Flash erased, ready to receive data...\r\n");
+        break;
+    case BOOTLOADER_STATE_REC_DATA:
+        if (int_bootloader_process() != 0)
+        {
+            app_bootloader_fail();
+        }
+        else if (uart1_rx_full_len == uart1_rx_app_len && uart1_rx_idle != 0 &&
+                 (uint32_t)(HAL_GetTick() - uart1_rx_complete_tick) >= BOOTLOADER_COMPLETE_IDLE_MS)
+        {
+            boot_state = BOOTLOADER_STATE_CHECK_DATA;
+        }
+        break;
+    case BOOTLOADER_STATE_CHECK_DATA:
+        if (int_bootloader_finish() != 0)
+        {
+            app_bootloader_fail();
             break;
-        case BOOTLOADER_STATE_RUN:
-            /* 长度决定擦除范围；擦除结束前主机必须等待ready，不能提前发送BIN。 */
-            kt6368a_flush_rx();
-            if (int_bootloader_stop() != HAL_OK || int_bootloader_erase(uart1_rx_app_len) != HAL_OK ||
-                bootloader_start_dma(uart1_rx_app_len) != HAL_OK)
-            {
-                app_bootloader_fail();
-                break;
-            }
-            if (uart1_rx_crc_enabled != 0U)
-            {
-                int_bootloader_expect_crc(uart1_rx_app_crc);
-            }
-            else
-            {
-                app_bootloader_message("Warning: legacy transfer without CRC\r\n");
-            }
-            boot_state = BOOTLOADER_STATE_REC_DATA;
-            app_bootloader_message("Flash erased, ready to receive data...\r\n");
-            break;
-        case BOOTLOADER_STATE_REC_DATA:
-            if (int_bootloader_process() != HAL_OK)
-            {
-                app_bootloader_fail();
-            }
-            else if (uart1_rx_full_len == uart1_rx_app_len && uart1_rx_idle != 0U &&
-                     (uint32_t)(HAL_GetTick() - uart1_rx_complete_tick) >= BOOTLOADER_COMPLETE_IDLE_MS)
-            {
-                boot_state = BOOTLOADER_STATE_CHECK_DATA;
-            }
-            break;
-        case BOOTLOADER_STATE_CHECK_DATA:
-            if (int_bootloader_finish() != HAL_OK)
-            {
-                app_bootloader_fail();
-                break;
-            }
-            (void)snprintf(response, sizeof(response), "ok,len:%lu\n", (unsigned long)uart1_rx_app_len);
-            app_bootloader_message(response);
-            reply_complete_tick = HAL_GetTick();
-            boot_state = BOOTLOADER_STATE_JUMP_TO_APP;
-            break;
-        case BOOTLOADER_STATE_JUMP_TO_APP:
-            /* APP启动会重新切换模块电源，先给SPP回执留500ms发送窗口。 */
-            if ((uint32_t)(HAL_GetTick() - reply_complete_tick) >= 500U)
-            {
-                int_bootloader_jump_to_app();
-                app_bootloader_fail();
-            }
-            break;
-        default:
-            break;
+        }
+        (void)snprintf(response, sizeof(response), "ok,len:%lu\n", (unsigned long)uart1_rx_app_len);
+        app_bootloader_message(response);
+        reply_complete_tick = HAL_GetTick();
+        boot_state = BOOTLOADER_STATE_JUMP_TO_APP;
+        break;
+    case BOOTLOADER_STATE_JUMP_TO_APP:
+        /* APP启动会重新切换模块电源，先给SPP回执留500ms发送窗口。 */
+        if ((uint32_t)(HAL_GetTick() - reply_complete_tick) >= 500)
+        {
+            int_bootloader_jump_to_app();
+            app_bootloader_fail();
+        }
+        break;
+    default:
+        break;
     }
 }

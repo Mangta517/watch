@@ -34,7 +34,7 @@ static lv_color_t buf_1[LVGL_BUF_PX];
 static lv_color_t buf_2[LVGL_BUF_PX];
 
 /* 本次在途 flush 的驱动指针: LVGL 保证 flush_ready 前不会再进 flush_cb, 单飞安全 */
-static lv_disp_drv_t * volatile s_flush_drv = NULL;
+static lv_disp_drv_t *volatile s_flush_drv = NULL;
 static TaskHandle_t s_flush_task;
 static uint8_t s_redraw_pending;
 static void (*s_progress_callback)(void);
@@ -79,10 +79,6 @@ static void disp_init(void)
 /* 发起 DMA 传输即返回; ready 由 TxCplt 中断里的 lcd_flush_ready_cb 报 */
 static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
 {
-    if (s_progress_callback != NULL)
-    {
-        s_progress_callback();
-    }
     s_flush_task = NULL;
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
@@ -91,6 +87,11 @@ static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_
     }
     s_flush_drv = disp_drv;
     LCD_Color_Fill_DMA((uint16_t)area->x1, (uint16_t)area->y1, (uint16_t)area->x2, (uint16_t)area->y2, (const uint16_t *)color_p);
+    /* 先启动DMA，再让步和检查喂狗，使sensor运行时间与像素传输重叠。 */
+    if (s_progress_callback != NULL)
+    {
+        s_progress_callback();
+    }
 }
 
 /* DMA完成即可唤醒LVGL；等待期间sensor可运行，不额外等待下一个1ms tick。 */
@@ -104,7 +105,7 @@ static void disp_wait(lv_disp_drv_t *disp_drv)
     }
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
-        (void)ulTaskNotifyTake(pdTRUE, 1U);
+        (void)ulTaskNotifyTake(pdTRUE, 1);
     }
 }
 
@@ -117,7 +118,7 @@ static void lcd_flush_ready_cb(void)
     {
         s_flush_drv = NULL;
         lv_disp_flush_ready(drv);
-        if (s_flush_task != NULL && __get_IPSR() != 0U)
+        if (s_flush_task != NULL && __get_IPSR() != 0)
         {
             vTaskNotifyGiveFromISR(s_flush_task, &woken);
             portYIELD_FROM_ISR(woken);
@@ -135,5 +136,21 @@ void lv_port_disp_service(void)
     {
         s_redraw_pending = 0;
         lv_obj_invalidate(lv_scr_act());
+    }
+}
+
+void lv_port_disp_set_sleep(uint8_t sleeping)
+{
+    while (s_flush_drv != NULL)
+    {
+        disp_wait((lv_disp_drv_t *)s_flush_drv); /* 复用正常完成及100ms超时收尾。 */
+    }
+    if (sleeping != 0)
+    {
+        LCD_ST7789_SleepIn();
+    }
+    else
+    {
+        LCD_ST7789_SleepOut();
     }
 }

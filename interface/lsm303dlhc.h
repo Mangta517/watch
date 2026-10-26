@@ -23,7 +23,7 @@ typedef enum
     LSM303DLHC_MAG_ERROR
 } lsm303dlhc_mag_result;
 
-/* 总线初始化后、调度器启动前调用；0=成功，1=通信/识别/配置失败。 */
+/* 总线初始化后由sensor任务调用；0=成功，1=通信/识别/配置失败。 */
 uint8_t lsm303dlhc_mag_init(void);
 /* 仅sensor任务：750/300/75对应75/30/7.5Hz；单位0.1Hz，失败进入原恢复流程。 */
 uint8_t lsm303dlhc_mag_set_rate(uint16_t rate_hz_x10);
