@@ -2,7 +2,7 @@
 
 基于 STM32F411CEU6、FreeRTOS 和 LVGL 的手表工程，包含 RTC 表盘、蓝牙校时与天气同步、运动与环境传感器、心率和电池显示。
 
-本页对应 `codex/low-power` 分支，当前功能版本为 [84f62b5](https://github.com/Mangta517/watch/commit/84f62b54a0650cafcabe11460740da64ae6885e4)（2026-10-26）。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、计步与辅助抬腕、日常 BLE 通信、复位和电压日志，以及 Bootloader SPP 升级。本次涉及的文件、具体改动、优化效果及验证结果见[更新记录](#更新记录)。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；当前行为以本页首节及当前源码为准。
+本页对应 `codex/low-power` 分支，当前功能版本为 [1ade1e3](https://github.com/Mangta517/watch/commit/1ade1e3cd72d39fad42bb99fe45c8caf15b5ca4d)（2026-10-26）。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、计步与辅助抬腕、日常 BLE 通信、复位和电压日志，以及 Bootloader SPP 升级。本次涉及的文件、具体改动、优化效果及验证结果见[更新记录](#更新记录)。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；当前行为以本页首节及当前源码为准。
 
 ## 当前低功耗策略
 
@@ -38,7 +38,7 @@ Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍�
 | [f411_bootloader](MDK-ARM/f411_bootloader.uvprojx) | `0x08000000` | 32KiB | 蓝牙升级引导程序 |
 | [f411ceu6_upgrade_app](MDK-ARM/f411ceu6_upgrade_app.uvprojx) | `0x08008000` | 352KiB | 与 Bootloader 配套的升级 APP，向量表偏移 `0x8000` |
 
-最后128KiB（sector 7）保留给电压历史；普通APP/升级APP及Bootloader均已限制边界，旧Bootloader须通过SWD同步更新。下载时使用按扇区擦除，整片擦除会清掉日志。
+最后128KiB（sector 7）保留给电压与复位历史；普通APP/升级APP及Bootloader均已限制边界，旧Bootloader须通过SWD同步更新。下载时使用按扇区擦除，整片擦除会清掉日志。
 
 直接运行手表可选择独立 APP。部署 OTA 时，先通过 SWD 下载 Bootloader，再下载升级 APP 或进入 SPP 模式发送其 BIN；下载升级 APP 时保留 Bootloader 所在扇区。独立 APP 与 Bootloader 地址重叠，应按上表选择部署组合。
 
@@ -53,7 +53,7 @@ Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍�
 | 蓝牙、校时和天气协议 | [docs/bluetooth.md](docs/bluetooth.md) |
 | 启动流程与等待优化 | [docs/startup-optimization.md](docs/startup-optimization.md) |
 | 运行诊断 | [docs/diagnostics.md](docs/diagnostics.md) |
-| 复位现场与 RTC / 天气状态查询 | [docs/reset-diagnostics.md](docs/reset-diagnostics.md) |
+| 复位 Flash 历史与 RTC / 天气状态查询 | [docs/reset-diagnostics.md](docs/reset-diagnostics.md) |
 | BLE / SPP 升级与部署 | [docs/bootloader.md](docs/bootloader.md) |
 | 看门狗与任务进度检查 | [docs/watchdog.md](docs/watchdog.md) |
 | MPU 零偏及 EEPROM 保存 | [docs/imu-eeprom.md](docs/imu-eeprom.md) |
@@ -76,6 +76,13 @@ python -X utf8 tests/battery_log/run.py
 ## 更新记录
 
 以下日期取自 Git 提交日期。记录按新到旧排列，旧条目中的 4.2V 电量曲线等限制为当时状态，已由上述低功耗版本更新；各条目的验证结果仅适用于对应版本。
+
+### 2026-10-26 · [1ade1e3](https://github.com/Mangta517/watch/commit/1ade1e3cd72d39fad42bb99fe45c8caf15b5ca4d) · 复位现场追加保存到 Flash 与蓝牙历史查询
+
+- **问题**：原复位现场仅保存在 RTC 备份寄存器，备份供电丢失或后续启动覆盖后难以对照多次异常；需要把复位标志和可取得的故障现场留存到 Flash。
+- **改动与优化效果**：`application/app_battery_log.c/.h` 在每次启动满 10 秒且获得有效电压后保存一次复位标志、故障类型、PC 和喂狗时间等现场，复用 sector 7 的 17 个连续槽和一个共用开机标记；逐槽校验并最后提交，写满停写，不自动擦除。`application/app_reset_ble.c/.h` 增加 `RESET,HISTORY`，保留原 `RESET,READ`；`app_battery_log_ble.c` 跳过复位槽，使电压样本计数与导出保持兼容。同步更新相关测试与日志文档。已完整写入的历史可跨断电保留，旧电压数据无需迁移；代价是每次启动额外占用 136 字节现场空间，`BATLOG,CLEAR` 会同时清除两类历史。
+- **验证结果**：在隔离工作区运行 battery_log、reset、reset_ble、startup、UI（调试开／关）主机套件通过，覆盖 72 个半字写入中断位置、残缺记录、旧电压兼容、备份域丢失、写满、锁竞争、异步发送和真实 UI 收发入口。实现阶段另有 bootloader 回归通过；同一业务源码的普通／升级 APP ARMCC 5.06 编译均为 0 错误，全量构建的 30 条既有警告均来自未修改 LVGL 文件，修改模块增量构建为 0 警告，ROM 均为 319748 字节（312.25 KiB）。电脑 BLE 清空后实读 `BATLOG,STATUS,0,0,16384,1`，仅证明当次清空与重连状态，不代表新历史功能已完成实板故障复现验证。
+- **剩余问题**：异常后到下一次成功保存前仍依赖备份供电，完全掉电或早期连续复位可能丢失该次现场；不保存日历日期。尚需实板验证故障捕获、Flash 编程时序和手机通知完整性；复位标志和历史不能直接确定物理根因。
 
 ### 2026-10-26 · [84f62b5](https://github.com/Mangta517/watch/commit/84f62b54a0650cafcabe11460740da64ae6885e4) · 后台活动识别、熄屏通信与复位 / 电压日志
 
