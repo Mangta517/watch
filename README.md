@@ -4,6 +4,8 @@
 
 本页对应 `codex/low-power` 分支，当前功能版本为 [1ade1e3](https://github.com/Mangta517/watch/commit/1ade1e3cd72d39fad42bb99fe45c8caf15b5ca4d)（2026-10-26）。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、计步与辅助抬腕、日常 BLE 通信、复位和电压日志，以及 Bootloader SPP 升级。本次涉及的文件、具体改动、优化效果及验证结果见[更新记录](#更新记录)。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；当前行为以本页首节及当前源码为准。
 
+`watch` 仓库统一提供 **独立 APP、Bootloader、升级 APP** 三个可分别编译的 Keil 工程。三个工程共享本仓库中的驱动、库和业务源码，下载时请保留完整目录。工程选择、Flash 分区和部署组合见[三个 Keil 工程](#三个-keil-工程)，首次编译见[获取与编译](#获取与编译)。
+
 ## 当前低功耗策略
 
 | 项目 | 当前行为 |
@@ -28,7 +30,7 @@ Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍�
 
 按住 KEY_1（PA5，低电平）上电或复位进入升级模式；APP 无效时也会停留在升级模式。连接 SPP 串口后使用 `start:长度:CRC32` 协议发送升级 APP 的原始 BIN。设备返回 ready 后才发送正文，连续 30 秒无新字节会中止；该方案为单 APP，开始升级后会擦除旧镜像。完整部署、串口脚本及错误处理见 [Bootloader 说明](docs/bootloader.md)。
 
-## 工程与文档
+## 三个 Keil 工程
 
 使用 Keil ARM Compiler 5，按部署方式选择对应工程：
 
@@ -44,7 +46,44 @@ Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍�
 
 新版 Bootloader 还检查 EEPROM 中的 APP 有效标志。仅通过 SWD 下载升级 APP 不会自动建立此标志；首次部署或标志无效时，需要成功完成一次 SPP 升级，Bootloader 才会将镜像标为有效并允许正常启动。升级中断时会保留在升级模式，不能只凭向量表看似有效就启动未完成镜像。
 
+## 获取与编译
+
+克隆包含本次交付的分支：
+
+```powershell
+git clone --branch codex/low-power https://github.com/Mangta517/watch.git
+cd watch
+```
+
+也可以直接[下载该分支的完整源码 ZIP](https://github.com/Mangta517/watch/archive/refs/heads/codex/low-power.zip)，解压后保持工程目录结构。
+
+1. 安装 Keil MDK，并准备 **ARM Compiler 5.06 update 5（build 528）**；三个工程均配置此编译器。
+2. 在 Pack Installer 中准备工程指定的 **Keil.STM32F4xx_DFP 3.0.0**。HAL、FreeRTOS 和 LVGL 源码已随仓库提供。
+3. 按上表打开对应的 `.uvprojx`，选择同名 Target，执行 Rebuild。三个工程可以分别构建，无需先编译另一个工程。
+4. 根据下面的输出位置取得镜像，再按上节选择独立 APP 或 Bootloader + 升级 APP 的部署组合。
+
+| 工程 | AXF 输出 | 默认 HEX 输出 |
+| --- | --- | --- |
+| 独立 APP | `MDK-ARM/f411ceu6/f411ceu6.axf` | 同目录 `f411ceu6.hex` |
+| Bootloader | `MDK-ARM/bootloader/f411_bootloader.axf` | 默认未开启 Create HEX File；需要时在 Keil Output 中勾选，或使用 fromelf 导出 |
+| 升级 APP | `MDK-ARM/f411ceu6_upgrade_app/f411ceu6_upgrade_app.axf` | 同目录 `f411ceu6_upgrade_app.hex` |
+
+SPP 升级使用升级 APP 的原始 BIN；fromelf 导出及 `tools/send_bootloader.py` 用法见 [Bootloader 说明](docs/bootloader.md#发送交互)。构建产物、编译日志和 Keil 界面缓存由 `.gitignore` 排除。
+
+## 目录与文档
+
 应用代码在 `application/`，硬件接口在 `interface/`，公共算法与软件 I2C 在 `common/`。
+
+| 目录 / 文件 | 内容 |
+| --- | --- |
+| `MDK-ARM/` | 三个 Keil 工程、启动汇编和 RTE 配置 |
+| `bootloader/` | Bootloader 入口及其独立启动流程 |
+| `Core/`、`Drivers/` | MCU 初始化、中断和 STM32 HAL / CMSIS |
+| `Middlewares/` | FreeRTOS 和 LVGL |
+| `application/`、`interface/`、`common/` | 应用服务、器件接口和公共算法 |
+| `docs/` | 功能、协议、部署和历史验证说明 |
+| `tests/`、`tools/` | 主机回归与 SPP 升级发送脚本 |
+| `f411ceu6.ioc` | CubeMX 配置 |
 
 | 内容 | 文档 |
 | --- | --- |
@@ -61,17 +100,43 @@ Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍�
 | 心率与故障诊断 | [docs/em7028.md](docs/em7028.md) |
 | 温湿度 | [docs/aht21.md](docs/aht21.md) |
 
-常用主机检查在项目根目录运行：
+完整主机检查在项目根目录运行：
 
 ```powershell
-python -X utf8 tests/clock/run.py
-python -X utf8 tests/sensors/run.py
-python -X utf8 tests/startup/run.py
-python -X utf8 tests/ui/run.py
-python -X utf8 tests/battery_log/run.py
+python -B -X utf8 tests/clock/run.py
+python -B -X utf8 tests/sensors/run.py
+python -B -X utf8 tests/startup/run.py
+python -B -X utf8 tests/ble/run.py
+python -B -X utf8 tests/bootloader/run.py
+python -B -X utf8 tests/battery_log/run.py
+python -B -X utf8 tests/reset/run.py
+python -B -X utf8 tests/reset_ble/run.py
+python -B -X utf8 tests/tickless/run.py
+python -B -X utf8 tests/touch/run.py
+python -B -X utf8 tests/watchdog/run.py
+python -B -X utf8 tests/diagnostics/run.py "$env:TEMP/watch-diagnostics.bin"
+python -B -X utf8 tests/ui/run.py
 ```
 
 需要 Python、桌面 GCC；UI 渲染还需要 Pillow。主机测试、Keil 编译和实板测试是三种不同证据，不能相互代替。
+
+## 三工程打包与验证（2026-10-27）
+
+本次功能源码沿用已发布的 `1ade1e3`，在 `watch` 的 `codex/low-power` 分支统一交付三个 Keil 工程。本次文档整理保持固件源码、工程配置和功能版本不变。
+
+- **问题**：三个工程的选择、构建环境、镜像输出和组合部署需要集中说明，避免取得源码后选错工程或镜像。
+- **改动与优化作用**：`README.md` 补充完整源码获取方式、各工程入口、编译器与器件包版本、AXF / HEX 输出位置、目录索引和 13 套主机回归命令；沿用 Flash 分区、EEPROM 有效标志及 SPP BIN 部署说明，方便从完整源码复现构建并选择对应部署方式。
+- **验证结果**：在本次交付源码的隔离工作区重新执行上述 13 套主机回归，全部通过；三个工程的源码引用无缺失，README 相对文件链接及 CRLF 空白检查通过。使用 ARMCC 5.06 update 5 全量重编译，结果如下。
+
+| 工程 | 错误 | 警告 | MAP Total ROM Size | MAP Total RW Size（含 ZI） |
+| --- | --- | --- | --- | --- |
+| `f411ceu6` | 0 | 30 | 319748 B | 100056 B |
+| `f411_bootloader` | 0 | 0 | 17736 B | 11360 B |
+| `f411ceu6_upgrade_app` | 0 | 30 | 319748 B | 100056 B |
+
+两个 APP 的 30 条警告均来自既有 LVGL 文件。构建结果满足各自链接区容量。
+
+- **剩余问题**：本次未烧录或进行实板验证；功耗、触摸总线波形、连续 BLE / SPP 传输、EEPROM / Flash 掉电恢复和心率准确性仍以实板测试为准。历史版本中的功能限制继续保留在下面的更新记录中。
 
 ## 更新记录
 
