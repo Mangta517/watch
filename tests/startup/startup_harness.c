@@ -58,6 +58,12 @@ static uint32_t sensor_elapsed_ms;
 static uint8_t low_rate_mask;
 static uint8_t baro_cadence;
 static uint8_t power_profile, heart_enabled;
+static struct
+{
+    uint32_t start_ms, loop_ms, ppg_ms, battery_ms, baro_ms;
+    unsigned ppg_reads, short_waits, normal_waits;
+    uint8_t mode, started;
+} sensor_timing;
 static uint8_t bluetooth_resume_test, bluetooth_resume_phase;
 static uint8_t sport_test, sport_active, sport_baro_sleeping;
 static unsigned sport_samples, sport_save_calls, sport_save_steps;
@@ -444,9 +450,52 @@ TickType_t xTaskGetTickCount(void)
 {
     return tick;
 }
+static void sensor_timing_wait(TickType_t wait)
+{
+    uint32_t work = tick - sensor_timing.loop_ms;
+    assert(wait >= 1 && wait <= 10);
+    assert(++sensor_rounds == app_sensor_watchdog_progress);
+    if (work >= 10)
+    {
+        assert(wait == 1); /* 超期后必须让出CPU，但不能额外等待完整10ms。 */
+        ++sensor_timing.short_waits;
+    }
+    else
+    {
+        assert(wait == 10 - work);
+        ++sensor_timing.normal_waits;
+    }
+    tick += wait;
+    sensor_elapsed_ms = tick - sensor_timing.start_ms;
+    low_rate_mask = 0;
+    app_watchdog_service();
+    if (sensor_elapsed_ms >= 3000)
+    {
+        assert(watchdog_feeds > 20 && battery_samples >= 3);
+        if (sensor_timing.mode == 1 || sensor_timing.mode == 3)
+        {
+            assert(sensor_rounds == 300 && sensor_timing.short_waits == 0);
+            assert(sensor_timing.normal_waits != 0 && sensor_timing.ppg_reads >= 90);
+            printf("PASS: 5ms MPU + alternate 3ms MAG/PPG model: %u loops / %lums, %u PPG reads; no normal read overlap.\n",
+                   sensor_rounds, (unsigned long)sensor_elapsed_ms, sensor_timing.ppg_reads);
+        }
+        else
+        {
+            assert(sensor_timing.short_waits == sensor_rounds && sensor_timing.normal_waits == 0);
+            puts("PASS: sustained/exact-budget work and a long stall retain a one-tick yield without catch-up bursts.");
+        }
+        longjmp(sensor_stop, 1);
+    }
+}
 void vTaskDelay(TickType_t ticks)
 {
     unsigned int feeds = watchdog_feeds;
+    if (sensor_timing.mode != 0)
+    {
+        assert(ticks == 1);
+        sensor_timing_wait(ticks);
+        return;
+    }
     assert((ticks == 5 || ticks == 1 || ((power_profile != 0 || lvgl_wait_test != 0) && (s_power_state & APP_POWER_IDLE) != 0 && ticks == 20U)) && task_count == 3);
     /* Tickless由独立硬件/内核模型验证；任务阻塞不能替代进度喂狗。 */
     assert(watchdog_feeds == feeds);
@@ -510,6 +559,14 @@ void vTaskDelay(TickType_t ticks)
 }
 void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
 {
+    if (sensor_timing.mode != 0)
+    {
+        TickType_t wait = (TickType_t)(*last + ticks - tick);
+        assert(ticks == 10);
+        *last += ticks;
+        sensor_timing_wait(wait);
+        return;
+    }
     if (background_test != 0)
     {
         assert(ticks == 20 || ticks == 40);
@@ -966,6 +1023,17 @@ void app_battery_init(void)
 }
 void app_battery_service(void)
 {
+    if (sensor_timing.mode != 0)
+    {
+        if (battery_samples != 0)
+        {
+            uint32_t now = tick - sensor_timing.start_ms;
+            assert(now - sensor_timing.battery_ms >= 1000 && now - sensor_timing.battery_ms <= 1200);
+            sensor_timing.battery_ms = now;
+        }
+        ++battery_samples;
+        return;
+    }
     if (background_test != 0)
     {
         if (battery_samples != 0)
@@ -1017,9 +1085,38 @@ void app_aht21_init(void)
 {
     assert(battery_samples == 1);
 }
-void App_IMU_Service(void)
+void App_IMU_Service(uint8_t read_mag)
 {
     assert(hardware_count == 5 && !rtc_done && !ble_done);
+    (void)read_mag;
+    if (sensor_timing.mode != 0)
+    {
+        if (sensor_timing.started == 0)
+        {
+            sensor_timing.start_ms = sensor_timing.ppg_ms = tick;
+            sensor_timing.started = 1;
+        }
+        if (sensor_timing.mode == 2)
+        {
+            tick += 15;
+            if (sensor_rounds == 30)
+            {
+                tick += 120; /* 模拟一次长显示抢占。 */
+            }
+        }
+        else if (sensor_timing.mode == 4)
+        {
+            tick += 10; /* 恰好到期也必须让出至少一拍。 */
+        }
+        else
+        {
+            tick += 5;
+            if (read_mag != 0)
+            {
+                tick += 3;
+            }
+        }
+    }
     if (background_test != 0)
     {
         assert(background_sleeping == (mock_imu_period == 200));
@@ -1056,9 +1153,8 @@ void App_IMU_Service(void)
             assert(sleep_recovery_steps == 16U && (uint32_t)(tick - sleep_recovery_last_ms) >= 200U);
             sleep_recovery_sample = 1;
         }
-        if (sleep_heart_mode != 0 && heart_enabled == 0)
+        if (sleep_heart_mode != 0 && mock_imu_period == 200)
         {
-            assert(mock_imu_period == 200);
             if (sleep_pose_seen != 0 && sleep_recovery_test == 0)
             {
                 assert(sensor_elapsed_ms - sleep_pose_ms >= 200);
@@ -1135,6 +1231,19 @@ void app_heart_get_snapshot(app_heart_struct *heart)
 void App_Baro_Service(void)
 {
     assert(hardware_count == 5);
+    if (sensor_timing.mode != 0)
+    {
+        uint32_t now = tick - sensor_timing.start_ms;
+        uint32_t minimum = 1000;
+        if (baro_calls == 0)
+        {
+            minimum = 500;
+        }
+        assert(now - sensor_timing.baro_ms >= minimum && now - sensor_timing.baro_ms <= minimum + 200);
+        sensor_timing.baro_ms = now;
+        ++baro_calls;
+        return;
+    }
     if (background_test != 0)
     {
         if (baro_calls == 0)
@@ -1174,15 +1283,32 @@ void App_Baro_Service(void)
     assert(sensor_elapsed_ms >= 500U + (baro_calls - 1U) * 1000U);
     assert(sensor_elapsed_ms < 540U + (baro_calls - 1U) * 1000U);
 }
-void app_heart_service(void)
+uint8_t app_heart_service(void)
 {
+    uint8_t bus_used = 0;
+    if (sensor_timing.mode != 0)
+    {
+        sensor_timing.loop_ms = tick;
+        if (sensor_timing.started == 0)
+        {
+            sensor_timing.start_ms = sensor_timing.ppg_ms = tick;
+            sensor_timing.started = 1;
+        }
+    }
     assert(hardware_count == 5 && !rtc_done && !ble_done);
+    if (sensor_timing.mode != 0 && (uint32_t)(tick - sensor_timing.ppg_ms) >= 30)
+    {
+        sensor_timing.ppg_ms = tick;
+        tick += 3;
+        bus_used = 1;
+        ++sensor_timing.ppg_reads;
+    }
     if (sleep_test != 0)
     {
         assert(sleep_bus_parked == 0);
-        if (heart_enabled != 0 && (uint32_t)(tick - sleep_window_ms) >= 100U)
+        if (heart_enabled != 0 && (uint32_t)(tick - sleep_window_ms) > 100U)
         {
-            /* 自动心率整个测量窗口都必须有新鲜的运动参考。 */
+            /* 100ms预热边界先读PPG，紧接着产生首个MPU参考；后续各拍保持新鲜。 */
             assert(sleep_imu == 0 && (uint32_t)(tick - sleep_imu_sample_ms) <= 50U);
         }
         if (sleep_heart_mode != 0 && heart_enabled == 0 && (uint32_t)(tick - sleep_cycle_ms) >= 600000U)
@@ -1196,6 +1322,7 @@ void app_heart_service(void)
             heart_enabled = 0;
         }
     }
+    return bus_used;
 }
 void app_aht21_service(void)
 {
@@ -1236,6 +1363,31 @@ uint8_t app_touch_is_sleeping(void)
 int main(int argc, char **argv)
 {
     int result;
+    if (argc > 1 && strncmp(argv[1], "sensor_timing", 13) == 0)
+    {
+        sensor_timing.mode = 1;
+        if (strcmp(argv[1], "sensor_timing_overload") == 0)
+        {
+            sensor_timing.mode = 2;
+        }
+        else if (strcmp(argv[1], "sensor_timing_wrap") == 0)
+        {
+            sensor_timing.mode = 3;
+            tick = UINT32_MAX - 1000;
+        }
+        else if (strcmp(argv[1], "sensor_timing_exact") == 0)
+        {
+            sensor_timing.mode = 4;
+        }
+        restored_mode = heart_enabled = displayed = 1;
+        app_watchdog_begin();
+        frame = 1;
+        if (setjmp(sensor_stop) == 0)
+        {
+            app_sensor_task(NULL);
+        }
+        return 0;
+    }
     if (argc > 1 && strncmp(argv[1], "background_", 11) == 0)
     {
         background_test = 1;

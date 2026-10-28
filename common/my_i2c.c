@@ -16,13 +16,13 @@
  */
 #include "my_i2c.h"
 
-/* Bootloader仍运行100MHz，保留原延时；APP按48/84缩放并留约5%余量，SENSOR仍加倍。 */
+/* APP按64MHz缩放位延时，SENSOR仍加倍；Bootloader保留100MHz原值。 */
 #if defined(F411_BOOTLOADER)
 #define MY_I2C_DELAY_LOOPS        67
 #define MY_I2C_SENSOR_DELAY_LOOPS 134
 #else
-#define MY_I2C_DELAY_LOOPS        40
-#define MY_I2C_SENSOR_DELAY_LOOPS 80
+#define MY_I2C_DELAY_LOOPS        51
+#define MY_I2C_SENSOR_DELAY_LOOPS 102
 #endif
 
 /* ================================================================ 总线表 */

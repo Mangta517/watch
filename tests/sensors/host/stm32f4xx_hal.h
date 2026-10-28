@@ -82,8 +82,26 @@ typedef struct
 #define __HAL_SPI_DISABLE(spi) ((spi)->Instance->CR1 = 0)
 typedef struct
 {
+    uint32_t CR1;
+} TIM_TypeDef;
+
+typedef struct
+{
     uint32_t arr, compare;
+    TIM_TypeDef *Instance;
 } TIM_HandleTypeDef;
+#define TIM_CR1_CEN 1U
+#define __HAL_TIM_ENABLE(timer) ((timer)->Instance->CR1 |= TIM_CR1_CEN)
+#define HOST_LCD_CLOCK_TIM 1U
+#define HOST_LCD_CLOCK_SPI 2U
+#define HOST_LCD_CLOCK_DMA 4U
+void host_lcd_clock_set(uint32_t clock, uint8_t enabled);
+#define __HAL_RCC_TIM3_CLK_ENABLE() host_lcd_clock_set(HOST_LCD_CLOCK_TIM, 1)
+#define __HAL_RCC_TIM3_CLK_DISABLE() host_lcd_clock_set(HOST_LCD_CLOCK_TIM, 0)
+#define __HAL_RCC_SPI1_CLK_ENABLE() host_lcd_clock_set(HOST_LCD_CLOCK_SPI, 1)
+#define __HAL_RCC_SPI1_CLK_DISABLE() host_lcd_clock_set(HOST_LCD_CLOCK_SPI, 0)
+#define __HAL_RCC_DMA2_CLK_ENABLE() host_lcd_clock_set(HOST_LCD_CLOCK_DMA, 1)
+#define __HAL_RCC_DMA2_CLK_DISABLE() host_lcd_clock_set(HOST_LCD_CLOCK_DMA, 0)
 #define TIM_CHANNEL_3                                3U
 #define DMA2_Stream2_IRQn                            2
 #define SPI1_IRQn                                    35

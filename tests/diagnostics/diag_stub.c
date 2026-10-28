@@ -37,6 +37,11 @@ void app_diag_heart_tx(uint16_t count, uint8_t success)
     (void)count;
     (void)success;
 }
+uint32_t host_heart_fault_diag;
+void app_diag_heart_fault(uint8_t kind, uint8_t reg, uint8_t value)
+{
+    host_heart_fault_diag = 2 | ((uint32_t)kind << 8) | ((uint32_t)reg << 16) | ((uint32_t)value << 24);
+}
 uint8_t app_diag_take_imu_calibration(void)
 {
     return 0;

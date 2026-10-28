@@ -56,6 +56,8 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     subprocess.run([exe, "uptime"], cwd=root, check=True)
     subprocess.run([exe, "async_save"], cwd=root, check=True)
     subprocess.run([exe, "polling"], cwd=root, check=True)
+    for mode in ["mag_schedule", "mag_schedule_ppg", "mag_schedule_wrap"]:
+        subprocess.run([exe, mode], cwd=root, check=True)
     subprocess.run([exe, "power_profile"], cwd=root, check=True)
     subprocess.run([exe, "mpu_stale"], cwd=root, check=True)
     subprocess.run([exe, "mpu_sleep_recovery"], cwd=root, check=True)

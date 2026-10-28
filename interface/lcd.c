@@ -8,7 +8,7 @@
   *          ② SPI1_TX DMA(DMA2_Stream2) 已由 CubeMX 配置 → 提供 Watch 同款
   *             "阻塞整块发送" + "DMA 异步刷屏(经 TxCplt 回调报完成)" 双路径;
   *          ③ 背光为 TIM3_CH3/PB0, OCPolarity=HIGH → CCR 正映射 (不反转);
- *             CubeMX 已配 PSC=47/ARR=300 → 1MHz/301 ≈ 3.32kHz, LCD_Open_Light
+ *             CubeMX 已配 PSC=63/ARR=300 → 1MHz/301 ≈ 3.32kHz, LCD_Open_Light
   *             里仍按 LCD_BL_ARR 重写一次 ARR 作防御 (AutoReloadPreload=DISABLE,
   *             立即生效), 保证与驱动宏一致。
   *          依赖: hspi1(spi.c, Mode3: CPOL=High/CPHA=2Edge, MSB, DIV2), htim3(tim.c),
@@ -29,9 +29,9 @@
 #define LCD_RES_Clr() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_RESET)
 #define LCD_RES_Set() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_SET)
 
-/* 最大65534字节在24MHz下约21.8ms；50ms保留调度余量并限制故障阻塞时间。 */
+/* 最大65534字节在32MHz下约16.4ms；50ms保留调度余量并限制故障阻塞时间。 */
 #define LCD_SPI_TMO 50
-/* 最大65534字节在24MHz下约21.8ms；100ms后仍无回调则按失败收尾。 */
+/* 最大65534字节在32MHz下约16.4ms；100ms后仍无回调则按失败收尾。 */
 #define LCD_DMA_TIMEOUT_MS 100
 
 static void lcd_delay_ms(uint32_t ms)
@@ -447,12 +447,23 @@ void LCD_Init(void)
  *****************************************************************************/
 void LCD_ST7789_SleepIn(void)
 {
+    LCD_Set_Light(0);
     LCD_WR_REG(0x10);
     lcd_delay_ms(100);
+    /* 移植层已等DMA收尾；CCR=0保持PB0低电平，停计数并关闭显示外设时钟。 */
+    htim3.Instance->CR1 &= ~TIM_CR1_CEN;
+    __HAL_SPI_DISABLE(&hspi1);
+    __HAL_RCC_TIM3_CLK_DISABLE();
+    __HAL_RCC_SPI1_CLK_DISABLE();
+    __HAL_RCC_DMA2_CLK_DISABLE();
 }
 
 void LCD_ST7789_SleepOut(void)
 {
+    __HAL_RCC_DMA2_CLK_ENABLE();
+    __HAL_RCC_SPI1_CLK_ENABLE();
+    __HAL_RCC_TIM3_CLK_ENABLE();
+    __HAL_TIM_ENABLE(&htim3); /* 先以CCR=0恢复，应用层在面板醒后设置原亮度。 */
     LCD_WR_REG(0x11);
     lcd_delay_ms(120); /* 与初始化Sleep Out相同，等待面板恢复后再绘图、开背光。 */
 }

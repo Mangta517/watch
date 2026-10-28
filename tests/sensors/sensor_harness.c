@@ -378,6 +378,11 @@ static void driver_tests(void)
     before = mag_frames;
     assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_NOT_READY);
     assert(mag_frames == before + 1 && regs[0x1E][9] == 0); /* Drain LOCK. */
+    regs[0x1E][9] = 3; /* 部分读失败可能同时留下DRDY和LOCK。 */
+    assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_NOT_READY);
+    assert(memcmp(&previous, &mag, sizeof(mag)) == 0 && regs[0x1E][9] == 0);
+    magnetic(50, -25, 30); /* 数值相同仍可能是一次真实新转换，不能按值去重。 */
+    assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_OK);
     magnetic(0, 0, 0);
     word(0x1E, 3, -4096);
     assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_ERROR);
@@ -933,7 +938,7 @@ static void fusion_tests(void)
 static void service_step(void)
 {
     tick += 10;
-    App_IMU_Service();
+    App_IMU_Service(1);
     (void)App_IMU_SaveService();
 }
 static void service_missing_frame_tests(void)
@@ -2226,30 +2231,30 @@ static void polling_tests(void)
     word(MPU6050_ADDR, 0x47, 3280); /* 恒定100deg/s，用于验证短间隔的时间积分。 */
     motion_before = heart_motion_frames;
     regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&previous) && heart_motion_frames == motion_before + 1U);
     assert(angle_error(previous.yaw_deg, 1.0f) < 0.05f && heart_motion_ms == tick);
     tick += 20;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&snapshot) && heart_motion_frames == motion_before + 1U);
     assert(snapshot.yaw_deg == previous.yaw_deg);
     regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&snapshot) && heart_motion_frames == motion_before + 2U);
     assert(angle_error(snapshot.yaw_deg, previous.yaw_deg + 2.0f) < 0.05f);
     previous = snapshot;
     tick += 150;
     regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&snapshot) && heart_motion_frames == motion_before + 3U);
     assert(angle_error(snapshot.yaw_deg, previous.yaw_deg + 1.0f) < 0.05f); /* 长断采不外推150ms。 */
     tick = UINT32_MAX - 4;
     regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&previous));
     tick += 20;
     regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 1;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&snapshot));
     assert(angle_error(snapshot.yaw_deg, previous.yaw_deg + 2.0f) < 0.05f);
 
@@ -2261,17 +2266,17 @@ static void polling_tests(void)
     assert(lsm303dlhc_mag_init() == 0);
     magnetic(30, 0, 40);
     tick += 10;
-    App_IMU_Service();
+    App_IMU_Service(1);
     mag_reads = mag_frames;
     magnetic(30, 0, 40);
     tick += 5;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(mag_frames == mag_reads);
     tick += 4;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(mag_frames == mag_reads);
     ++tick;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(mag_frames == mag_reads + 1);
     puts("PASS: polling uses one transaction/latest frame, DRDY, signed axes/temperature skip, offsets, partial-read rejection, variable dt, long-gap restart, MAG cadence and tick wrap.");
 }
@@ -2311,7 +2316,7 @@ static void async_save_tests(void)
         for (lap = 0; lap < 80 && result == APP_IMU_STORE_BUSY; ++lap)
         {
             tick += 10;
-            App_IMU_Service();
+            App_IMU_Service(1);
             assert(App_IMU_GetSnapshot(&sample));
             before = bus_transactions;
             result = app_imu_store_save_step();
@@ -2358,6 +2363,92 @@ static void euler_decimation_tests(void)
     puts("PASS: 50Hz Euler output preserves every 100Hz quaternion integration step.");
 }
 
+static void mag_schedule_tests(uint8_t defer_ppg, uint8_t wrap)
+{
+    app_imu_struct snapshot;
+    const mpu6050_offset_struct zero = {{0, 0, 0}, {0, 0, 0}};
+    uint32_t started, generated = 0, next_generated;
+    unsigned i, before, accepted = 0;
+    uint8_t read_mag;
+
+    memset(eeprom, 0xFF, sizeof(eeprom));
+    regs[MPU6050_ADDR][MPU6050_WHO_AM_I] = 0x68;
+    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
+    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
+    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
+    assert(my_mpu6050_init() == 0 && lsm303dlhc_mag_init() == 0);
+    my_mpu6050_restore_offset(&zero);
+    App_IMU_Init();
+    assert(app_imu_set_sample_period(10) == 10 && regs[0x1E][0] == 0x18);
+    word(MPU6050_ADDR, 0x3F, 8192);
+    tick = 1000;
+    if (wrap != 0)
+    {
+        tick = UINT32_MAX - 1000;
+    }
+    started = tick;
+    for (i = 1; i <= 300; ++i)
+    {
+        tick = started + i * 10;
+        next_generated = i * 10 * 750 / 10000;
+        if (next_generated != generated)
+        {
+            /* 自主75Hz转换，静止时每次新转换的三轴值可以完全相同。 */
+            magnetic(30.0f, -10.0f, 40.0f);
+            generated = next_generated;
+        }
+        read_mag = defer_ppg == 0 || i % 3 != 0;
+        before = mag_frames;
+        App_IMU_Service(read_mag);
+        accepted += mag_frames - before;
+        assert(App_IMU_GetSnapshot(&snapshot) != 0);
+        if (read_mag == 0)
+        {
+            assert(mag_frames == before);
+        }
+        if (i > 2)
+        {
+            assert(snapshot.mag_online != 0 && snapshot.mag_fused != 0);
+        }
+    }
+    assert(generated == 225);
+    if (defer_ppg != 0)
+    {
+        assert(accepted == 174); /* 特定相位下跳过被覆盖的磁帧，不伪造75Hz采集。 */
+    }
+    else
+    {
+        assert(accepted == 225); /* 300次轮询不能重复计成300个新磁样本。 */
+    }
+    App_IMU_MagCalibrate(1);
+    tick += 10;
+    magnetic(30.0f, -10.0f, 40.0f);
+    App_IMU_Service(1);
+    assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_cal_samples == 1);
+    tick += 10;
+    App_IMU_Service(1); /* 没有新转换，DRDY清除后不能增加校准计数。 */
+    assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_cal_samples == 1);
+    regs[0x1E][9] = 3;
+    tick += 10;
+    App_IMU_Service(1); /* LOCK+DRDY只排空，不能增加计数或刷新年龄。 */
+    assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_cal_samples == 1);
+    for (i = 0; i < 6; ++i)
+    {
+        tick += 10;
+        magnetic(30.0f, -10.0f, 40.0f);
+        before = bus_transactions;
+        App_IMU_Service(0);
+        assert(bus_transactions == before + 1); /* 只保留MPU事务。 */
+    }
+    assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_online == 0 && snapshot.mag_fused == 0);
+    assert(snapshot.mag_cal_samples == 1);
+    tick += 10;
+    App_IMU_Service(1);
+    assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_online != 0 && snapshot.mag_cal_samples == 2);
+    printf("PASS: 75Hz conversion model: %u accepted / 225 generated, PPG deferral=%u; no duplicate/LOCK calibration, age expires and wrap=%u.\n",
+           accepted, defer_ppg, wrap);
+}
+
 static void power_profile_tests(void)
 {
     Accel_Gyro_struct raw;
@@ -2397,7 +2488,7 @@ static void power_profile_tests(void)
     {
         magnetic(30.0f, 42.0f, 0.0f);
         tick += 40;
-        App_IMU_Service();
+        App_IMU_Service(1);
         assert(App_IMU_GetSnapshot(&snapshot) != 0);
         assert(heart_motion_ms == tick);
     }
@@ -2423,7 +2514,7 @@ static void power_profile_tests(void)
     {
         magnetic(30.0f, 42.0f, 0.0f);
         tick += 40;
-        App_IMU_Service();
+        App_IMU_Service(1);
     }
     assert(App_IMU_GetSnapshot(&snapshot) != 0);
     assert(angle_error(snapshot.yaw_deg, -54.4623f) < 0.5f);
@@ -2434,7 +2525,7 @@ static void power_profile_tests(void)
         app_imu_set_sleep(0);
         tick += 200;
         magnetic(30.0f, 42.0f, 0.0f);
-        App_IMU_Service();
+        App_IMU_Service(1);
         assert(App_IMU_GetSnapshot(&snapshot) != 0);
         assert(angle_error(snapshot.yaw_deg, -54.4623f) < 0.5f);
     }
@@ -2622,7 +2713,7 @@ static void activity_tests(void)
     word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, -8192);
     word(MPU6050_ADDR, MPU6050_GYRO_XOUT_H, 2000);
     assert(app_imu_set_sample_period(20) == 20);
-    App_IMU_Service();
+    App_IMU_Service(1);
     App_IMU_GetSnapshot(&snapshot);
     yaw = snapshot.yaw_deg;
     heart_before = heart_motion_frames;
@@ -2633,7 +2724,7 @@ static void activity_tests(void)
     writes = bus_transactions;
     assert(app_imu_set_sample_period(200) == 200 && bus_transactions == writes);
     tick += 200;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&snapshot) == 0);
     assert(snapshot.raw.Gyro.Gyro_x == 0 && snapshot.yaw_deg == yaw && snapshot.mag_online == 0);
     assert(heart_motion_frames == heart_before);
@@ -2643,7 +2734,7 @@ static void activity_tests(void)
         {
             word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, (int16_t)(-8192.0f * walking[sample]));
             tick += 200;
-            App_IMU_Service();
+            App_IMU_Service(1);
         }
     }
     App_IMU_GetSnapshot(&snapshot);
@@ -2658,7 +2749,7 @@ static void activity_tests(void)
     assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 1 && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_2] == 0);
     assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 19);
     tick += 100;
-    App_IMU_Service();
+    App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.steps == 20);
     assert(heart_motion_frames == heart_before + 1);
     for (i = 0; i < 3; ++i)
@@ -2692,7 +2783,7 @@ static void background_mag_sleep_retry_tests(void)
     {
         tick += 200;
         assert(app_imu_set_sample_period(200) == 200);
-        App_IMU_Service();
+        App_IMU_Service(1);
         assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x28);
     }
     fail_dev = fail_reg = -1;
@@ -2723,6 +2814,11 @@ static void background_mag_sleep_retry_tests(void)
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strncmp(argv[1], "mag_schedule", 12) == 0)
+    {
+        mag_schedule_tests(strcmp(argv[1], "mag_schedule") != 0, strcmp(argv[1], "mag_schedule_wrap") == 0);
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "background_mag_sleep_retry") == 0)
     {
         background_mag_sleep_retry_tests();

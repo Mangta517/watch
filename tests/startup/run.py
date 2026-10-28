@@ -38,5 +38,6 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
                  "sleep_cycle", "sleep_wrap", "sleep_calibration", "sleep_heart_early", "sleep_heart_offset",
                  "sleep_recovery", "sleep_recovery_wrap",
                  "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime", "touch_sleep", "touch_sleep_early",
-                 "background_cycle", "background_wrap", "background_calibration", "lvgl_wake"]:
+                 "background_cycle", "background_wrap", "background_calibration", "lvgl_wake",
+                 "sensor_timing", "sensor_timing_overload", "sensor_timing_wrap", "sensor_timing_exact"]:
         subprocess.run([exe, mode], cwd=root, check=True)

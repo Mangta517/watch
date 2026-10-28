@@ -10,7 +10,9 @@ if not gcc:
     raise SystemExit("Desktop GCC is required.")
 with tempfile.TemporaryDirectory(prefix="watch-tickless-") as out:
     exe = str(Path(out) / "tickless.exe")
-    subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
-                    "-Itests/tickless/host", "-Iapplication", "-Iinterface",
-                    "tests/tickless/tickless_harness.c", "application/app_tickless.c", "-o", exe], cwd=root, check=True)
-    subprocess.run([exe], cwd=root, check=True)
+    for stop_enabled in (0, 1):
+        subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-DAPP_TICKLESS_ENABLE_STOP=" + str(stop_enabled),
+                        "-Itests/tickless/host", "-Iapplication", "-Iinterface",
+                        "tests/tickless/tickless_harness.c", "application/app_tickless.c", "-o", exe], cwd=root, check=True)
+        subprocess.run([exe], cwd=root, check=True)

@@ -28,7 +28,7 @@ void diag_exit(void)
 
 uint32_t HAL_RCC_GetPCLK1Freq(void)
 {
-    return 50000000U;
+    return 32000000;
 }
 
 uint32_t HAL_GetTick(void)
@@ -69,12 +69,13 @@ uint32_t kt6368a_get_rx_errors(void)
 
 UBaseType_t uxTaskGetSystemState(TaskStatus_t *tasks, UBaseType_t count, uint32_t *total)
 {
-    assert(count >= 3 && locked == 0);
+    assert(count >= 4 && locked == 0);
     tasks[0] = (TaskStatus_t){"sensor", 2, 2, 2000, 300};
-    tasks[1] = (TaskStatus_t){"IDLE", 0, 1, 5000, 100};
+    tasks[1] = (TaskStatus_t){"IDLE", 0, 1, 4500, 100};
     tasks[2] = (TaskStatus_t){"lvgl", 3, 0, 3000, 700};
+    tasks[3] = (TaskStatus_t){"touch", 1, 2, 500, 180};
     *total = 10000;
-    return 3;
+    return 4;
 }
 
 uint8_t kt6368a_tx_is_busy(void)
@@ -128,21 +129,22 @@ int main(int argc, char **argv)
     assert(fixture != NULL);
     diag_rcc.CFGR = RCC_CFGR_PPRE1;
     app_diag_clock_init();
-    assert(diag_timer.PSC == 9999 && diag_timer.CR1 == TIM_CR1_CEN);
+    assert(diag_timer.PSC == 6399 && diag_timer.CR1 == TIM_CR1_CEN);
     assert(s_sensors[APP_DIAG_MPU].init_result == UINT32_MAX);
     if (APP_DEBUG_TELEMETRY == 0)
     {
         tick = 1000;
-        app_diag_receive((const uint8_t *)"DIAG,1\n", 7);
         for (i = 0; i < 20; ++i)
         {
             app_diag_service();
             tick += 100;
         }
         assert(sent == 0 && s_enabled == 0 && s_tx_pending == 0);
-        fclose(fixture);
-        puts("PASS: performance build emits no diagnostics, including after DIAG,1.");
-        return 0;
+        app_diag_receive((const uint8_t *)"DIAG,", 5);
+        assert(s_enabled == 0);
+        app_diag_receive((const uint8_t *)"1\r\n", 3);
+        assert(s_enabled == 1);
+        puts("PASS: default build is quiet until DIAG,1, without enabling heart waveform telemetry.");
     }
 
     diag_timer.CNT = UINT32_MAX - 4U;
@@ -156,6 +158,10 @@ int main(int argc, char **argv)
     assert(s_sensors[APP_DIAG_MPU].gap_last_ms == 10);
     assert(s_sensors[APP_DIAG_MPU].ok == 2 && s_sensors[APP_DIAG_MPU].not_ready == 1 && s_sensors[APP_DIAG_MPU].errors == 1);
     assert(s_sensors[APP_DIAG_MPU].work_max_us == 1000);
+    app_diag_heart_fault(3, 0x00, 0xFF);
+    assert(s_sensors[APP_DIAG_HEART].result == 0xFF000302 && s_sensors[APP_DIAG_HEART].errors == 0);
+    app_diag_sensor_record(APP_DIAG_HEART, APP_DIAG_OK, 0, diag_timer.CNT);
+    assert(s_sensors[APP_DIAG_HEART].result == 0 && s_sensors[APP_DIAG_HEART].ok == 1);
     app_diag_sensor_recovery(APP_DIAG_MPU, 2);
     app_diag_sensor_recovery(APP_DIAG_MPU, 2);
     assert(s_sensors[APP_DIAG_MPU].recovery_attempts == 1);
@@ -173,6 +179,12 @@ int main(int argc, char **argv)
     diag_timer.CNT += 10;
     app_diag_task_end(APP_DIAG_SENSOR_TASK, 10);
     assert(s_tasks[1].overruns == 1 && s_tasks[1].work_max == 12000 && s_tasks[1].period_last == 12000);
+    app_diag_task_begin(APP_DIAG_TOUCH);
+    diag_timer.CNT += 3;
+    app_diag_task_end(APP_DIAG_TOUCH, 5);
+    app_diag_task_begin(APP_DIAG_TOUCH);
+    diag_timer.CNT += 2;
+    app_diag_task_end(APP_DIAG_TOUCH, 5);
     app_diag_heart_queue(1);
     app_diag_heart_tx(2, 1);
     app_diag_heart_tx(1, 0);
@@ -209,7 +221,7 @@ int main(int argc, char **argv)
     app_diag_service();
     assert(sent == 0 && s_sequence == 0 && s_row == 0 && s_tx_ok == 0 && s_tx_failed == 0);
     force_busy = 0;
-    for (i = 0; i < 13; ++i)
+    for (i = 0; i < 14; ++i)
     {
         app_diag_service();
         app_diag_service();
@@ -218,11 +230,16 @@ int main(int argc, char **argv)
         app_diag_service();
         tick += 100;
     }
-    assert(s_tx_ok == 12 && s_tx_failed == 1);
+    assert(s_tx_ok == 13 && s_tx_failed == 1);
     assert((int32_t)s_mpu_cal_words[0] == -500 && s_mpu_cal_words[6] == 1228 && s_mpu_cal_words[9] == 161);
     assert(s_imu_save_words[0] == 4 && s_imu_save_words[1] == 2 && s_imu_save_words[2] == 0x70 && s_imu_save_words[3] == 12);
     assert(s_task_words[0][2] == 2048 && s_task_words[0][3] == 1200 && s_task_words[0][4] == 200);
     assert(s_task_words[2][2] == 4096 && s_task_words[2][3] == 2800 && s_task_words[2][4] == 300);
+    assert(s_task_ids[3] == APP_DIAG_TOUCH && s_task_words[3][2] == 1024 && s_task_words[3][3] == 720);
+    assert(s_task_words[3][4] == 50 && s_task_words[3][5] == 2 && s_task_words[3][6] == 300);
+    assert(s_task_words[3][9] == 200 && s_task_words[3][10] == 300 && s_task_words[3][12] == 5);
+    assert(s_task_words[1][5] == 0 && s_task_words[1][6] == 0); /* IDLE不伪造循环计时。 */
+    assert(s_system_words[11] == 4);
     assert(s_sensor_words[1][4] == UINT32_MAX);
     assert(s_system_words[3] == 39000);
     memory_free = 3000;
@@ -234,18 +251,18 @@ int main(int argc, char **argv)
     app_diag_receive((const uint8_t *)"DI", 2);
     app_diag_receive((const uint8_t *)"AG,0\n", 5);
     app_diag_service();
-    assert(s_enabled == 0 && sent == 13);
+    assert(s_enabled == 0 && sent == 14);
     app_diag_receive((const uint8_t *)"xxxxxxxxxxxxxxxxDIAG,1\n", 23);
     assert(s_enabled == 0);
     app_diag_receive((const uint8_t *)"DIAG,1\n", 7);
     assert(s_enabled == 1 && s_row == 0);
     assert(app_diag_take_imu_calibration() == 0);
     app_diag_service();
-    assert(tx_busy && sent == 14 && s_tx_ok == 12);
+    assert(tx_busy && sent == 15 && s_tx_ok == 13);
     app_diag_receive((const uint8_t *)"DIAG,0\n", 7);
     tx_ready = 1;
     app_diag_service();
-    assert(!tx_busy && s_enabled == 0 && s_tx_ok == 13 && s_tx_failed == 1);
+    assert(!tx_busy && s_enabled == 0 && s_tx_ok == 14 && s_tx_failed == 1);
     app_diag_receive((const uint8_t *)"IMU,", 4);
     assert(app_diag_take_imu_calibration() == 0);
     app_diag_receive((const uint8_t *)"CAL\r\n", 5);

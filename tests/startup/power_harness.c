@@ -27,7 +27,7 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
     assert(step++ == 2 && port == POWER_EN_GPIO_Port && config->Pin == POWER_EN_Pin);
     assert(output_high && config->Mode == GPIO_MODE_OUTPUT_PP);
-    assert(config->Pull == GPIO_PULLDOWN && config->Speed == GPIO_SPEED_FREQ_LOW);
+    assert(config->Pull == GPIO_NOPULL && config->Speed == GPIO_SPEED_FREQ_LOW);
     output_enabled = 1;
 }
 

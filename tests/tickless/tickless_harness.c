@@ -347,6 +347,18 @@ int main(void)
     puts("PASS: mixed 5/10/20ms blocked-task deadlines retain their phases; the sleep adapter never steps over the earliest unblock time.");
     puts("PASS: CPU time during RTC reads is compensated, including cycle-counter wrap.");
 
+    if (APP_TICKLESS_ENABLE_STOP == 0)
+    {
+        reset(0);
+        screen_off = 1;
+        sleep_rtc_counts = 328;
+        app_tickless_sleep(20);
+        assert(stops == 0 && sleeps == 1 && wakeup_counts == 0 && kernel_tick == 10);
+        assert((RCC->CR & RCC_CR_PLLON) != 0 && (RCC->CFGR & RCC_CFGR_SWS) == RCC_CFGR_SWS_PLL);
+        puts("PASS: screen-off with all peripherals idle still uses Sleep and retains the 64MHz PLL configuration.");
+        return 0;
+    }
+
     reset(0);
     screen_off = 1;
     sleep_rtc_counts = 328U;

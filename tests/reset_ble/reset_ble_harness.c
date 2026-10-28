@@ -3,6 +3,7 @@
 #include "app_battery_log.h"
 #include "app_clock.h"
 #include "app_weather.h"
+#include "app_heart.h"
 #include "watch_rtc.h"
 #include "kt6368a.h"
 #include <assert.h>
@@ -19,6 +20,8 @@ enum
 static app_reset_info_struct host_info;
 static watch_rtc_status_struct host_rtc;
 static app_weather_struct host_weather;
+static app_heart_struct host_heart;
+static unsigned host_heart_snapshots;
 static app_clock_result host_clock_result;
 static uint32_t host_clock_frames;
 static unsigned host_state_snapshots;
@@ -68,6 +71,11 @@ void watch_rtc_get_status(watch_rtc_status_struct *status)
 void app_weather_get_snapshot(app_weather_struct *snapshot)
 {
     *snapshot = host_weather;
+}
+void app_heart_get_snapshot(app_heart_struct *snapshot)
+{
+    *snapshot = host_heart;
+    ++host_heart_snapshots;
 }
 
 app_clock_result app_clock_get_result(void)
@@ -479,5 +487,23 @@ int main(void)
     failure_tests();
     power_tests();
     state_tests();
+    host_reset();
+    host_heart.state = APP_HEART_ERROR;
+    host_heart.fault.kind = EM7028_FAULT_CONFIG;
+    host_heart.fault.reg = 0x0D;
+    host_heart.fault.value = 0xFF;
+    host_receive("HEART,");
+    host_assert_silent();
+    host_receive("READ\r\n");
+    host_start_result = HAL_BUSY;
+    assert(app_reset_ble_service(1, host_now) == 1 && host_heart_snapshots == 1);
+    memset(&host_heart, 0, sizeof(host_heart));
+    host_start_result = HAL_OK;
+    assert(app_reset_ble_service(1, host_now + 100) == 1);
+    host_complete(HAL_OK);
+    assert(app_reset_ble_service(1, host_now + 200) == 0);
+    assert(strcmp(host_output, "HEART,STATE,4,EN,0,FAULT,4,CONFIG,REG,0x0D,VALUE,0xFF\r\n") == 0);
+    assert(host_heart_snapshots == 1 && host_lines == 1);
+    puts("PASS: fragmented HEART query preserves one fault snapshot and UART ownership across BUSY and completion.");
     return 0;
 }

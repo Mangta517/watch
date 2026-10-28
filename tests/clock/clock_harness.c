@@ -8,7 +8,7 @@
 static uint32_t rtc_seconds;
 RTC_TypeDef host_rtc;
 Host_Cycle_Type host_cycles;
-uint32_t SystemCoreClock = 48000000;
+uint32_t SystemCoreClock = 64000000;
 #define backup host_rtc.BKP0R
 static uint32_t rtc_subsecond, prescaler_changes;
 static uint32_t tick, lse_ready, tick_reads;
@@ -286,12 +286,12 @@ static void bounded_set_time_tests(void)
     set_init_stuck = 1;
     nop_calls = 0;
     DWT->CYCCNT = UINT32_MAX - 160;
-    assert(watch_rtc_set_time(12, 34, 56) == 1 && nop_calls <= 301);
+    assert(watch_rtc_set_time(12, 34, 56) == 1 && nop_calls <= SystemCoreClock / 1000 / 160 + 1);
     assert(RTC->TR == time_before && backup == 0x52544330 && rtc_write_protected);
     assert((RTC->ISR & RTC_ISR_INIT) == 0 && watch_rtc_get_time(&time) == HAL_ERROR);
     cycles_frozen = 1;
     nop_calls = 0;
-    assert(watch_rtc_set_time(12, 34, 56) == 1 && nop_calls == 48000);
+    assert(watch_rtc_set_time(12, 34, 56) == 1 && nop_calls == SystemCoreClock / 1000);
     assert(RTC->TR == time_before && (RTC->ISR & RTC_ISR_INIT) == 0 && rtc_write_protected);
     cycles_frozen = 0;
     set_init_stuck = 0;
@@ -300,7 +300,7 @@ static void bounded_set_time_tests(void)
     backup = 0x52544330;
     set_sync_stuck = 1;
     nop_calls = 0;
-    assert(watch_rtc_set_time(13, 24, 35) == 1 && nop_calls <= 303);
+    assert(watch_rtc_set_time(13, 24, 35) == 1 && nop_calls <= SystemCoreClock / 1000 / 160 + 3);
     assert(RTC->TR == 0x00132435 && RTC->DR == date_before && backup == 0x52544330);
     assert((RTC->ISR & RTC_ISR_INIT) == 0 && rtc_write_protected);
     watch_rtc_get_status(&status);
@@ -383,10 +383,10 @@ int main(int argc, char **argv)
         calls = wakeup_calls;
         RTC->ISR = 0;
         nop_calls = 0;
-        assert(watch_rtc_start_wakeup(164) == 1 && wakeup_calls == calls && nop_calls <= 301);
+        assert(watch_rtc_start_wakeup(164) == 1 && wakeup_calls == calls && nop_calls <= SystemCoreClock / 1000 / 160 + 1);
         cycles_frozen = 1;
         nop_calls = 0;
-        assert(watch_rtc_start_wakeup(164) == 1 && wakeup_calls == calls && nop_calls == 48000);
+        assert(watch_rtc_start_wakeup(164) == 1 && wakeup_calls == calls && nop_calls == SystemCoreClock / 1000);
         cycles_frozen = 0;
         assert(watch_rtc_start_wakeup(31) == 1 && watch_rtc_start_wakeup(1048592) == 1 && wakeup_calls == calls);
         lse_ready = 0;
@@ -401,7 +401,7 @@ int main(int argc, char **argv)
         assert(watch_rtc_sync_after_stop() == 0 && nop_calls == 3);
         async_after = 0;
         nop_calls = 0;
-        assert(watch_rtc_sync_after_stop() == 1 && nop_calls <= 301);
+        assert(watch_rtc_sync_after_stop() == 1 && nop_calls <= SystemCoreClock / 1000 / 160 + 1);
         assert(watch_rtc_get_subsecond() == UINT32_MAX);
         assert(watch_rtc_init() == HAL_OK);
         assert(tick_reads == tick_reads_before && set_calls == 1 && date_calls == 1);

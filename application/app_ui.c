@@ -742,9 +742,9 @@ static void refresh_clock(void)
         }
     }
     app_heart_get_snapshot(&heart);
-    if (heart.state == APP_HEART_VALID)
+    if (heart.last_bpm != 0)
     {
-        set_label_text_fmt(s_watch_heart, "%u", (unsigned)heart.bpm);
+        set_label_text_fmt(s_watch_heart, "%u", (unsigned)heart.last_bpm);
     }
     else
     {

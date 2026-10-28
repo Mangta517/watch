@@ -18,6 +18,7 @@
     } while (0)
 
 static uint32_t motion_step_ms = 10U;
+static uint8_t ppg_before_motion;
 
 static void motion_wave(uint32_t duration_ms, float pulse_bpm, float motion_bpm, float pulse_amplitude,
                         float motion_amplitude, uint8_t axis, uint8_t supply_motion)
@@ -43,12 +44,16 @@ static void motion_wave(uint32_t duration_ms, float pulse_bpm, float motion_bpm,
         accel[0] = accel[1] = 0;
         accel[2] = (int16_t)MPU6050_ACCEL_LSB_PER_G;
         accel[axis] += (int16_t)(0.3f * MPU6050_ACCEL_LSB_PER_G * motion);
-        if (supply_motion != 0)
+        if (supply_motion != 0 && ppg_before_motion == 0)
         {
             app_heart_motion_update(accel[0], accel[1], accel[2], tick);
         }
         raw = (uint16_t)(30000.0f + pulse_amplitude * pulse + motion_amplitude * sinf(phase * motion_bpm + 0.45f));
         app_heart_service();
+        if (supply_motion != 0 && ppg_before_motion != 0)
+        {
+            app_heart_motion_update(accel[0], accel[1], accel[2], tick);
+        }
         app_heart_get_snapshot(&heart);
         if (elapsed >= 12000U && heart.sample_ms == tick)
         {
@@ -104,6 +109,16 @@ int main(void)
     begin();
     motion_wave(18000U, 90.0f, 0.0f, 120.0f, 0.0f, 0, 1);
     puts("PASS: synchronized motion rejection, mixed pulse recovery, three axes, stale IMU fallback, static reference and tick wrap.");
+    ppg_before_motion = 1;
+    for (axis = 0; axis < 3U; ++axis)
+    {
+        begin();
+        motion_wave(24000U, 90.0f, 150.0f, 120.0f, 400.0f, axis, 1);
+        begin();
+        motion_wave(18000U, 0.0f, 120.0f, 0.0f, 400.0f, axis, 1);
+    }
+    puts("PASS: PPG-first scheduling uses the previous 10ms motion reference, retains pulse and rejects motion-only input.");
+    ppg_before_motion = 0;
     motion_step_ms = 20U;
     for (axis = 0; axis < 3U; ++axis)
     {

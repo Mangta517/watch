@@ -208,7 +208,7 @@ static void mag_cal_command(uint8_t command)
     }
 }
 
-static uint8_t mag_service(TickType_t now, float body_uT[3])
+static uint8_t mag_service(TickType_t now, float body_uT[3], uint8_t read_mag)
 {
     lsm303dlhc_mag_result result;
     uint8_t i, command;
@@ -221,7 +221,7 @@ static uint8_t mag_service(TickType_t now, float body_uT[3])
     imu_unlock();
     mag_cal_command(command);
 
-    if ((TickType_t)(now - s_mag_poll_tick) >= pdMS_TO_TICKS(s_mag_poll_ms))
+    if (read_mag != 0 && (TickType_t)(now - s_mag_poll_tick) >= pdMS_TO_TICKS(s_mag_poll_ms))
     {
         s_mag_poll_tick = now;
         uint32_t read_started = app_diag_clock_count();
@@ -426,7 +426,7 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
     return period_ms;
 }
 
-void App_IMU_Service(void)
+void App_IMU_Service(uint8_t read_mag)
 {
     Accel_Gyro_struct raw;
     TickType_t now = xTaskGetTickCount();
@@ -444,7 +444,7 @@ void App_IMU_Service(void)
     memset(mag_body, 0, sizeof(mag_body));
     if (s_sample_period_ms != 200)
     {
-        mag_online = mag_service(now, mag_body);
+        mag_online = mag_service(now, mag_body, read_mag);
     }
     field_squared = mag_body[0] * mag_body[0] + mag_body[1] * mag_body[1] + mag_body[2] * mag_body[2];
     read_started = app_diag_clock_count();

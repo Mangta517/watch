@@ -3,6 +3,7 @@
 #include "app_reset_ble.h"
 #include "app_clock.h"
 #include "app_weather.h"
+#include "app_heart.h"
 #include "watch_rtc.h"
 #include "app_battery.h"
 #include "int_battery_log.h"
@@ -43,6 +44,10 @@ void watch_rtc_get_status(watch_rtc_status_struct *value)
 void app_weather_get_snapshot(app_weather_struct *value)
 {
     memset(value, 0, sizeof(*value));
+}
+void app_heart_get_snapshot(app_heart_struct *heart)
+{
+    *heart = (app_heart_struct){0};
 }
 app_clock_result app_clock_get_result(void)
 {

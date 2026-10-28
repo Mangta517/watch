@@ -20,6 +20,7 @@ static unsigned reads;
 static unsigned starts;
 static uint8_t expect_rejected;
 static em7028_fault read_fault = {EM7028_FAULT_READ, 0x29, 0};
+extern uint32_t host_heart_fault_diag;
 
 void em7028_get_fault(em7028_fault *fault)
 {
@@ -551,16 +552,21 @@ static void sleep_tests(void)
 int main(void)
 {
     app_heart_struct heart;
+    uint16_t retained_bpm;
     app_heart_sample_struct samples[32];
     unsigned i;
     static const unsigned rates[] = {40, 60, 90, 120, 180, 200};
     static const unsigned rejected_rates[] = {30, 35, 220, 250, 500};
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_ERROR && heart.bpm == 0);
+    read_fault = (em7028_fault){EM7028_FAULT_CONFIG, 0x0D, 0xFF};
     app_heart_init();
     app_heart_service();
     app_heart_get_snapshot(&heart);
-    assert(heart.state == APP_HEART_OFF && running == 0);
+    assert(heart.state == APP_HEART_ERROR && running == 0);
+    assert(heart.fault.kind == EM7028_FAULT_CONFIG && heart.fault.reg == 0x0D && heart.fault.value == 0xFF);
+    assert(host_heart_fault_diag == 0xFF0D0402);
+    puts("PASS: startup fault is available to the BLE snapshot and existing diagnostic result before manual START.");
     app_heart_set_enabled(1);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_MEASURING && running == 0);
@@ -774,6 +780,7 @@ int main(void)
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_ERROR && heart.enabled == 0 && heart.bpm == 0 && running == 0);
     assert(heart.fault.kind == EM7028_FAULT_READ && heart.fault.reg == 0x29);
+    assert((host_heart_fault_diag & 0x00FFFFFF) == 0x00290102); /* stop失败不能覆盖原始READ。 */
     stop_result = EM7028_OK;
     read_result = EM7028_OK;
     begin();
@@ -822,13 +829,25 @@ int main(void)
         assert(valid > 100);
         assert(heart.state == APP_HEART_VALID && abs((int)heart.bpm - (int)rates[i]) <= 4);
     }
+    retained_bpm = heart.bpm;
+    assert(retained_bpm != 0 && heart.last_bpm == retained_bpm);
     app_heart_set_enabled(0);
     app_heart_get_snapshot(&heart);
-    assert(heart.state == APP_HEART_OFF && heart.bpm == 0);
+    assert(heart.state == APP_HEART_OFF && heart.bpm == 0 && heart.last_bpm == retained_bpm);
     stop_result = EM7028_ERROR;
     app_heart_service();
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_ERROR && running == 0);
+    assert(heart.last_bpm == retained_bpm);
+    start_result = EM7028_ERROR;
+    app_heart_set_enabled(1);
+    assert(app_heart_service() == 1);
+    app_heart_get_snapshot(&heart);
+    assert(heart.state == APP_HEART_ERROR && heart.last_bpm == retained_bpm);
+    assert(app_heart_service() == 0);
+    start_result = EM7028_OK;
+    stop_result = EM7028_OK;
+    puts("PASS: last valid BPM survives STOP, stop/start failure and idle service without presenting a current valid measurement.");
     assert(reads > 0);
     puts("PASS: heart service start/stop, stale/gap/flat/noise rejection, I2C failure, snapshot locks and tick wrap.");
     sleep_tests();

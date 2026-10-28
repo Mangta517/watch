@@ -112,14 +112,26 @@ static uint32_t sample_start_tick;
 
 static void heart_publish(const app_heart_struct *data)
 {
+    uint16_t last_bpm;
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
+    last_bpm = heart_data.last_bpm;
+    if (data->last_bpm != 0)
+    {
+        last_bpm = data->last_bpm;
+    }
     heart_data = *data;
+    if (data->state == APP_HEART_VALID)
+    {
+        last_bpm = data->bpm;
+    }
+    heart_data.last_bpm = last_bpm;
     xSemaphoreGive(heart_mutex);
 }
 
 static void heart_fail(app_heart_struct *data)
 {
     em7028_get_fault(&data->fault); /* 先保留读/启动失败，不能被 stop 的结果覆盖 */
+    app_diag_heart_fault((uint8_t)data->fault.kind, data->fault.reg, data->fault.value);
     (void)em7028_stop();            /* 即使总线失败也先关闭外部照明 */
     running = 0;
     data->bpm = 0;
@@ -544,6 +556,13 @@ static void heart_process(uint16_t raw, uint32_t now, uint32_t elapsed, app_hear
 
 void app_heart_init(void)
 {
+    /* 发布快照锁前保存启动故障，UI此时仍按未初始化处理。 */
+    em7028_get_fault(&heart_data.fault);
+    if (heart_data.fault.kind != EM7028_FAULT_NONE)
+    {
+        heart_data.state = APP_HEART_ERROR;
+        app_diag_heart_fault((uint8_t)heart_data.fault.kind, heart_data.fault.reg, heart_data.fault.value);
+    }
     heart_mutex = xSemaphoreCreateMutex();
 }
 
@@ -582,7 +601,12 @@ void app_heart_set_sport_mode(uint8_t enabled)
 
 static void heart_finish_sleep(app_heart_struct *data)
 {
-    em7028_result result = em7028_stop(); /* 同一拍关闭照明和HRS，不等下次采样。 */
+    em7028_result result;
+    if (data->state == APP_HEART_VALID)
+    {
+        data->last_bpm = data->bpm;
+    }
+    result = em7028_stop(); /* 同一拍关闭照明和HRS，不等下次采样。 */
     running = 0;
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
     s_sleep_active = 0;
@@ -674,7 +698,7 @@ uint16_t app_heart_read_samples(app_heart_sample_struct *samples, uint16_t size)
     return count;
 }
 
-void app_heart_service(void)
+uint8_t app_heart_service(void)
 {
     app_heart_struct data;
     app_heart_sample_struct sample;
@@ -686,7 +710,7 @@ void app_heart_service(void)
     uint32_t read_started;
     if (heart_mutex == NULL)
     {
-        return;
+        return 0;
     }
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
     enabled = requested;
@@ -708,7 +732,7 @@ void app_heart_service(void)
     if (s_sleep_active != 0 && (uint32_t)(now - s_sleep_started_ms) >= APP_HEART_SLEEP_TIMEOUT_MS)
     {
         heart_finish_sleep(&data);
-        return;
+        return 1;
     }
     if (enabled == 0)
     {
@@ -730,8 +754,9 @@ void app_heart_service(void)
                 em7028_get_fault(&data.fault);
             }
             heart_publish(&data);
+            return 1;
         }
-        return;
+        return 0;
     }
     if (running == 0)
     {
@@ -740,7 +765,7 @@ void app_heart_service(void)
         if (result != EM7028_OK)
         {
             heart_fail(&data);
-            return;
+            return 1;
         }
         memset(&detector, 0, sizeof(detector));
         memset(&data, 0, sizeof(data));
@@ -750,12 +775,12 @@ void app_heart_service(void)
         sample_sequence = 0;
         running = 1;
         heart_publish(&data);
-        return;
+        return 1;
     }
     elapsed = (uint32_t)(now - poll_tick);
     if (elapsed < APP_HEART_POLL_MS)
     {
-        return;
+        return 0;
     }
     poll_tick = now;
     if (elapsed > APP_HEART_MAX_GAP_MS)
@@ -771,7 +796,7 @@ void app_heart_service(void)
     if (result != EM7028_OK && (uint32_t)(now - good_tick) > APP_HEART_STALE_MS)
     {
         heart_fail(&data);
-        return;
+        return 1;
     }
     if (result == EM7028_OK)
     {
@@ -810,7 +835,8 @@ void app_heart_service(void)
     if (s_sleep_active != 0 && data.state == APP_HEART_VALID)
     {
         heart_finish_sleep(&data);
-        return;
+        return 1;
     }
     heart_publish(&data);
+    return 1;
 }

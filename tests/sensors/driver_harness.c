@@ -27,7 +27,9 @@ SPI_TypeDef host_spi;
 static DMA_Stream_TypeDef host_dma_stream;
 static DMA_HandleTypeDef host_dma = {&host_dma_stream};
 SPI_HandleTypeDef hspi1 = {.Instance = &host_spi, .hdmatx = &host_dma};
-TIM_HandleTypeDef htim3;
+static TIM_TypeDef host_tim3;
+TIM_HandleTypeDef htim3 = {.Instance = &host_tim3};
+static uint32_t lcd_clock_mask = 7;
 static int scheduler_state;
 static uint32_t primask, elapsed_ms, hal_waits, task_waits;
 static uint32_t tp_reset_start, tp_ready_at, lcd_reset_start;
@@ -57,6 +59,20 @@ static unsigned dma_starts, dma_stops, spi_aborts, flush_completions;
 static uint8_t dma_stuck;
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *spi);
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *spi);
+
+void host_lcd_clock_set(uint32_t clock, uint8_t enabled)
+{
+    if (enabled != 0)
+    {
+        lcd_clock_mask |= clock;
+    }
+    else
+    {
+        assert(host_dma_stream.CR == 0 && (host_spi.SR & SPI_SR_BSY) == 0);
+        assert(htim3.compare == 0 && (host_tim3.CR1 & TIM_CR1_CEN) == 0);
+        lcd_clock_mask &= ~clock;
+    }
+}
 
 uint32_t __get_PRIMASK(void)
 {
@@ -215,6 +231,7 @@ uint32_t HAL_GetTick(void)
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout)
 {
     assert(spi == &hspi1 && data && size && timeout == 50);
+    assert((lcd_clock_mask & HOST_LCD_CLOCK_SPI) != 0);
     ++spi_calls;
     if (lcd_dc_state == GPIO_PIN_RESET)
     {
@@ -264,6 +281,7 @@ HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16
 HAL_StatusTypeDef HAL_SPI_Transmit_DMA(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size)
 {
     assert(spi == &hspi1 && data && size);
+    assert((lcd_clock_mask & (HOST_LCD_CLOCK_SPI | HOST_LCD_CLOCK_DMA)) == (HOST_LCD_CLOCK_SPI | HOST_LCD_CLOCK_DMA));
     ++dma_starts;
     host_dma_stream.CR = DMA_SxCR_EN;
     return dma_start_result;
@@ -288,6 +306,8 @@ HAL_StatusTypeDef HAL_SPI_Abort(SPI_HandleTypeDef *spi)
 HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *timer, uint32_t channel)
 {
     assert(timer == &htim3 && channel == TIM_CHANNEL_3);
+    assert((lcd_clock_mask & HOST_LCD_CLOCK_TIM) != 0);
+    timer->Instance->CR1 |= TIM_CR1_CEN;
     return HAL_OK;
 }
 
@@ -342,7 +362,11 @@ static void init_delay_tests(int state)
     assert(hal_waits + task_waits == 3);
     assert(htim3.arr == LCD_BL_ARR && htim3.compare == LCD_BL_ARR * 80 / 100);
     LCD_ST7789_SleepIn();
+    assert(lcd_clock_mask == 0 && htim3.compare == 0 && (host_tim3.CR1 & TIM_CR1_CEN) == 0);
     LCD_ST7789_SleepOut();
+    assert(lcd_clock_mask == 7 && htim3.compare == 0 && (host_tim3.CR1 & TIM_CR1_CEN) != 0);
+    LCD_Set_Light(80);
+    assert(htim3.compare == LCD_BL_ARR * 80 / 100);
     assert(hal_waits + task_waits == 5);
     assert(elapsed_ms - start >= 520);
 
@@ -841,6 +865,7 @@ int main(void)
     touch_invalid_scan_tests();
     touch_config_failure_tests();
     touch_async_absent_tests();
+    puts("PASS: LCD sleep gates idle SPI/DMA/PWM clocks and wake restores clocks before commands, retaining a dark backlight until brightness restore.");
     puts("PASS: real LCD/touch init and sleep delays, reset/probe recovery, failure threshold and coordinates");
     return 0;
 }

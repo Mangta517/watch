@@ -46,7 +46,7 @@
 #include "app_tickless.h"
 #define portSUPPRESS_TICKS_AND_SLEEP(ticks) app_tickless_sleep(ticks)
 #define configUSE_TICK_HOOK                 0
-#define configCPU_CLOCK_HZ                  ((unsigned long)48000000) /* F411: HSI/8*96/4 = 48MHz */
+#define configCPU_CLOCK_HZ                  ((unsigned long)64000000) /* F411: HSI/8*128/4 = 64MHz */
 #define configTICK_RATE_HZ                  1000                      /* HAL补时及LVGL时间单位均为1ms。 */
 #define configMAX_PRIORITIES                (5)
 #define configMINIMAL_STACK_SIZE            ((unsigned short)128)

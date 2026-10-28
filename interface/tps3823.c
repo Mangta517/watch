@@ -61,7 +61,7 @@ void tps3823_feed(void)
     uint8_t i;
     if (tps3823_enabled != 0)
     {
-        /* 每次均产生有效下降沿；48MHz下16个NOP的高脉宽超过手册100ns。 */
+        /* 每次均产生有效下降沿；64MHz下16个NOP的高脉宽超过手册100ns。 */
         HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_SET);
         for (i = 0; i < 16; ++i)
         {

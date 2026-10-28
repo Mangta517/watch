@@ -80,9 +80,9 @@ extern "C"
 
     /**
  * @brief 周期服务一轮: 磁场轮询 + MPU突发读 → 姿态融合 → 一致快照
- *        仅由 app_task 的 sensor 任务体按周期调用, 其他上下文勿调
+ *        仅sensor调用；read_mag=0时只延后本轮磁事务，命令和新鲜度检查仍执行。
  */
-    void App_IMU_Service(void);
+    void App_IMU_Service(uint8_t read_mag);
     /* 仅sensor任务：后台200ms为加速度低功耗，运动10ms，姿态/校准20ms。 */
     uint32_t app_imu_set_sample_period(uint32_t period_ms);
     /* 兼容器件完全休眠接口；唤醒只丢弃旧时间/磁参考，保留四元数。 */

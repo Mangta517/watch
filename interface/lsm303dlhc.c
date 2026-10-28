@@ -220,8 +220,9 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
         mag_read_fault();
         return LSM303DLHC_MAG_ERROR;
     }
-    if ((status & 0x01) == 0)
+    if ((status & 0x03) != 0x01)
     {
+        /* LOCK表示上次只读了部分输出；排空解锁，不将残留帧重新计为新样本。 */
         return LSM303DLHC_MAG_NOT_READY;
     }
 

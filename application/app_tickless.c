@@ -8,7 +8,7 @@
 #error Tickless HAL compensation requires a 1ms RTOS tick.
 #endif
 
-/* STOP由RTC唤醒；BLE/PWM/DMA仍需时钟时保留Sleep。最长100ms，不越过喂狗周期。 */
+/* Sleep保留串口接收，合适的熄屏间隙用RTC唤醒STOP；最长100ms，不越过喂狗周期。 */
 #define APP_TICKLESS_MAX_TICKS 100
 #define APP_TICKLESS_STOP_MIN_TICKS 5
 
@@ -18,7 +18,7 @@ extern __IO uint32_t uwTick;
 static uint8_t app_tickless_stop_allowed(void)
 {
     /* F411 USART无法在STOP接收；屏灭后仍可能有LCD DMA安全收尾，必须等它完成。 */
-    return app_task_is_screen_off() != 0 && TIM3->CCR3 == 0 &&
+    return APP_TICKLESS_ENABLE_STOP != 0 && app_task_is_screen_off() != 0 && TIM3->CCR3 == 0 &&
            (BLE_EN_GPIO_Port->ODR & BLE_EN_Pin) == 0 && (RCC->APB2ENR & RCC_APB2ENR_USART1EN) == 0 &&
            (SPI1->SR & SPI_SR_BSY) == 0 && (DMA2_Stream2->CR & DMA_SxCR_EN) == 0 &&
            (ADC1->CR2 & ADC_CR2_ADON) == 0;

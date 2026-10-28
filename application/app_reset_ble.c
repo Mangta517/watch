@@ -3,6 +3,7 @@
 #include "app_battery_log.h"
 #include "app_clock.h"
 #include "app_weather.h"
+#include "app_heart.h"
 #include "watch_rtc.h"
 #include "kt6368a.h"
 #include <stdio.h>
@@ -13,7 +14,8 @@ enum
     APP_REPORT_NONE,
     APP_REPORT_RESET,
     APP_REPORT_STATE,
-    APP_REPORT_HISTORY
+    APP_REPORT_HISTORY,
+    APP_REPORT_HEART
 };
 
 static struct
@@ -69,6 +71,11 @@ void app_reset_ble_receive(const uint8_t *data, uint16_t size, uint32_t now_ms)
                 else if (strcmp(s_ble.line, "STATE,READ") == 0)
                 {
                     s_ble.report = APP_REPORT_STATE;
+                    s_ble.index = 0;
+                }
+                else if (strcmp(s_ble.line, "HEART,READ") == 0)
+                {
+                    s_ble.report = APP_REPORT_HEART;
                     s_ble.index = 0;
                 }
                 else if (strcmp(s_ble.line, "RESET,HISTORY") == 0)
@@ -193,11 +200,26 @@ static int app_reset_history_format(void)
 
 static uint8_t app_reset_ble_format(uint32_t now_ms)
 {
+    static const char *const fault_names[] = {"NONE", "READ", "WRITE", "PID", "CONFIG", "DATA_CHANGED"};
+    app_heart_struct heart;
+    const char *fault_name = "UNKNOWN";
     int length;
     app_reset_info_struct *info = &s_ble.info;
     if (s_ble.report == APP_REPORT_STATE)
     {
         length = app_state_ble_format(now_ms);
+    }
+    else if (s_ble.report == APP_REPORT_HEART)
+    {
+        app_heart_get_snapshot(&heart);
+        if ((unsigned)heart.fault.kind < sizeof(fault_names) / sizeof(fault_names[0]))
+        {
+            fault_name = fault_names[heart.fault.kind];
+        }
+        length = snprintf(s_ble.tx, sizeof(s_ble.tx),
+                          "HEART,STATE,%u,EN,%u,FAULT,%u,%s,REG,0x%02X,VALUE,0x%02X\r\n",
+                          (unsigned)heart.state, (unsigned)heart.enabled, (unsigned)heart.fault.kind, fault_name,
+                          (unsigned)heart.fault.reg, (unsigned)heart.fault.value);
     }
     else if (s_ble.report == APP_REPORT_HISTORY && s_ble.history_stage != 2)
     {
@@ -298,7 +320,7 @@ uint8_t app_reset_ble_service(uint8_t ready, uint32_t now_ms)
             {
                 ++s_ble.index;
                 if ((s_ble.report == APP_REPORT_RESET && s_ble.index == 5) ||
-                    (s_ble.report == APP_REPORT_STATE && s_ble.index == 4))
+                    (s_ble.report == APP_REPORT_STATE && s_ble.index == 4) || s_ble.report == APP_REPORT_HEART)
                 {
                     app_reset_ble_reset();
                 }

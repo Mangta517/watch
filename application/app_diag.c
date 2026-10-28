@@ -246,6 +246,13 @@ void app_diag_heart_tx(uint16_t count, uint8_t success)
     }
 }
 
+void app_diag_heart_fault(uint8_t kind, uint8_t reg, uint8_t value)
+{
+    taskENTER_CRITICAL();
+    s_sensors[APP_DIAG_HEART].result = 2 | ((uint32_t)kind << 8) | ((uint32_t)reg << 16) | ((uint32_t)value << 24);
+    taskEXIT_CRITICAL();
+}
+
 static uint8_t s_imu_cal_requested;
 static char s_rx_command[16];
 static uint8_t s_rx_length, s_rx_overflow;
@@ -280,7 +287,7 @@ void app_diag_receive(const uint8_t *data, uint16_t size)
             }
             else if (s_rx_overflow == 0 && strcmp(s_rx_command, "DIAG,1") == 0)
             {
-                s_enabled = APP_DEBUG_TELEMETRY;
+                s_enabled = 1;
                 s_row = 0;
                 s_snapshot_ready = 0;
             }
@@ -315,9 +322,13 @@ static uint8_t diag_task_id(const char *name)
     }
     if (strcmp(name, "IDLE") == 0)
     {
-        return 2;
+        return APP_DIAG_IDLE;
     }
-    return 3;
+    if (strcmp(name, "touch") == 0)
+    {
+        return APP_DIAG_TOUCH;
+    }
+    return APP_DIAG_TASK_COUNT;
 }
 
 static void diag_snapshot(void)
@@ -362,7 +373,7 @@ static void diag_snapshot(void)
         {
             words[4] = (uint32_t)((uint64_t)runtime * 1000 / delta);
         }
-        if (id < APP_DIAG_TASK_COUNT)
+        if (id < APP_DIAG_TASK_COUNT && id != APP_DIAG_IDLE)
         {
             taskENTER_CRITICAL();
             task_stats = s_tasks[id];

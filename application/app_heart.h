@@ -20,6 +20,7 @@ typedef enum
 typedef struct
 {
     uint16_t bpm;         /* 仅 VALID 时有效，40～200 BPM；工程估算值，需要实板校准 */
+    uint16_t last_bpm;    /* 本次开机最近一次有效测量，0表示尚无结果；供桌面显示。 */
     uint16_t raw;         /* 最近一次 EM7028 光强采样 */
     uint16_t interval_ms; /* 最近两个已确认波峰的间隔；0 表示尚未检测到周期 */
     uint32_t signal_x10;  /* 滤波后变化幅度，单位0.1个ADC计数；用于无信号排查 */
@@ -43,8 +44,8 @@ typedef struct
 
 /* 调度器启动后在 sensor 任务创建快照锁；EM7028 已由开机流程配置为待机。 */
 void app_heart_init(void);
-/* 现有 sensor 任务每轮调用；内部限速为 30ms，不创建新任务。 */
-void app_heart_service(void);
+/* sensor每轮调用；内部限速30ms，返回1表示本轮访问了PPG总线，供磁轮询错开。 */
+uint8_t app_heart_service(void);
 /* 仅sensor任务：熄屏每10分钟自动测一次，有效BPM即停，最多10秒；保留亮屏手动请求。 */
 void app_heart_set_sleep_mode(uint8_t sleeping);
 /* sensor任务：运动模式强制连续测量，停止运动后恢复原手动请求，不发送原始蓝牙波形。 */

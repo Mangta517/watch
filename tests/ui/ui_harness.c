@@ -2732,10 +2732,18 @@ int main(void)
     host_rtc_tick = host_tick;
     host_heart.state = APP_HEART_VALID;
     host_heart.bpm = 72;
+    host_heart.last_bpm = 72;
     host_bluetooth_feed((const uint8_t *)"WEATHER,3,263,80\n", 17);
     advance(120);
     assert(strcmp(clock_text(), "08:36") == 0);
     assert_rtc_seconds(50);
+    assert(strcmp(lv_label_get_text(s_watch_heart), "72") == 0);
+    host_heart.state = APP_HEART_OFF;
+    host_heart.bpm = 0;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_watch_heart), "72") == 0);
+    host_heart.state = APP_HEART_ERROR;
+    advance(120);
     assert(strcmp(lv_label_get_text(s_watch_heart), "72") == 0);
     assert_static_refresh();
     screenshot("watch");

@@ -320,17 +320,19 @@ static void app_touch_task(void *pvParameters)
     last_wake = xTaskGetTickCount();
     for (;;)
     {
+        app_diag_task_begin(APP_DIAG_TOUCH);
+        period_ms = APP_TOUCH_PERIOD_MS;
+        if ((s_power_state & APP_POWER_IDLE) != 0)
+        {
+            period_ms = APP_IDLE_POLL_MS;
+        }
         app_touch_service();
+        app_diag_task_end(APP_DIAG_TOUCH, period_ms);
         if (app_touch_is_sleeping() != 0)
         {
             (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             last_wake = xTaskGetTickCount();
             continue;
-        }
-        period_ms = APP_TOUCH_PERIOD_MS;
-        if ((s_power_state & APP_POWER_IDLE) != 0)
-        {
-            period_ms = APP_IDLE_POLL_MS;
         }
         if ((TickType_t)(xTaskGetTickCount() - last_wake) >= pdMS_TO_TICKS(period_ms))
         {
@@ -347,6 +349,7 @@ static void app_touch_task(void *pvParameters)
 static void app_sensor_task(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
+    TickType_t now_tick;
     mpu6050_cal_state cal_state;
     mpu6050_offset_struct offset;
     app_imu_store_result store_result;
@@ -360,6 +363,7 @@ static void app_sensor_task(void *pvParameters)
     uint8_t sleeping = 0, bus_parked = 0, environment_active = 0;
     uint8_t sleep_requested, imu_active, bus_needed, imu_warming = 0;
     uint8_t imu_sample_pending = 0, heart_pending, mpu_recovery;
+    uint8_t heart_bus_used;
     uint8_t imu_continuous, imu_background = 0, imu_mode_changed;
     uint8_t sporting = 0, sport_requested, sport_ready, sport_changed;
     uint32_t environment_ms = 0, window_ms = 0;
@@ -547,6 +551,12 @@ static void app_sensor_task(void *pvParameters)
                 app_diag_sensor_recovery(APP_DIAG_BARO, spl006_recover_step(HAL_GetTick()));
             }
         }
+        /* PPG先服务，沿用上一拍的新鲜运动参考；有事务时磁读取延后一拍。 */
+        heart_bus_used = 0;
+        if (bus_needed != 0)
+        {
+            heart_bus_used = app_heart_service();
+        }
         period_ms = APP_SENSOR_IDLE_PERIOD_MS;
         if (cal_finished == 0 || heart.enabled != 0 || (power_state & APP_POWER_MOTION) != 0 || imu_saving != 0 || mag_saving != 0)
         {
@@ -574,7 +584,7 @@ static void app_sensor_task(void *pvParameters)
                 (imu_warming == 0 || (uint32_t)(now_ms - imu_wake_ms) >= imu_warmup_ms))
             {
                 imu_warming = 0;
-                App_IMU_Service();
+                App_IMU_Service(heart_bus_used == 0);
                 imu_cycle_ms = now_ms;
                 imu_sample_pending = 0;
             }
@@ -609,10 +619,6 @@ static void app_sensor_task(void *pvParameters)
                     app_diag_boot_set(APP_BOOT_CAL_RESULT, 1);
                 }
             }
-        }
-        if (bus_needed != 0)
-        {
-            app_heart_service();
         }
         now_ms = HAL_GetTick();
         if (sleeping != 0)
@@ -690,12 +696,17 @@ static void app_sensor_task(void *pvParameters)
         app_battery_log_service(app_uptime_get_seconds());
         app_diag_task_end(APP_DIAG_SENSOR_TASK, period_ms);
         ++app_sensor_watchdog_progress;
-        /* 被显示抢占或事务超期后重新计时，避免连续补跑旧轮询。 */
-        if ((TickType_t)(xTaskGetTickCount() - xLastWakeTime) > pdMS_TO_TICKS(period_ms))
+        now_tick = xTaskGetTickCount();
+        /* 超期后只让出1拍，以实际唤醒时刻重排，不补跑旧轮询或再等完整周期。 */
+        if ((TickType_t)(now_tick - xLastWakeTime) >= pdMS_TO_TICKS(period_ms))
         {
+            vTaskDelay(1);
             xLastWakeTime = xTaskGetTickCount();
         }
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(period_ms));
+        else
+        {
+            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(period_ms));
+        }
     }
 }
 

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* 性能观察版关闭诊断和心率波形发送；调试构建可通过编译选项置1。 */
+/* 默认关闭自动诊断和心率波形；DIAG,1可独立开启任务/传感器诊断。 */
 #ifndef APP_DEBUG_TELEMETRY
 #define APP_DEBUG_TELEMETRY 0
 #endif
@@ -12,6 +12,8 @@ enum
 {
     APP_DIAG_LVGL,
     APP_DIAG_SENSOR_TASK,
+    APP_DIAG_IDLE, /* 保留WDG1原ID2；IDLE没有业务循环计时。 */
+    APP_DIAG_TOUCH,
     APP_DIAG_TASK_COUNT
 };
 
@@ -69,6 +71,8 @@ void app_diag_sensor_recovery(uint8_t id, uint8_t state);
 void app_diag_sensor_record(uint8_t id, uint8_t outcome, uint32_t result, uint32_t started);
 void app_diag_heart_queue(uint8_t dropped);
 void app_diag_heart_tx(uint16_t count, uint8_t success);
+/* HEART last_result低字节为ERROR=2，其余字节依次为fault kind、寄存器、读回值。 */
+void app_diag_heart_fault(uint8_t kind, uint8_t reg, uint8_t value);
 void app_diag_receive(const uint8_t *data, uint16_t size);
 void app_diag_reset_receive(void);
 /* IMU,CAL请求仅传递标志；sensor任务消费后执行校准/EEPROM保存。 */

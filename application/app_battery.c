@@ -78,7 +78,7 @@ void app_battery_service(void)
     sample.result = HAL_ADC_Start(&hadc1);
     if (sample.result == HAL_OK)
     {
-        /* 48MHz PCLK2/8=6MHz，480周期采样约80us；超时有限，不让故障卡住sensor任务。 */
+        /* 64MHz PCLK2/8=8MHz，480周期采样约60us；超时有限，不让故障卡住sensor任务。 */
         sample.result = HAL_ADC_PollForConversion(&hadc1, APP_BATTERY_ADC_TIMEOUT_MS);
         if (sample.result == HAL_OK)
         {
