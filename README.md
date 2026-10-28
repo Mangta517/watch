@@ -2,7 +2,7 @@
 
 基于 STM32F411CEU6、FreeRTOS 和 LVGL 的手表工程，包含 RTC 表盘、蓝牙校时与天气同步、运动与环境传感器、心率和电池显示。
 
-本页对应 `codex/low-power` 分支，当前版本包含48MHz / STOP低功耗调度、计步与辅助抬腕、日常BLE通信、复位和电压日志、Bootloader SPP升级，以及2026-10-28手机同步与校时阻塞修复。普通APP和升级APP共用业务源码。改动位置、行为、优化作用和验证结果见[更新记录](#更新记录)；历史条目保留原提交的交付记录，当前行为以本页首节及当前源码为准。
+本页对应 `codex/low-power` 分支，当前版本包含64MHz / STOP低功耗调度、外设停钟、传感器错峰、按需任务与心率故障诊断、计步与辅助抬腕、日常BLE通信、复位和电压日志，以及Bootloader SPP升级。普通APP和升级APP共用业务源码。改动位置、行为、优化作用和验证结果见[更新记录](#更新记录)；历史条目保留原提交的交付记录，当前行为以本页首节及当前源码为准。
 
 `watch` 仓库统一提供 **独立 APP、Bootloader、升级 APP** 三个可分别编译的 Keil 工程。三个工程共享本仓库中的驱动、库和业务源码，下载时请保留完整目录。工程选择、Flash 分区和部署组合见[三个 Keil 工程](#三个-keil-工程)，首次编译见[获取与编译](#获取与编译)。
 
@@ -10,17 +10,20 @@
 
 | 项目 | 当前行为 |
 | --- | --- |
-| 主频与电压档 | APP 固定 48MHz / Scale 3，Flash 1 等待周期；APB1=24MHz、APB2=48MHz、SPI1=24MHz，背光 PWM 仍约 3.32kHz |
-| CPU Sleep / STOP | BLE 开启或外设仍需时钟时使用 Tickless Sleep；BLE 断电且 USART1 关闭、熄屏、PWM 为 0、SPI / DMA / ADC 空闲且预期空闲至少 5ms 时使用低功耗调压器 STOP |
+| 主频与电压档 | APP 固定 64MHz / Scale 3，Flash 2 等待周期；APB1=32MHz、APB2=64MHz、SPI1=32MHz，背光 PWM 仍约 3.32kHz |
+| CPU Sleep / STOP | BLE 开启或外设仍需时钟时使用 Tickless Sleep；BLE 断电且 USART1 关闭、熄屏、PWM 为 0、SPI / DMA / ADC 空闲且预期空闲至少 5ms 时使用低功耗调压器 STOP；STOP 开关默认启用，同时开启 Flash 掉电和稳压器低电压模式 |
+| GPIO 与外设停钟 | 空闲 PA0/PA2/PA6/PA7/PB10/PC13 配置为模拟无上下拉，移除电源保持及屏幕控制等推挽输出的内部下拉；熄屏停止 TIM3 并关闭 TIM3/SPI1/DMA2 时钟，ADC 在 Sleep 停钟 |
+| 手机性能与心率诊断 | DIAG,1 / DIAG,0 按需开启或关闭原 WDG1 诊断，补齐 touch 业务计时；HEART,READ 查询心率状态及具体故障，默认静默 |
 | 无触摸待机 | 连续 10 秒无操作后，与 PA4 手动熄屏共用处理：背光 0%、保留蓝牙供电/UART、暂停绘图，LCD/触摸芯片休眠且触摸任务阻塞；PA4 或辅助抬腕亮屏，恢复原亮度和当前 RTC 时间 |
 | 显示与触摸轮询 | 活跃约 5ms；熄屏无按键时等待 PA4 通知或约 100ms 期限，按键消抖/按住期间保持 20ms，触摸休眠后阻塞 |
 | MPU6050 | 心率测量及独立运动模式 100Hz，姿态页与校准 50Hz；无姿态需求的亮屏页面与普通熄屏使用 5Hz 加速度低功耗循环，关闭陀螺仪和温度，持续计步及辅助抬腕；自动心率窗口保留 100Hz |
 | 磁力计 | 心率测量及独立运动模式 75Hz，活动/校准 30Hz；5Hz 加速度后台模式下保持 sleep，进入姿态/校准/运动/心率场景恢复 |
-| 心率读取 | 测量期间 sensor 每 10ms 服务，约 30ms 读取一次 PPG；心率测量期间 MPU 为 100Hz，校准期间保留 50Hz |
+| 心率读取 | sensor 目标 10ms，PPG 读取下限 30ms；有 PPG 事务时将磁读取延后一轮，MPU 继续读取；心率测量期间 MPU 配置 100Hz，校准期间 50Hz，实际采集率以实板诊断为准 |
+| 首页心率 | 显示本次开机最近一次有效结果，停测和故障后保留；详情、趋势及蓝牙继续使用实时状态与读数 |
 | 零偏校准 | 保留 100 帧静止确认和 100 帧平均，50Hz 下约 4 秒；两个阶段超时分别为 6 秒、4 秒 |
 | 电池估算 | 4.0V 为满电点，2026-10-27依据最新未充电记录重标：3.6V约31%、3.55V约18%；3.50V/5%和耗尽端仍待实测，保留每秒采样、启动均值、滤波及本次开机百分比只降不升 |
 
-Sleep / STOP 共用 Tickless 补时，运行时保持 1ms SysTick，单次最多 100ms。BLE 开启时保留 Sleep，UART、DMA 和背光 PWM 持续工作；BLE 关闭且满足空闲条件时暂停 SysTick，由 RTC WUT 或 PA4 / 传感器 EXTI 唤醒 STOP，先恢复 48MHz PLL 并同步 RTC 影子寄存器，再补齐 HAL / FreeRTOS / TIM2 诊断时间，最后开放中断。当前正常待机保持 BLE，仍使用 Sleep；SPORT 熄屏时可利用采样间隙进入 STOP，100Hz 服务周期不变。RTC 未就绪时退回 1ms Sleep，WUT 配置失败退回 Tickless Sleep；STOP 后 RTC 同步失败则停用 RTC 有效状态并退回 1ms Sleep，本次停钟间隔因缺少有效 RTC 读数无法准确补齐。实际功耗和采样裕量需上板测量。自动待机与 PA4 手动熄屏行为一致，普通模式保留 PA8 供电及 PA9/PA10 UART，支持 PA4 或放下后抬腕亮屏；LCD 先等在途 DMA 完成或超时安全收尾再进入休眠，亮屏发 Sleep Out 后至少等待 120ms。触摸恢复由独立任务复位并等待约 310ms，不阻塞 sensor。亮屏时气压、电池约 1 秒服务一次，温湿度约 2 秒触发一次；普通熄屏电池保持约 1 秒一次，环境与自动心率每 10 分钟测量，无姿态需求时 MPU 自主进行 5Hz 加速度采样，sensor 每 200ms 读取新帧。步数按本次开机累计，不写 EEPROM；首页脚印图标旁显示数值，向上图标提示辅助抬腕。活动、运动和心率所需采样频率保持原配置。
+Sleep / STOP 共用 Tickless 补时，运行时保持 1ms SysTick，单次最多 100ms。BLE 开启时保留 Sleep，UART、DMA 和背光 PWM 持续工作；BLE 关闭且满足空闲条件时暂停 SysTick，由 RTC WUT 或 PA4 / 传感器 EXTI 唤醒 STOP，先恢复 64MHz PLL 并同步 RTC 影子寄存器，再补齐 HAL / FreeRTOS / TIM2 诊断时间，最后开放中断。当前正常待机保持 BLE，仍使用 Sleep；SPORT 熄屏时可利用采样间隙进入 STOP，100Hz 服务周期不变。RTC 未就绪时退回 1ms Sleep，WUT 配置失败退回 Tickless Sleep；STOP 后 RTC 同步失败则停用 RTC 有效状态并退回 1ms Sleep，本次停钟间隔因缺少有效 RTC 读数无法准确补齐。实际功耗和采样裕量需上板测量。自动待机与 PA4 手动熄屏行为一致，普通模式保留 PA8 供电及 PA9/PA10 UART，支持 PA4 或放下后抬腕亮屏；LCD 先等在途 DMA 完成或超时安全收尾再进入休眠，亮屏发 Sleep Out 后至少等待 120ms。触摸恢复由独立任务复位并等待约 310ms，不阻塞 sensor。亮屏时气压、电池约 1 秒服务一次，温湿度约 2 秒触发一次；普通熄屏电池保持约 1 秒一次，环境与自动心率每 10 分钟测量，无姿态需求时 MPU 自主进行 5Hz 加速度采样，sensor 每 200ms 读取新帧。步数按本次开机累计，不写 EEPROM；首页脚印图标旁显示数值，向上图标提示辅助抬腕。活动、运动和心率所需采样频率保持原配置。
 
 心率测量已恢复约 30ms 读取，40～200 BPM 合成回归在稳定段逐帧检查有效输出，包含 200 BPM；范围外的估算仍不钳位。实板心率精度、总线时序及功耗尚需测量。具体实现见 [界面与低功耗说明](docs/watch-ui.md)。
 
@@ -122,7 +125,7 @@ python -B -X utf8 tests/ui/run.py
 
 ## 三工程打包与验证（2026-10-27）
 
-本节保留 `80766c0` 的历史打包记录；当前48MHz版本及本次修复的资源与验证结果见下方2026-10-28更新记录。
+本节保留 `80766c0` 的历史打包记录；当前64MHz版本的资源与验证结果见下方2026-10-28更新记录。
 
 本次功能源码沿用已发布的 `1ade1e3`，在 `watch` 的 `codex/low-power` 分支统一交付三个 Keil 工程。本次文档整理保持固件源码、工程配置和功能版本不变。
 
@@ -144,7 +147,29 @@ python -B -X utf8 tests/ui/run.py
 
 以下日期取自 Git 提交日期。记录按新到旧排列，旧条目中的 4.2V 电量曲线等限制为当时状态，已由上述低功耗版本更新；各条目的验证结果仅适用于对应版本。
 
-### 2026-10-28 · 当前工作区 · 偶发手机同步失败与复位风险修复
+### 2026-10-28 · [146af34](https://github.com/Mangta517/watch/commit/146af34beb52b2eb2a95ae6f548c81d961b8eeb8) · 64MHz 低功耗与传感器错峰调度
+
+- **问题**：需要同步本地后续低功耗配置；sensor 串行事务重叠及超期后整周期等待会拉长采样间隔，手机诊断缺少 touch 业务耗时和心率失败位置，首页停测后也无法保留最近有效心率。
+- **改动与优化效果**：
+
+| 模块 / 主要文件 | 改动与作用 |
+| --- | --- |
+| 时钟与休眠：`Core/Src/main.c`、`tim.c`、`FreeRTOSConfig.h`、`.ioc`、`app_tickless.*` | 同步 64MHz / Scale3 / Flash2 和 PWM 分频，软件 I2C、触摸位延时按当前主频调整；保留 BLE Tickless Sleep 和有条件 STOP，STOP 启用 Flash 掉电及稳压器低电压模式 |
+| 外设与 GPIO：`Core/Src/adc.c`、`gpio.c`、`interface/lcd.c` | ADC 在 Sleep 停钟，LCD 休眠后停止 TIM3 并关闭显示外设时钟，亮屏先恢复时钟且保持背光为零至面板就绪；空闲 GPIO 使用模拟输入，推挽输出移除内部下拉，减少空闲外设持续运行 |
+| sensor 与磁采集：`app_task.c`、`app_heart.*`、`app_imu.*`、`lsm303dlhc.c` | sensor 超期后只让出一拍；先服务 PPG，有事务时延后磁读取，MPU 继续读取。磁帧要求 DRDY=1 且 LOCK=0，排空 LOCK 残留帧不计成功；保留采样档位、一致性检查及新鲜度限制 |
+| 诊断与首页：`app_diag.*`、`app_reset_ble.*`、`app_heart.*`、`app_ui.c` | DIAG 命令可独立开启四任务诊断，补齐 touch 业务计时；HEART,READ 及原诊断结果字段报告故障类型、寄存器和值，启动 / 停测保留原始故障；首页保留本次开机最近有效心率，详情和蓝牙仍用实时状态 |
+
+- **验证结果**：在发布工作区运行 clock、sensors、startup、BLE、bootloader、battery_log、reset、reset_ble、tickless、touch、watchdog、diagnostics、UI 共 13 套主机回归，全部通过；UI 含诊断开 / 关，Tickless 含 STOP 开 / 关。覆盖 PPG / 磁错峰、磁新帧 / LOCK / 年龄、上一拍运动参考、超期与 tick 回绕、心率故障快照、首页历史值及显示停钟恢复。三个 Keil 目标使用 ARMCC 5.06 update 5 全量重编译，结果如下；两个 APP 的 13 条警告均来自本次未修改的 LVGL 源码。
+
+| 工程 | 错误 | 警告 | MAP Total ROM Size | RAM（RW + ZI） |
+| --- | --- | --- | --- | --- |
+| `f411ceu6` | 0 | 13 | 220316 B | 104216 B |
+| `f411_bootloader` | 0 | 0 | 17916 B | 15720 B |
+| `f411ceu6_upgrade_app` | 0 | 13 | 220316 B | 104216 B |
+
+- **剩余问题**：本次未烧录。真实待机电流、64MHz 软件总线时序、BLE 连续通信及 STOP 唤醒仍需实板验证。3 秒耗时模型得到 300 轮 sensor / 99 次 PPG 读取；独立 75Hz 转换模型在错峰时取得 174/225 帧磁数据，约 58Hz，不能据此声称实板稳定 100Hz 或磁帧全部采齐。PID=FF 的物理原因及上电恢复尚未解决，详见[诊断说明](docs/diagnostics.md)和[磁力计说明](docs/magnetometer.md)。
+
+### 2026-10-28 · [3c9e533](https://github.com/Mangta517/watch/commit/3c9e53392cbce37c6833648d046ba9967b66214d) · 偶发手机同步失败与复位风险修复
 
 - **改动位置**：`interface/kt6368a.*`、`application/app_ui.c`记录并消费UART实际到达时间及错误边界；`application/app_reset.c`缩短正常存档的关中断窗口；`interface/watch_rtc.*`改为有界运行期校时；`tests/ble/`、`tests/ui/`、`tests/reset/`、`tests/clock/`补充对应故障回归。
 - **行为与作用**：修复后半包已到队列、显示任务延迟超过200ms才消费时将完整时间/天气拆坏的问题；真实空闲和无换行消息仍按200ms分帧。UART错误不再清空错误后全部队列，按损坏位置恢复；错误字节不作为有效业务输入。喂狗检查点在开中断时计算CRC，异常现场仍优先完整提交。RTC时钟丢失或同步失败时校时有界退出，下一条合法消息可在时钟恢复后重试，避免显示任务进入HAL的1s等待。
