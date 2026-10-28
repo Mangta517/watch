@@ -115,7 +115,7 @@ static void check_percent(void)
     }
     next_sample();
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.valid && snapshot.voltage_mv == 3900 && snapshot.percent == 85);
+    assert(snapshot.valid && snapshot.voltage_mv == 3900 && snapshot.percent == 88);
     /* 放电时电量下降；之后即使电压回到3.9V，也不能回涨。 */
     adc_value = (3750 * 4095 + 3300) / 6600;
     for (i = 0; i < 120; ++i)
@@ -123,14 +123,14 @@ static void check_percent(void)
         next_sample();
     }
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.voltage_mv == 3750 && snapshot.percent == 53);
+    assert(snapshot.voltage_mv == 3750 && snapshot.percent == 64);
     adc_value = (3900 * 4095 + 3300) / 6600;
     for (i = 0; i < 120; ++i)
     {
         next_sample();
     }
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.voltage_mv == 3900 && snapshot.percent == 53);
+    assert(snapshot.voltage_mv == 3900 && snapshot.percent == 64);
     /* ADC故障不丢失电量历史，恢复后也不能回涨。 */
     poll_result = HAL_TIMEOUT;
     next_sample();
@@ -138,7 +138,7 @@ static void check_percent(void)
     poll_result = HAL_OK;
     next_sample();
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.valid && snapshot.percent == 53);
+    assert(snapshot.valid && snapshot.percent == 64);
     previous_percent = snapshot.percent;
     adc_value = 0;
     for (i = 0; i < 120; ++i)
@@ -161,8 +161,8 @@ static void check_percent(void)
 
 static void check_full_voltage(void)
 {
-    static const uint16_t voltages_mv[] = {3300, 3500, 3559, 3600, 3650, 3675, 3700, 3750, 3800, 3850, 3900, 3950, 3990, 4000, 4100};
-    static const uint8_t percentages[] = {0, 5, 8, 10, 23, 30, 37, 53, 62, 75, 85, 93, 99, 100, 100};
+    static const uint16_t voltages_mv[] = {3300, 3500, 3525, 3532, 3550, 3559, 3600, 3640, 3650, 3675, 3700, 3750, 3800, 3850, 3900, 3950, 3990, 4000, 4100};
+    static const uint8_t percentages[] = {0, 5, 12, 13, 18, 20, 31, 39, 41, 48, 54, 64, 70, 79, 88, 94, 99, 100, 100};
     app_battery_struct snapshot;
     unsigned i, sample;
     for (i = 0; i < sizeof(voltages_mv) / sizeof(voltages_mv[0]); ++i)
@@ -178,7 +178,7 @@ static void check_full_voltage(void)
         assert(snapshot.voltage_mv + 1 >= voltages_mv[i] && snapshot.voltage_mv <= voltages_mv[i] + 1U);
         assert(snapshot.percent == percentages[i]);
     }
-    puts("PASS: partial discharge calibration, interpolation, upper clamp and retained low-voltage estimates.");
+    puts("PASS: latest discharge calibration, measured low-voltage interpolation, upper clamp and retained unmeasured anchors.");
 }
 
 int main(int argc, char **argv)
@@ -220,7 +220,7 @@ int main(int argc, char **argv)
     }
     app_battery_get_snapshot(&snapshot);
     assert(snapshot.valid && snapshot.adc_raw == 2389 && snapshot.voltage_mv == 3850);
-    assert(snapshot.percent == 75);
+    assert(snapshot.percent == 79);
     assert(starts == 8 && polls == 8 && reads == 8 && stops == 8);
     now_ms += APP_BATTERY_PERIOD_MS - 1;
     app_battery_service();

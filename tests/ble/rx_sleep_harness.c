@@ -5,7 +5,7 @@ void Error_Handler(void);
 #include "../../application/app_task.c"
 #include "../../interface/kt6368a.c"
 
-UART_HandleTypeDef huart1 = {USART1, {115200}};
+UART_HandleTypeDef huart1 = {USART1, {115200}, 0};
 static uint32_t tick, notifications, irq_count, wait_count, delay_count;
 static uint32_t wire_remaining, wire_sent, wire_fraction, consumed;
 static uint8_t *rx_target;

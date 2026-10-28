@@ -27,11 +27,16 @@ void watch_rtc_init_begin(void);
 HAL_StatusTypeDef watch_rtc_init_service(void);
 uint8_t watch_rtc_init_is_pending(void);
 HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time);
-/* 0=设置成功，1=未就绪、时间非法或HAL设置失败。 */
+/* INITF/影子同步各按DWT限1ms并用次数兜底；0成功，1未配置、时间非法或RTC故障，故障后可重新校时。 */
 uint8_t watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t seconds);
 uint8_t watch_rtc_is_synced(void);
 /* LVGL上下文只读快照；不初始化RTC、不改备份标记或时间。 */
 void watch_rtc_get_status(watch_rtc_status_struct *status);
 /* 返回本秒已过的亚秒计数；未就绪返回UINT32_MAX。由屏蔽中断的IDLE休眠流程读取。 */
 uint32_t watch_rtc_get_subsecond(void);
+/* IDLE屏蔽中断后调用；按32768Hz计数安排提前唤醒，0成功、1失败。 */
+uint8_t watch_rtc_start_wakeup(uint32_t subsecond_counts);
+void watch_rtc_stop_wakeup(void);
+/* STOP醒后有界等待影子同步，不依赖HAL tick；0成功、1失败。 */
+uint8_t watch_rtc_sync_after_stop(void);
 #endif

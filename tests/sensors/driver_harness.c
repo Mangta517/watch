@@ -34,6 +34,9 @@ static uint32_t tp_reset_start, tp_ready_at, lcd_reset_start;
 static unsigned tp_resets, scl_edges, released_edges, edges_at_reset, released_at_reset;
 static GPIO_PinState scl_state = GPIO_PIN_SET;
 static uint32_t sda_mode;
+static GPIO_PinState sda_latch;
+static unsigned handoff_start_reply, handoff_bytes, handoff_clocks, handoff_checks;
+static uint8_t handoff_active;
 static GPIO_PinState replies[128];
 static unsigned reply_count, reply_pos;
 static jmp_buf error_jump;
@@ -94,6 +97,10 @@ void Error_Handler(void)
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
     assert(primask && port == TP_SDA_GPIO_Port && config->Pin == TP_SDA_Pin);
+    if (handoff_active != 0 && config->Mode == GPIO_MODE_OUTPUT_PP)
+    {
+        assert(handoff_clocks % 9 == 8 && sda_latch == GPIO_PIN_RESET);
+    }
     sda_mode = config->Mode;
 }
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
@@ -102,6 +109,18 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
     {
         if (state == GPIO_PIN_SET && scl_state == GPIO_PIN_RESET)
         {
+            if (handoff_active != 0)
+            {
+                if (handoff_clocks % 9 < 8 || handoff_clocks + 1 == handoff_bytes * 9)
+                {
+                    assert(sda_mode == GPIO_MODE_INPUT); /* 数据位和末字节 NACK 必须释放。 */
+                }
+                else
+                {
+                    assert(sda_mode == GPIO_MODE_OUTPUT_PP && sda_latch == GPIO_PIN_RESET);
+                }
+                ++handoff_clocks;
+            }
             ++scl_edges;
             if (sda_mode == GPIO_MODE_INPUT)
             {
@@ -109,6 +128,19 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
             }
         }
         scl_state = state;
+        if (handoff_active != 0 && state == GPIO_PIN_RESET && handoff_clocks == handoff_bytes * 9)
+        {
+            handoff_active = 0;
+            ++handoff_checks;
+        }
+    }
+    else if (port == TP_SDA_GPIO_Port && pin == TP_SDA_Pin)
+    {
+        if (handoff_active != 0 && sda_mode == GPIO_MODE_OUTPUT_PP)
+        {
+            assert(state == GPIO_PIN_RESET); /* 连两拍间的短暂推挽高电平也不可接受。 */
+        }
+        sda_latch = state;
     }
     else if (port == TP_RST_GPIO_Port && pin == TP_RST_Pin)
     {
@@ -157,7 +189,14 @@ GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
     assert(sda_mode == GPIO_MODE_INPUT && elapsed_ms >= tp_ready_at);
     if (reply_pos < reply_count)
     {
-        return replies[reply_pos++];
+        GPIO_PinState reply = replies[reply_pos++];
+        if (handoff_start_reply != 0 && reply_pos == handoff_start_reply)
+        {
+            handoff_start_reply = 0;
+            handoff_clocks = 0;
+            handoff_active = 1; /* 读地址 ACK 后，从机开始持有 SDA。 */
+        }
+        return reply;
     }
     return GPIO_PIN_SET; /* Unconnected device NACKs. */
 }
@@ -390,6 +429,8 @@ static void touch_recovery_tests(void)
     Touch_Wakeup();
     assert(g_tp_chip_id == 0 && tp_resets == 1 && elapsed_ms - start >= 510);
     assert(hal_waits == 0 && task_waits == 4);
+    queue_write();
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && reply_pos == reply_count);
 }
 
 static void lcd_address_tests(void)
@@ -601,7 +642,7 @@ static void touch_coordinate_failure_tests(void)
     reply_count = reply_pos = 0;
     queue_read(0xFF); /* 扫描不可用不能充当真实松手，也不能覆盖旧坐标。 */
     assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123 && y == 456);
-    for (i = 0; i < 199; ++i)
+    for (i = 0; i < 198; ++i)
     {
         reply_count = reply_pos = 0;
         queue_read(1);
@@ -649,6 +690,119 @@ static void touch_coordinate_failure_tests(void)
     puts("PASS: coordinate-only NACKs trigger bounded deferred recovery; no-finger success resets the streak.");
 }
 
+static void touch_sda_handoff_tests(void)
+{
+    static const uint8_t values[] = {0x00, 0x80, 0x01, 0xFF};
+    uint16_t x = 123, y = 456;
+    unsigned i, before = handoff_checks;
+
+    reset_observations(taskSCHEDULER_RUNNING);
+    for (i = 0; i < sizeof(values); ++i)
+    {
+        reply_count = reply_pos = 0;
+        queue_read(values[i]);
+        handoff_start_reply = 3;
+        handoff_bytes = 1;
+        assert(Touch_GetChipID() == values[i] && reply_pos == reply_count);
+        assert(handoff_active == 0 && handoff_checks == before + i + 1);
+    }
+    reply_count = reply_pos = 0;
+    queue_read(1);
+    queue_read(0x80);
+    for (i = 0; i < 24; ++i)
+    {
+        queue_bit(GPIO_PIN_RESET);
+    }
+    handoff_start_reply = 14;
+    handoff_bytes = 4;
+    assert(Touch_GetPoint(&x, &y) == 1 && x == 239 && y == 279);
+    assert(reply_pos == reply_count && handoff_checks == before + 5 && handoff_active == 0);
+    puts("PASS: SDA stays released from read-address ACK through data; ACK takes over low and final NACK releases SDA.");
+}
+
+static void touch_invalid_scan_tests(void)
+{
+    uint16_t x = 123, y = 456;
+    uint32_t start;
+    unsigned i;
+
+    reset_observations(taskSCHEDULER_RUNNING);
+    queue_read(0);
+    assert(Touch_GetPoint(&x, &y) == 0);
+    start = elapsed_ms;
+    for (i = 0; i < 2000; ++i)
+    {
+        reply_count = reply_pos = 0;
+        queue_read(0xFF);
+        assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123 && y == 456);
+        if (i < 199)
+        {
+            assert(tp_resets == 0);
+        }
+        else
+        {
+            assert(tp_resets != 0);
+        }
+        elapsed_ms += 5;
+    }
+    assert(elapsed_ms - start == 10000 && task_waits == 0 && hal_waits == 0);
+    reply_count = reply_pos = 0;
+    puts("PASS: 2000 invalid scans over 10 seconds trigger deferred recovery at the 200th failure, without publishing a release.");
+}
+
+static void touch_config_failure_tests(void)
+{
+    uint16_t x = 123, y = 456;
+    unsigned i, before;
+
+    reset_observations(taskSCHEDULER_RUNNING);
+    queue_read(0xB5);
+    queue_write();
+    assert(Touch_Init() == 0xB5); /* 清除上一场景的恢复状态。 */
+    reply_count = reply_pos = 0;
+    queue_read(0xB5);
+    queue_bit(GPIO_PIN_SET); /* ChipID 正常，但关闭自动休眠写入 NACK。 */
+    assert(Touch_Init() == 0 && g_tp_chip_id == 0xB5 && reply_pos == reply_count);
+    hal_waits = task_waits = 0;
+    before = tp_resets;
+    for (i = 0; i < 198; ++i)
+    {
+        assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123 && y == 456);
+    }
+    assert(tp_resets == before);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && tp_resets == before + 1);
+    elapsed_ms += 10;
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    elapsed_ms += 300;
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    reply_count = reply_pos = 0;
+    queue_read(0xB5);
+    queue_bit(GPIO_PIN_SET); /* 异步恢复中的配置失败也必须继续返回错误。 */
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && g_tp_chip_id == 0xB5);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && reply_pos == reply_count);
+    reply_count = reply_pos = 0;
+    queue_write();
+    queue_read(0);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && reply_pos == 3);
+    assert(Touch_GetPoint(&x, &y) == 0 && reply_pos == reply_count);
+    assert(task_waits == 0 && hal_waits == 0);
+
+    reply_count = reply_pos = 0;
+    queue_read(0xB5);
+    queue_bit(GPIO_PIN_SET);
+    Touch_Wakeup();
+    assert(reply_pos == reply_count);
+    hal_waits = task_waits = 0;
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123 && y == 456);
+    reply_count = reply_pos = 0;
+    queue_write();
+    queue_read(0);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && reply_pos == 3);
+    assert(Touch_GetPoint(&x, &y) == 0 && reply_pos == reply_count);
+    assert(task_waits == 0 && hal_waits == 0);
+    puts("PASS: init, wake and deferred recovery retain config failures; persistent config NACKs reset the chip and success resumes sampling.");
+}
+
 static void touch_async_absent_tests(void)
 {
     uint16_t x = 123, y = 456;
@@ -683,6 +837,9 @@ int main(void)
     init_delay_tests(taskSCHEDULER_SUSPENDED);
     touch_recovery_tests();
     touch_coordinate_failure_tests();
+    touch_sda_handoff_tests();
+    touch_invalid_scan_tests();
+    touch_config_failure_tests();
     touch_async_absent_tests();
     puts("PASS: real LCD/touch init and sleep delays, reset/probe recovery, failure threshold and coordinates");
     return 0;

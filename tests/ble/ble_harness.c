@@ -12,9 +12,10 @@
 #define TEST_INITIAL_SPP  "01"
 #endif
 
-UART_HandleTypeDef huart1 = {USART1, {115200}};
+UART_HandleTypeDef huart1 = {USART1, {115200}, 0};
 static uint32_t tick, mask, delay_calls;
 static uint8_t *rx_target;
+static uint8_t in_rx_isr;
 static int rx_armed, powered, connected, boots, writes, silent, reject_setting;
 static int fail_tx, fail_rx;
 static unsigned query_count, drop_queries;
@@ -54,7 +55,9 @@ static void inject(uint8_t byte)
     assert(rx_armed && rx_target != NULL);
     rx_armed = 0;
     *rx_target = byte;
+    in_rx_isr = 1;
     HAL_UART_RxCpltCallback(&huart1);
+    in_rx_isr = 0;
 }
 
 static void advance(void)
@@ -76,7 +79,10 @@ static void reply(const char *text)
 
 uint32_t HAL_GetTick(void)
 {
-    advance();
+    if (in_rx_isr == 0 && mask == 0)
+    {
+        advance();
+    }
     return tick;
 }
 void HAL_Delay(uint32_t ms)
@@ -152,6 +158,7 @@ HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *uart, uint8_t *data, u
     }
     rx_target = data;
     rx_armed = 1;
+    uart->ErrorCode = HAL_UART_ERROR_NONE;
     return HAL_OK;
 }
 HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *uart)
@@ -479,6 +486,86 @@ static void explicit_power_tests(void)
     puts("PASS: explicit disable cuts power/UART/GPIO, aborts TX and cancels startup; enable restores UART/RX nonblocking across tick wrap.");
 }
 
+static void timed_rx_tests(void)
+{
+    uint8_t data[KT6368A_RX_BUFFER_SIZE];
+    kt6368a_rx_info_struct info;
+    uint32_t i;
+    pending_pos = pending_size;
+    kt6368a_flush_rx();
+    tick = 1000;
+    inject('A');
+    inject('B');
+    tick = 1002;
+    inject('C');
+    tick = 1250;
+    inject('D');
+    tick = 2000; /* 消费延迟不能替换实际到达时间或合并真实空闲。 */
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 2 && memcmp(data, "AB", 2) == 0);
+    assert(info.received_ms == 1000 && info.flags == KT6368A_RX_GAP);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && data[0] == 'C');
+    assert(info.received_ms == 1002 && info.flags == 0);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && data[0] == 'D');
+    assert(info.received_ms == 1250 && info.flags == KT6368A_RX_GAP);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 0 && info.received_ms == 1250 && info.flags == 0);
+
+    kt6368a_flush_rx();
+    tick = UINT32_MAX - 2;
+    inject('X');
+    tick = 1;
+    inject('Y');
+    tick = 201;
+    inject('Z');
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && info.flags == KT6368A_RX_GAP);
+    assert(info.received_ms == UINT32_MAX - 2);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && info.flags == 0 && info.received_ms == 1);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && info.flags == KT6368A_RX_GAP && info.received_ms == 201);
+
+    kt6368a_flush_rx();
+    tick = 4000;
+    inject('P');
+    HAL_UART_ErrorCallback(&huart1);
+    tick = 4002;
+    inject('Q');
+    tick = 4202;
+    inject('R');
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && data[0] == 'P' && info.flags == KT6368A_RX_GAP);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && data[0] == 'Q' && info.flags == KT6368A_RX_LOSS);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && data[0] == 'R' && info.flags == KT6368A_RX_GAP);
+    HAL_UART_ErrorCallback(&huart1);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 0 && info.flags == KT6368A_RX_LOSS);
+    tick += KT6368A_RX_IDLE_MS;
+    inject('S');
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && data[0] == 'S');
+    assert(info.flags == (KT6368A_RX_LOSS | KT6368A_RX_GAP));
+
+    kt6368a_flush_rx();
+    huart1.ErrorCode = HAL_UART_ERROR_ORE;
+    inject('\n'); /* 真实HAL先调用RxCplt，随后才进入ErrorCallback。 */
+    assert(huart1.ErrorCode == HAL_UART_ERROR_ORE && !rx_armed);
+    assert(kt6368a_rx_pending() == 0);
+    HAL_UART_ErrorCallback(&huart1);
+    assert(huart1.ErrorCode == HAL_UART_ERROR_NONE && rx_armed);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 0 && info.flags == KT6368A_RX_LOSS);
+    assert(info.sampled_ms == tick);
+
+    kt6368a_flush_rx();
+    tick = 5000;
+    for (i = 0; i < KT6368A_RX_BUFFER_SIZE; ++i)
+    {
+        inject((uint8_t)i);
+    }
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == KT6368A_RX_BUFFER_SIZE - 1);
+    assert(info.flags == KT6368A_RX_GAP);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 0 && info.flags == KT6368A_RX_LOSS);
+    inject(0xA5);
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 1 && data[0] == 0xA5 && info.flags == KT6368A_RX_LOSS);
+    mask = 1;
+    assert(kt6368a_read_timed(data, sizeof(data), &info) == 0 && mask == 1);
+    mask = 0;
+    puts("PASS: real UART arrival timestamps, idle/loss positions, delayed consumption, overflow, ring/tick wrap and IRQ state.");
+}
+
 int main(void)
 {
     uint8_t buffer[1024];
@@ -611,5 +698,6 @@ int main(void)
     puts("KT6368A: config persistence, RX wrap/overflow, UART error recovery, AT framing/timeouts, power gating and absence of status GPIO checks passed.");
     staged_startup_tests();
     explicit_power_tests();
+    timed_rx_tests();
     return 0;
 }

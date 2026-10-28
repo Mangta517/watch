@@ -165,7 +165,7 @@ static lv_obj_t *s_bt_log_box;
 static char s_bt_text[UI_BT_LOG_SIZE];
 static uint16_t s_bt_text_length;
 static uint32_t s_bt_rx_bytes;
-static uint32_t s_bt_rx_dropped, s_bt_rx_errors, s_bt_rx_activity_ms;
+static uint32_t s_bt_rx_dropped, s_bt_rx_errors;
 static uint8_t s_bt_rx_resync;
 static uint8_t s_bt_last_cr;
 static uint8_t s_bt_dirty;
@@ -1242,18 +1242,9 @@ static void brightness_cb(lv_event_t *event)
     set_label_text_fmt(s_brightness_label, "%d%%", (int)s_brightness);
 }
 
-/* 丢字节位置在环形队列中不可定位，废弃队列和残帧后重新寻找消息边界。 */
-static uint8_t bluetooth_rx_check(uint32_t now_ms)
+/* 到达队列保留错误位置；仅废弃损坏残帧，不清掉错误后的完整新消息。 */
+static void bluetooth_rx_reset(void)
 {
-    uint32_t dropped = kt6368a_get_rx_dropped();
-    uint32_t errors = kt6368a_get_rx_errors();
-    if (dropped == s_bt_rx_dropped && errors == s_bt_rx_errors)
-    {
-        return 0;
-    }
-    s_bt_rx_dropped = dropped;
-    s_bt_rx_errors = errors;
-    kt6368a_flush_rx();
     app_clock_reset_receive();
     app_weather_reset_receive();
     app_diag_reset_receive();
@@ -1262,8 +1253,6 @@ static uint8_t bluetooth_rx_check(uint32_t now_ms)
     s_bt_rx_resync = 1;
     s_bt_phone_ready = 0;
     s_bt_clock_frames = app_clock_get_received_count();
-    s_bt_rx_activity_ms = now_ms;
-    return 1;
 }
 
 /* 按字节接收，保留最近511个显示字符；非ASCII字节显示为\xHH。 */
@@ -1273,39 +1262,42 @@ static void bluetooth_receive(void)
     uint8_t data[UI_BT_READ_SIZE];
     char text[UI_BT_READ_SIZE * 4];
     uint16_t received, length, remove, i, start, budget = UI_BT_RX_BUDGET;
-    uint32_t now_ms;
+    uint32_t now_ms, tick_offset, dropped, errors;
+    uint8_t drained = 0;
+    kt6368a_rx_info_struct info;
 
     /* AT响应留给初始化；RTC未就绪时先保留手机校时等业务字节。 */
     if (s_sport_mode != 0 || kt6368a_init_is_pending() != 0 || watch_rtc_init_is_pending() != 0)
     {
         return;
     }
-    if (bluetooth_rx_check(lv_tick_get()) != 0)
-    {
-        return;
-    }
+    /* HAL与RTOS的启动零点不同；按本轮偏移把UART到达tick转换为LVGL时间。 */
+    taskENTER_CRITICAL();
+    tick_offset = lv_tick_get() - HAL_GetTick();
+    taskEXIT_CRITICAL();
 
     while (budget != 0)
     {
         if (budget < sizeof(data))
         {
-            received = kt6368a_read(data, budget);
+            received = kt6368a_read_timed(data, budget, &info);
         }
         else
         {
-            received = kt6368a_read(data, sizeof(data));
+            received = kt6368a_read_timed(data, sizeof(data), &info);
         }
         if (received == 0)
         {
+            drained = 1;
             break;
         }
         budget -= received;
-        now_ms = lv_tick_get();
-        if (bluetooth_rx_check(now_ms) != 0)
+        now_ms = info.received_ms + tick_offset;
+        if ((info.flags & KT6368A_RX_LOSS) != 0)
         {
-            return; /* 读取期间发生的溢出/串口错误也不能交给解析器。 */
+            bluetooth_rx_reset();
         }
-        if (s_bt_rx_resync != 0 && (uint32_t)(now_ms - s_bt_rx_activity_ms) >= APP_CLOCK_FRAME_IDLE_MS)
+        if ((info.flags & KT6368A_RX_GAP) != 0)
         {
             s_bt_rx_resync = 0;
         }
@@ -1318,7 +1310,6 @@ static void bluetooth_receive(void)
             }
             ++start;
         }
-        s_bt_rx_activity_ms = now_ms;
         if (start < received)
         {
             app_battery_log_ble_receive(data + start, received - start, now_ms);
@@ -1375,15 +1366,26 @@ static void bluetooth_receive(void)
         s_bt_text[s_bt_text_length] = '\0';
         s_bt_dirty = 1;
     }
-    if (bluetooth_rx_check(lv_tick_get()) == 0)
+    if (drained != 0)
     {
-        app_clock_service(lv_tick_get());
-        app_weather_service(lv_tick_get());
-        if (s_bt_clock_frames != app_clock_get_received_count())
+        dropped = kt6368a_get_rx_dropped();
+        errors = kt6368a_get_rx_errors();
+        if ((info.flags & KT6368A_RX_LOSS) != 0 && (dropped != s_bt_rx_dropped || errors != s_bt_rx_errors))
         {
-            s_bt_clock_frames = app_clock_get_received_count();
-            s_bt_phone_ready = 1;
+            bluetooth_rx_reset(); /* 错误后尚无下一字节时，也不能提交残缺的无换行帧。 */
         }
+        s_bt_rx_dropped = dropped;
+        s_bt_rx_errors = errors;
+        if ((uint32_t)(info.sampled_ms - info.received_ms) >= KT6368A_RX_IDLE_MS)
+        {
+            app_clock_service(info.sampled_ms + tick_offset);
+            app_weather_service(info.sampled_ms + tick_offset);
+        }
+    }
+    if (s_bt_clock_frames != app_clock_get_received_count())
+    {
+        s_bt_clock_frames = app_clock_get_received_count();
+        s_bt_phone_ready = 1;
     }
 }
 

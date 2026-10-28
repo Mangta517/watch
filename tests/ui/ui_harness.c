@@ -150,10 +150,14 @@ void kt6368a_set_enabled(uint8_t enabled)
 }
 static HAL_StatusTypeDef host_bt_init_status = HAL_OK;
 static uint8_t host_bt_rx[1024];
+static uint32_t host_bt_rx_ms[1024];
+static uint8_t host_bt_rx_flags[1024];
 static uint16_t host_bt_rx_size;
 static uint16_t host_bt_rx_pos;
 static uint32_t host_bt_dropped, host_bt_errors;
-static uint8_t host_bt_error_on_read;
+static uint32_t host_bt_activity_ms;
+static uint8_t host_bt_activity_valid, host_bt_loss_pending;
+static uint8_t host_bt_inject_on_empty;
 extern unsigned host_diag_rx_resets;
 static HAL_StatusTypeDef host_bt_tx_result = HAL_OK;
 static uint8_t host_bt_tx_busy;
@@ -346,10 +350,38 @@ uint16_t kt6368a_read(uint8_t *data, uint16_t size)
     }
     memcpy(data, host_bt_rx + host_bt_rx_pos, count);
     host_bt_rx_pos += count;
-    if (host_bt_error_on_read != 0)
+    return count;
+}
+static void host_bluetooth_feed(const uint8_t *data, uint16_t size);
+uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct *info)
+{
+    uint16_t count = 0;
+    info->received_ms = host_bt_activity_ms;
+    info->sampled_ms = HAL_GetTick();
+    info->flags = 0;
+    if (host_bt_rx_pos == host_bt_rx_size)
     {
-        ++host_bt_errors;
-        host_bt_error_on_read = 0;
+        if (host_bt_loss_pending != 0)
+        {
+            info->flags = KT6368A_RX_LOSS;
+        }
+        if (host_bt_inject_on_empty != 0)
+        {
+            host_bt_inject_on_empty = 0;
+            host_bluetooth_feed((const uint8_t *)"4:56\n", 5);
+            ++host_tick;
+        }
+        return 0;
+    }
+    info->received_ms = host_bt_rx_ms[host_bt_rx_pos];
+    info->flags = host_bt_rx_flags[host_bt_rx_pos];
+    while (count < size && host_bt_rx_pos < host_bt_rx_size)
+    {
+        if (count != 0 && (host_bt_rx_ms[host_bt_rx_pos] != info->received_ms || host_bt_rx_flags[host_bt_rx_pos] != 0))
+        {
+            break;
+        }
+        data[count++] = host_bt_rx[host_bt_rx_pos++];
     }
     return count;
 }
@@ -364,13 +396,49 @@ uint32_t kt6368a_get_rx_errors(void)
 void kt6368a_flush_rx(void)
 {
     host_bt_rx_pos = host_bt_rx_size;
+    host_bt_activity_valid = 0;
+    host_bt_loss_pending = 0;
 }
 static void host_bluetooth_feed(const uint8_t *data, uint16_t size)
 {
-    assert(host_bt_rx_pos == host_bt_rx_size && size <= sizeof(host_bt_rx));
-    memcpy(host_bt_rx, data, size);
-    host_bt_rx_size = size;
-    host_bt_rx_pos = 0;
+    uint16_t i;
+    if (host_bt_rx_pos == host_bt_rx_size)
+    {
+        host_bt_rx_size = host_bt_rx_pos = 0;
+    }
+    assert(host_bt_rx_size + size <= sizeof(host_bt_rx));
+    for (i = 0; i < size; ++i)
+    {
+        uint16_t index = host_bt_rx_size++;
+        host_bt_rx[index] = data[i];
+        host_bt_rx_ms[index] = HAL_GetTick();
+        host_bt_rx_flags[index] = 0;
+        if (host_bt_activity_valid != 0 && (uint32_t)(HAL_GetTick() - host_bt_activity_ms) >= KT6368A_RX_IDLE_MS)
+        {
+            host_bt_rx_flags[index] |= KT6368A_RX_GAP;
+        }
+        if (host_bt_loss_pending != 0)
+        {
+            host_bt_rx_flags[index] |= KT6368A_RX_LOSS;
+            host_bt_loss_pending = 0;
+        }
+        host_bt_activity_ms = HAL_GetTick();
+        host_bt_activity_valid = 1;
+    }
+}
+static void host_bluetooth_fault(uint8_t dropped)
+{
+    if (dropped != 0)
+    {
+        ++host_bt_dropped;
+    }
+    else
+    {
+        ++host_bt_errors;
+    }
+    host_bt_loss_pending = 1;
+    host_bt_activity_ms = HAL_GetTick();
+    host_bt_activity_valid = 1;
 }
 
 static void bluetooth_clear_frame_tests(void)
@@ -402,7 +470,7 @@ static void bluetooth_rx_error_tests(void)
     app_weather_get_snapshot(&before);
     host_bluetooth_feed((const uint8_t *)"12:", 3);
     bluetooth_receive();
-    ++host_bt_dropped;
+    host_bluetooth_fault(1);
     host_bluetooth_feed((const uint8_t *)"34\n", 3);
     bluetooth_receive();
     assert(host_rtc_set_calls == calls && host_diag_rx_resets == resets + 1);
@@ -412,7 +480,7 @@ static void bluetooth_rx_error_tests(void)
 
     host_bluetooth_feed((const uint8_t *)"WEATHER,3,2", 11);
     bluetooth_receive();
-    ++host_bt_errors;
+    host_bluetooth_fault(0);
     bluetooth_receive();
     host_bluetooth_feed((const uint8_t *)"63,80\n", 6);
     bluetooth_receive();
@@ -426,7 +494,7 @@ static void bluetooth_rx_error_tests(void)
     host_bluetooth_feed((const uint8_t *)"10:", 3);
     bluetooth_receive();
     calls = host_rtc_set_calls;
-    host_bt_error_on_read = 1;
+    host_bluetooth_fault(0);
     host_bluetooth_feed((const uint8_t *)"20\n", 3);
     bluetooth_receive();
     host_tick += APP_CLOCK_FRAME_IDLE_MS;
@@ -438,15 +506,142 @@ static void bluetooth_rx_error_tests(void)
     bluetooth_receive();
     assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 9 * 3600 + 8 * 60);
 
-    host_bt_dropped = UINT32_MAX;
+    resets = host_diag_rx_resets;
+    host_bt_dropped = UINT32_MAX - 1;
+    host_bluetooth_fault(1);
     bluetooth_receive();
-    host_bt_dropped = 0;
+    host_bluetooth_fault(1);
     bluetooth_receive();
-    assert(host_diag_rx_resets == resets + 5);
+    assert(host_bt_dropped == 0 && host_diag_rx_resets == resets + 2);
     host_bluetooth_feed((const uint8_t *)"\n07:06:05\n", 10);
     bluetooth_receive();
     assert(host_rtc_seconds == 7 * 3600 + 6 * 60 + 5);
     puts("PASS: UART loss/error/counter-wrap resets all parsers, discards suffixes and recovers at newline or idle without clearing valid weather.");
+}
+
+static void bluetooth_arrival_time_tests(void)
+{
+    uint32_t calls = host_rtc_set_calls;
+    uint32_t saved_seconds = host_rtc_seconds;
+    uint8_t budget_frame[UI_BT_RX_BUDGET + 6];
+    app_weather_struct weather;
+    assert(host_bt_rx_pos == host_bt_rx_size);
+    set_screen_on(1);
+    create_page(PAGE_WATCH, 0, 0);
+    assert(s_time != NULL);
+    host_bt_pending = host_rtc_pending = 0;
+    host_rtc_status = HAL_OK;
+    host_bluetooth_feed((const uint8_t *)"\n", 1);
+    bluetooth_receive();
+
+    /* UART只间隔2ms，后半帧排队250ms不能被误当成手机停发。 */
+    host_bluetooth_feed((const uint8_t *)"12:3", 4);
+    bluetooth_receive();
+    host_tick += 2;
+    host_bluetooth_feed((const uint8_t *)"4:56\n", 5);
+    host_tick += 250;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 12 * 3600 + 34 * 60 + 56);
+    refresh_clock();
+    assert(strcmp(lv_label_get_text(s_time), "12:34") == 0);
+
+    /* 空队列在199ms取快照后立即来了后缀，任务到200ms才运行也不能提交旧前缀。 */
+    calls = host_rtc_set_calls;
+    host_bluetooth_feed((const uint8_t *)"12:3", 4);
+    bluetooth_receive();
+    host_tick += APP_CLOCK_FRAME_IDLE_MS - 1;
+    host_bt_inject_on_empty = 1;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls && host_bt_rx_pos < host_bt_rx_size);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 12 * 3600 + 34 * 60 + 56);
+
+    host_bluetooth_feed((const uint8_t *)"WEATHER,3,2", 11);
+    bluetooth_receive();
+    host_tick += 2;
+    host_bluetooth_feed((const uint8_t *)"63,80\n", 6);
+    host_tick += 250;
+    bluetooth_receive();
+    app_weather_get_snapshot(&weather);
+    assert(weather.valid != 0 && weather.code == 3 && weather.temperature_x10 == 263 && weather.humidity_rh == 80);
+
+    /* 真正200ms空闲仍结束无换行帧，包括已经排在同一队列里的下一帧。 */
+    calls = host_rtc_set_calls;
+    host_bluetooth_feed((const uint8_t *)"01:02", 5);
+    bluetooth_receive();
+    host_tick += APP_CLOCK_FRAME_IDLE_MS - 1;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls);
+    ++host_tick;
+    host_bluetooth_feed((const uint8_t *)"03:04", 5);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 3600 + 2 * 60);
+    host_tick += APP_CLOCK_FRAME_IDLE_MS;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 2 && host_rtc_seconds == 3 * 3600 + 4 * 60);
+    host_bluetooth_feed((const uint8_t *)"WEATHER,1,121,60", sizeof("WEATHER,1,121,60") - 1);
+    bluetooth_receive();
+    host_tick += APP_CLOCK_FRAME_IDLE_MS;
+    host_bluetooth_feed((const uint8_t *)"WEATHER,3,222,70", sizeof("WEATHER,3,222,70") - 1);
+    bluetooth_receive();
+    app_weather_get_snapshot(&weather);
+    assert(weather.code == 1 && weather.temperature_x10 == 121 && weather.humidity_rh == 60);
+    host_tick += APP_CLOCK_FRAME_IDLE_MS;
+    bluetooth_receive();
+    app_weather_get_snapshot(&weather);
+    assert(weather.code == 3 && weather.temperature_x10 == 222 && weather.humidity_rh == 70);
+
+    /* 错误后的干净首帧已经到达时，消费方不能再清掉整条队列。 */
+    host_bluetooth_feed((const uint8_t *)"19:", 3);
+    bluetooth_receive();
+    host_bluetooth_fault(0);
+    host_tick += KT6368A_RX_IDLE_MS;
+    host_bluetooth_feed((const uint8_t *)"06:07:08\nWEATHER,2,191,55\n", sizeof("06:07:08\nWEATHER,2,191,55\n") - 1);
+    host_tick += 300;
+    calls = host_rtc_set_calls;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 6 * 3600 + 7 * 60 + 8);
+    app_weather_get_snapshot(&weather);
+    assert(weather.code == 2 && weather.temperature_x10 == 191 && weather.humidity_rh == 55);
+
+    host_bluetooth_feed((const uint8_t *)"17:", 3);
+    bluetooth_receive();
+    host_bluetooth_fault(0);
+    host_tick += 2;
+    host_bluetooth_feed((const uint8_t *)"23\n", 3);
+    host_tick += 250;
+    calls = host_rtc_set_calls;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls);
+    host_bluetooth_feed((const uint8_t *)"08:09:10\n", 9);
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 8 * 3600 + 9 * 60 + 10);
+
+    /* 一轮256字节预算耗尽时，队列中的同帧后缀尚未消费，不能跑空闲结帧。 */
+    memset(budget_frame, '\n', sizeof(budget_frame));
+    memcpy(budget_frame + UI_BT_RX_BUDGET - 3, "12:34:56\n", 9);
+    host_bluetooth_feed(budget_frame, sizeof(budget_frame));
+    host_tick += 250;
+    calls = host_rtc_set_calls;
+    bluetooth_receive();
+    assert(host_bt_rx_pos == UI_BT_RX_BUDGET && host_bt_rx_pos < host_bt_rx_size && host_rtc_set_calls == calls);
+    bluetooth_receive();
+    assert(host_bt_rx_pos == host_bt_rx_size && host_rtc_set_calls == calls + 1);
+    assert(host_rtc_seconds == 12 * 3600 + 34 * 60 + 56);
+
+    host_tick = UINT32_MAX - 1;
+    host_bluetooth_feed((const uint8_t *)"22:", 3);
+    bluetooth_receive();
+    host_tick += 2;
+    host_bluetooth_feed((const uint8_t *)"11:09\n", 6);
+    host_tick += 250;
+    calls = host_rtc_set_calls;
+    bluetooth_receive();
+    assert(host_rtc_set_calls == calls + 1 && host_rtc_seconds == 22 * 3600 + 11 * 60 + 9);
+    host_rtc_seconds = saved_seconds;
+    host_rtc_tick = host_tick;
+    refresh_clock();
+    puts("PASS: real UART arrival times preserve delayed clock/weather fragments, genuine idle frames, clean frames after errors, loss boundaries, RX budgets and tick wrap.");
 }
 
 TickType_t xTaskGetTickCount(void)
@@ -948,6 +1143,35 @@ static void open_feature(ui_page_t page)
     assert(!lv_obj_has_flag(s_battery_bar, LV_OBJ_FLAG_HIDDEN));
 }
 
+/* 检查真实页面文本，防止后续新增状态文字超出精简字库而静默显示缺字框。 */
+static void assert_label_glyphs(lv_obj_t *obj)
+{
+    uint32_t child;
+    if (lv_obj_check_type(obj, &lv_label_class))
+    {
+        const lv_font_t *font = lv_obj_get_style_text_font(obj, LV_PART_MAIN);
+        if (font == &lv_font_montserrat_20 || font == &lv_font_montserrat_30)
+        {
+            const char *text = lv_label_get_text(obj);
+            uint32_t index = 0;
+            while (text[index] != '\0')
+            {
+                uint32_t letter = _lv_txt_encoded_next(text, &index);
+                if (letter != '\n' && letter != '\r')
+                {
+                    lv_font_glyph_dsc_t glyph;
+                    assert(lv_font_get_glyph_dsc(font, &glyph, letter, 0));
+                    assert(!glyph.is_placeholder);
+                }
+            }
+        }
+    }
+    for (child = 0; child < lv_obj_get_child_cnt(obj); ++child)
+    {
+        assert_label_glyphs(lv_obj_get_child(obj, child));
+    }
+}
+
 static void screenshot(const char *name)
 {
     char path[256];
@@ -955,6 +1179,7 @@ static void screenshot(const char *name)
     FILE *file;
     lv_obj_invalidate(s_screen);
     advance(30);
+    assert_label_glyphs(s_screen);
     snprintf(path, sizeof(path), "tests/ui/output/%s.ppm", name);
     file = fopen(path, "wb");
     assert(file);
@@ -1388,6 +1613,7 @@ int main(void)
         touch_idle_tests();
         uptime_report_tests();
         reset_report_tests();
+        bluetooth_arrival_time_tests();
         puts("PASS: performance UI emits no debug TX; magnetic calibration, incoming clock sync and UI still work.");
         return 0;
     }
@@ -2555,5 +2781,6 @@ int main(void)
            (unsigned long)after.free_size);
     uptime_report_tests();
     reset_report_tests();
+    bluetooth_arrival_time_tests();
     return 0;
 }

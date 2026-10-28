@@ -26,6 +26,33 @@ static uint32_t clear_count;
 static uint32_t commit_count;
 static jmp_buf assert_halt;
 static uint8_t stop_at_commit;
+static uint8_t track_checksum;
+static uint32_t checksum_bits;
+static uint32_t inject_at_bit;
+static uint32_t inject_kind;
+
+void host_reset_checksum_bit(void)
+{
+    if (track_checksum != 0)
+    {
+        assert(host_primask == 0);
+        ++checksum_bits;
+        if (checksum_bits == inject_at_bit)
+        {
+            track_checksum = 0;
+            host_tick = 975;
+            if (inject_kind == APP_RESET_HARDFAULT)
+            {
+                app_reset_capture_fault(APP_RESET_HARDFAULT, NULL, 0xFFFFFFFD);
+            }
+            else
+            {
+                app_reset_capture_stop(APP_RESET_ERROR_HANDLER, 0x08005678, 4);
+            }
+            track_checksum = 1;
+        }
+    }
+}
 
 uint32_t __get_PRIMASK(void)
 {
@@ -238,6 +265,58 @@ static void test_fault_frames(uint32_t *sram)
     }
 }
 
+static void test_checkpoint_interrupts(void)
+{
+    app_reset_info_struct info;
+    uint32_t kind, bit, before;
+
+    cold_boot();
+    checksum_bits = 0;
+    inject_at_bit = 0;
+    track_checksum = 1;
+    app_reset_watchdog_feed(100);
+    track_checksum = 0;
+    assert(checksum_bits == 17 * 32 && host_primask == 0);
+    info = reboot(1U << 26);
+    assert(info.valid == 1 && info.kind == APP_RESET_RUNNING && info.last_feed_ms == 100);
+
+    /* 每个CRC位都可接收中断；期间异常提交的现场必须优先于旧检查点。 */
+    for (kind = 0; kind < 2; ++kind)
+    {
+        for (bit = 1; bit <= 17 * 32; ++bit)
+        {
+            cold_boot();
+            app_reset_watchdog_feed(100);
+            before = commit_count;
+            checksum_bits = 0;
+            inject_at_bit = bit;
+            if (kind == 0)
+            {
+                inject_kind = APP_RESET_HARDFAULT;
+            }
+            else
+            {
+                inject_kind = APP_RESET_ERROR_HANDLER;
+            }
+            track_checksum = 1;
+            app_reset_watchdog_feed(250);
+            track_checksum = 0;
+            assert(checksum_bits == 17 * 32 && host_primask == 0);
+            assert(commit_count == before + 1);
+            app_reset_watchdog_feed(500);
+            assert(commit_count == before + 1);
+            info = reboot(1U << 26);
+            assert(info.valid == 1 && info.kind == inject_kind);
+            assert(info.uptime_ms == 975 && info.last_feed_ms == 250 && info.max_feed_gap_ms == 150);
+            if (kind != 0)
+            {
+                assert(info.pc == 0x08005678 && info.task_tag == 4);
+            }
+        }
+    }
+    inject_at_bit = 0;
+}
+
 static void test_bad_stack(uint32_t *sram)
 {
     app_reset_info_struct info;
@@ -327,6 +406,7 @@ int main(void)
     assert((uintptr_t)sram == SRAM_START);
     test_checkpoint();
     test_backup_reset_and_crc();
+    test_checkpoint_interrupts();
     test_fault_frames(sram);
     test_bad_stack(sram);
     test_stops();
@@ -337,6 +417,6 @@ int main(void)
 #else
     assert(munmap(sram, SRAM_BYTES) == 0);
 #endif
-    puts("reset: checkpoint, retained/corrupt/partial backup, RTC reset, wrap, core/FPU frames, bad SP, stop, LVGL assert PASS");
+    puts("reset: interruptible checkpoint CRC, fault priority, retained/corrupt/partial backup, RTC reset, wrap, core/FPU frames, bad SP, stop, LVGL assert PASS");
     return 0;
 }

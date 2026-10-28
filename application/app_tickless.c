@@ -1,4 +1,5 @@
 #include "app_tickless.h"
+#include "app_task.h"
 #include "watch_rtc.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -7,11 +8,47 @@
 #error Tickless HAL compensation requires a 1ms RTOS tick.
 #endif
 
-/* Sleep保留SysTick时钟，用一次长计数唤醒；RTC负责补时。最多100ms，不越过喂狗周期。 */
+/* STOP由RTC唤醒；BLE/PWM/DMA仍需时钟时保留Sleep。最长100ms，不越过喂狗周期。 */
 #define APP_TICKLESS_MAX_TICKS 100
+#define APP_TICKLESS_STOP_MIN_TICKS 5
 
 static uint32_t s_rtc_fraction;
 extern __IO uint32_t uwTick;
+
+static uint8_t app_tickless_stop_allowed(void)
+{
+    /* F411 USART无法在STOP接收；屏灭后仍可能有LCD DMA安全收尾，必须等它完成。 */
+    return app_task_is_screen_off() != 0 && TIM3->CCR3 == 0 &&
+           (BLE_EN_GPIO_Port->ODR & BLE_EN_Pin) == 0 && (RCC->APB2ENR & RCC_APB2ENR_USART1EN) == 0 &&
+           (SPI1->SR & SPI_SR_BSY) == 0 && (DMA2_Stream2->CR & DMA_SxCR_EN) == 0 &&
+           (ADC1->CR2 & ADC_CR2_ADON) == 0;
+}
+
+static void app_tickless_restore_clock(void)
+{
+    uint32_t retries = HSI_VALUE / 100;
+
+    /* STOP醒来使用HSI；寄存器配置保留。中断屏蔽期间不用依赖HAL tick的时钟接口。 */
+    RCC->CR |= RCC_CR_PLLON;
+    while ((RCC->CR & RCC_CR_PLLRDY) == 0)
+    {
+        if (--retries == 0)
+        {
+            Error_Handler();
+        }
+    }
+    MODIFY_REG(RCC->CFGR, RCC_CFGR_SW, RCC_CFGR_SW_PLL);
+    retries = HSI_VALUE / 100;
+    while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL)
+    {
+        if (--retries == 0)
+        {
+            Error_Handler();
+        }
+    }
+    __DSB();
+    __ISB();
+}
 
 void app_tickless_sleep(uint32_t expected_ticks)
 {
@@ -19,6 +56,8 @@ void app_tickless_sleep(uint32_t expected_ticks)
     uint32_t control, remaining, rtc_start, rtc_end, elapsed_counts, phase;
     uint32_t complete_ticks, pend_tick = 0;
     uint32_t stopped_cycle, resumed_cycle, rtc_start_cycle, rtc_end_cycle;
+    uint32_t stop_counts = 0, timer_start = 0, timer_end, timer_elapsed;
+    uint8_t use_stop = 0;
     uint64_t scaled_counts;
 
     __disable_irq();
@@ -45,6 +84,13 @@ void app_tickless_sleep(uint32_t expected_ticks)
         expected_ticks = APP_TICKLESS_MAX_TICKS;
     }
 
+    if (expected_ticks >= APP_TICKLESS_STOP_MIN_TICKS && app_tickless_stop_allowed() != 0)
+    {
+        /* 预留1ms给RTC同步/PLL恢复，余下不足一拍的时间由恢复后的SysTick完成。 */
+        stop_counts = (expected_ticks - 1) * WATCH_RTC_SUBSECOND_HZ / configTICK_RATE_HZ;
+        use_stop = watch_rtc_start_wakeup(stop_counts) == 0;
+    }
+
     /* DWT只测量RTC区间之外的运行开销，不依赖它在Sleep中的计数行为。 */
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
@@ -55,6 +101,10 @@ void app_tickless_sleep(uint32_t expected_ticks)
     /* 停表前刚到期的普通tick由原ISR处理，不能清掉或再次补偿。 */
     if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
     {
+        if (use_stop != 0)
+        {
+            watch_rtc_stop_wakeup();
+        }
         SysTick->CTRL = control;
         __enable_irq();
         return;
@@ -65,18 +115,39 @@ void app_tickless_sleep(uint32_t expected_ticks)
     }
     phase = counts_per_tick - remaining;
     rtc_start_cycle = DWT->CYCCNT;
+    timer_start = TIM2->CNT;
     rtc_start = watch_rtc_get_subsecond();
+    if (use_stop != 0 && rtc_start == UINT32_MAX)
+    {
+        watch_rtc_stop_wakeup();
+        use_stop = 0;
+    }
 
     /* 在最近任务截止时间唤醒；到期的最后一个tick交ISR处理，step不越过解阻塞点。 */
-    SysTick->LOAD = remaining + counts_per_tick * (expected_ticks - 1) - 1;
-    SysTick->VAL = 0;
     resumed_cycle = DWT->CYCCNT;
-    SysTick->CTRL = control;
-    __DSB();
-    __WFI();
-    __ISB();
-    SysTick->CTRL = control & ~SysTick_CTRL_ENABLE_Msk;
+    if (use_stop != 0)
+    {
+        __DSB();
+        HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+        app_tickless_restore_clock();
+        if (watch_rtc_sync_after_stop() != 0)
+        {
+            rtc_start = UINT32_MAX;
+        }
+        watch_rtc_stop_wakeup();
+    }
+    else
+    {
+        SysTick->LOAD = remaining + counts_per_tick * (expected_ticks - 1) - 1;
+        SysTick->VAL = 0;
+        SysTick->CTRL = control;
+        __DSB();
+        __WFI();
+        __ISB();
+        SysTick->CTRL = control & ~SysTick_CTRL_ENABLE_Msk;
+    }
     rtc_end_cycle = DWT->CYCCNT;
+    timer_end = TIM2->CNT;
     rtc_end = watch_rtc_get_subsecond();
 
     if (rtc_start != UINT32_MAX && rtc_end != UINT32_MAX)
@@ -86,14 +157,27 @@ void app_tickless_sleep(uint32_t expected_ticks)
         scaled_counts = scaled_counts * configCPU_CLOCK_HZ + s_rtc_fraction;
         elapsed_counts = (uint32_t)(scaled_counts / WATCH_RTC_SUBSECOND_HZ);
         s_rtc_fraction = (uint32_t)(scaled_counts % WATCH_RTC_SUBSECOND_HZ);
+        if (use_stop != 0)
+        {
+            /* TIM2在STOP中停走；补上停钟时间，保留诊断周期和CPU占比的时间基准。 */
+            timer_elapsed = (uint32_t)((uint64_t)elapsed_counts * 10000 / configCPU_CLOCK_HZ);
+            if (timer_elapsed > (uint32_t)(timer_end - timer_start))
+            {
+                TIM2->CNT += timer_elapsed - (uint32_t)(timer_end - timer_start);
+            }
+        }
     }
     else
     {
         /* Sleep中计数器仍运行；LSE运行期故障时用本次长SysTick保住经过时间。 */
-        elapsed_counts = SysTick->LOAD - SysTick->VAL;
-        if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
+        elapsed_counts = 0;
+        if (use_stop == 0)
         {
-            elapsed_counts += SysTick->LOAD + 1;
+            elapsed_counts = SysTick->LOAD - SysTick->VAL;
+            if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
+            {
+                elapsed_counts += SysTick->LOAD + 1;
+            }
         }
         rtc_start_cycle = resumed_cycle;
     }

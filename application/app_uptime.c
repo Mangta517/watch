@@ -111,7 +111,7 @@ uint8_t app_uptime_service(uint8_t storage_available)
     uint32_t now_ms = HAL_GetTick();
     uint32_t elapsed_ms = now_ms - s_uptime.last_ms;
     uint8_t result;
-    /* Sleep仍保留HAL节拍；逐拍累计差值，跨49.7天tick回绕仍连续计时。 */
+    /* Tickless补齐Sleep/STOP的HAL时间；跨49.7天tick回绕仍连续计时。 */
     s_uptime.last_ms = now_ms;
     s_uptime.seconds += elapsed_ms / 1000;
     s_uptime.remainder_ms += elapsed_ms % 1000;

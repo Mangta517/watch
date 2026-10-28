@@ -37,6 +37,8 @@ extern "C"
     void App_Task_Start(void);
     /* UI单写、任务只读：发布待机、运动页、全熄屏和独立运动模式，不操作硬件。 */
     void app_task_set_power_state(uint8_t idle, uint8_t motion, uint8_t screen_off, uint8_t sport);
+    /* IDLE读取屏幕状态；STOP资格还须检查蓝牙及在途外设。 */
+    uint8_t app_task_is_screen_off(void);
     /* PA4中断只通知显示任务；GPIO消抖和页面操作仍留在任务上下文。 */
     void app_task_wake_from_isr(void);
 

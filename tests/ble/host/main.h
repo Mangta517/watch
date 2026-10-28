@@ -21,7 +21,11 @@ typedef struct
 {
     void *Instance;
     UART_InitTypeDef Init;
+    uint32_t ErrorCode;
 } UART_HandleTypeDef;
+
+#define HAL_UART_ERROR_NONE 0
+#define HAL_UART_ERROR_ORE  8
 typedef struct
 {
     uint32_t Pin, Mode, Pull, Speed, Alternate;

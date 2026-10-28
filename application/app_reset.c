@@ -14,7 +14,7 @@
 static app_reset_info_struct s_previous;
 static app_reset_info_struct s_current;
 static uint8_t s_have_feed;
-static uint8_t s_stopped;
+static volatile uint8_t s_stopped;
 
 static void reset_backup_enable(void)
 {
@@ -53,14 +53,9 @@ static uint32_t reset_checksum(const uint32_t *words)
     return crc ^ UINT32_MAX;
 }
 
-static void reset_store(void)
+static void reset_commit(const uint32_t *words)
 {
-    uint32_t words[APP_RESET_RECORD_WORDS];
     uint32_t i;
-    words[0] = APP_RESET_MAGIC;
-    words[1] = APP_RESET_VERSION;
-    memcpy(words + 2, &s_current, sizeof(s_current));
-    words[APP_RESET_RECORD_WORDS - 1] = reset_checksum(words);
     reset_backup_enable();
     *reset_backup_word(0) = 0; /* 先撤销提交标记；中途复位不能把半条记录当成有效。 */
     __DMB();
@@ -71,6 +66,16 @@ static void reset_store(void)
     __DMB();
     *reset_backup_word(0) = APP_RESET_MAGIC;
     __DSB();
+}
+
+static void reset_store(void)
+{
+    uint32_t words[APP_RESET_RECORD_WORDS];
+    words[0] = APP_RESET_MAGIC;
+    words[1] = APP_RESET_VERSION;
+    memcpy(words + 2, &s_current, sizeof(s_current));
+    words[APP_RESET_RECORD_WORDS - 1] = reset_checksum(words);
+    reset_commit(words);
 }
 
 void app_reset_init(void)
@@ -104,23 +109,37 @@ void app_reset_init(void)
 
 void app_reset_watchdog_feed(uint32_t now_ms)
 {
+    uint32_t words[APP_RESET_RECORD_WORDS];
     uint32_t mask = __get_PRIMASK();
     uint32_t gap_ms;
     __disable_irq();
+    if (s_stopped != 0)
+    {
+        __set_PRIMASK(mask);
+        return;
+    }
+    if (s_have_feed != 0)
+    {
+        gap_ms = now_ms - s_current.last_feed_ms;
+        if (gap_ms > s_current.max_feed_gap_ms)
+        {
+            s_current.max_feed_gap_ms = gap_ms;
+        }
+    }
+    s_current.uptime_ms = now_ms;
+    s_current.last_feed_ms = now_ms;
+    s_have_feed = 1;
+    words[0] = APP_RESET_MAGIC;
+    words[1] = APP_RESET_VERSION;
+    memcpy(words + 2, &s_current, sizeof(s_current));
+    __set_PRIMASK(mask);
+
+    /* 正常喂狗的CRC不屏蔽UART；异常若在此期间接管，旧检查点不能覆盖异常现场。 */
+    words[APP_RESET_RECORD_WORDS - 1] = reset_checksum(words);
+    __disable_irq();
     if (s_stopped == 0)
     {
-        if (s_have_feed != 0)
-        {
-            gap_ms = now_ms - s_current.last_feed_ms;
-            if (gap_ms > s_current.max_feed_gap_ms)
-            {
-                s_current.max_feed_gap_ms = gap_ms;
-            }
-        }
-        s_current.uptime_ms = now_ms;
-        s_current.last_feed_ms = now_ms;
-        s_have_feed = 1;
-        reset_store(); /* 首次RTC初始化可能复位备份域；每拍重新提交完整记录。 */
+        reset_commit(words); /* RTC清备份域后，下一拍仍重新提交完整记录。 */
     }
     __set_PRIMASK(mask);
 }

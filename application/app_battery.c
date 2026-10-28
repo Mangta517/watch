@@ -23,10 +23,10 @@ static uint8_t s_last_percent;
 
 static uint8_t battery_percent(uint32_t voltage_mv)
 {
-    /* 2026-10-25按未充电日志的经过时间校正3.6～4.0V形状；4.0V/100%、3.6V/10%仍是既定锚点。 */
-    /* 3.6V以下未测到耗尽，沿用原低压节点；本表为局部估算，依据见docs/battery-log.md。 */
-    static const uint16_t voltage_points_mv[] = {3300, 3500, 3600, 3650, 3700, 3750, 3800, 3850, 3900, 3950, 4000};
-    static const uint8_t percent_points[] = {0, 5, 10, 23, 37, 53, 62, 75, 85, 93, 100};
+    /* 2026-10-27按1815点连续未充电日志重标3.55～4.0V；末6h趋势暂估到达3.5V的时间。 */
+    /* 3.5V/5%及3.3V/0%仍是沿用假设，未测到耗尽；计算依据见docs/battery-log.md。 */
+    static const uint16_t voltage_points_mv[] = {3300, 3500, 3550, 3600, 3650, 3700, 3750, 3800, 3850, 3900, 3950, 4000};
+    static const uint8_t percent_points[] = {0, 5, 18, 31, 41, 54, 64, 70, 79, 88, 94, 100};
     uint32_t i;
     if (voltage_mv <= voltage_points_mv[0])
     {
@@ -78,7 +78,7 @@ void app_battery_service(void)
     sample.result = HAL_ADC_Start(&hadc1);
     if (sample.result == HAL_OK)
     {
-        /* 480周期/12.5MHz 的采样约38.4us；超时有限，不让故障卡住sensor任务。 */
+        /* 48MHz PCLK2/8=6MHz，480周期采样约80us；超时有限，不让故障卡住sensor任务。 */
         sample.result = HAL_ADC_PollForConversion(&hadc1, APP_BATTERY_ADC_TIMEOUT_MS);
         if (sample.result == HAL_OK)
         {

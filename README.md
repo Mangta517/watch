@@ -2,7 +2,7 @@
 
 基于 STM32F411CEU6、FreeRTOS 和 LVGL 的手表工程，包含 RTC 表盘、蓝牙校时与天气同步、运动与环境传感器、心率和电池显示。
 
-本页对应 `codex/low-power` 分支，当前功能版本为 [1ade1e3](https://github.com/Mangta517/watch/commit/1ade1e3cd72d39fad42bb99fe45c8caf15b5ca4d)（2026-10-26）。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、计步与辅助抬腕、日常 BLE 通信、复位和电压日志，以及 Bootloader SPP 升级。本次涉及的文件、具体改动、优化效果及验证结果见[更新记录](#更新记录)。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；当前行为以本页首节及当前源码为准。
+本页对应 `codex/low-power` 分支，当前版本包含48MHz / STOP低功耗调度、计步与辅助抬腕、日常BLE通信、复位和电压日志、Bootloader SPP升级，以及2026-10-28手机同步与校时阻塞修复。普通APP和升级APP共用业务源码。改动位置、行为、优化作用和验证结果见[更新记录](#更新记录)；历史条目保留原提交的交付记录，当前行为以本页首节及当前源码为准。
 
 `watch` 仓库统一提供 **独立 APP、Bootloader、升级 APP** 三个可分别编译的 Keil 工程。三个工程共享本仓库中的驱动、库和业务源码，下载时请保留完整目录。工程选择、Flash 分区和部署组合见[三个 Keil 工程](#三个-keil-工程)，首次编译见[获取与编译](#获取与编译)。
 
@@ -10,17 +10,17 @@
 
 | 项目 | 当前行为 |
 | --- | --- |
-| 主频与电压档 | APP 固定 84MHz / Scale 2，Flash 2 等待周期；亮屏、测量和待机都使用此配置 |
-| CPU Sleep | 所有应用任务等待时，由 FreeRTOS IDLE 进入 Sleep；亮屏、运动、心率与校准期间也可进入，中断唤醒后继续执行 |
+| 主频与电压档 | APP 固定 48MHz / Scale 3，Flash 1 等待周期；APB1=24MHz、APB2=48MHz、SPI1=24MHz，背光 PWM 仍约 3.32kHz |
+| CPU Sleep / STOP | BLE 开启或外设仍需时钟时使用 Tickless Sleep；BLE 断电且 USART1 关闭、熄屏、PWM 为 0、SPI / DMA / ADC 空闲且预期空闲至少 5ms 时使用低功耗调压器 STOP |
 | 无触摸待机 | 连续 10 秒无操作后，与 PA4 手动熄屏共用处理：背光 0%、保留蓝牙供电/UART、暂停绘图，LCD/触摸芯片休眠且触摸任务阻塞；PA4 或辅助抬腕亮屏，恢复原亮度和当前 RTC 时间 |
 | 显示与触摸轮询 | 活跃约 5ms；熄屏无按键时等待 PA4 通知或约 100ms 期限，按键消抖/按住期间保持 20ms，触摸休眠后阻塞 |
 | MPU6050 | 心率测量及独立运动模式 100Hz，姿态页与校准 50Hz；无姿态需求的亮屏页面与普通熄屏使用 5Hz 加速度低功耗循环，关闭陀螺仪和温度，持续计步及辅助抬腕；自动心率窗口保留 100Hz |
 | 磁力计 | 心率测量及独立运动模式 75Hz，活动/校准 30Hz；5Hz 加速度后台模式下保持 sleep，进入姿态/校准/运动/心率场景恢复 |
 | 心率读取 | 测量期间 sensor 每 10ms 服务，约 30ms 读取一次 PPG；心率测量期间 MPU 为 100Hz，校准期间保留 50Hz |
 | 零偏校准 | 保留 100 帧静止确认和 100 帧平均，50Hz 下约 4 秒；两个阶段超时分别为 6 秒、4 秒 |
-| 电池估算 | 以 4.0V 为满电点，2026-10-25按未充电日志局部校正 3.6～4.0V 段；低压端待完整放电标定，保留启动均值、滤波和本次开机百分比只降不升 |
+| 电池估算 | 4.0V 为满电点，2026-10-27依据最新未充电记录重标：3.6V约31%、3.55V约18%；3.50V/5%和耗尽端仍待实测，保留每秒采样、启动均值、滤波及本次开机百分比只降不升 |
 
-Sleep 已接入 Tickless：运行时保持 1ms SysTick，空闲时合并节拍，以 RTC 亚秒差值测量休眠时间，唤醒后同时补齐 HAL 和 FreeRTOS 时间。单次最多 100ms，UART、DMA、背光 PWM 和 RTC 保持工作；RTC 未就绪时退回 1ms Sleep。实际节电幅度需上板测量。自动待机与 PA4 手动熄屏行为一致，普通模式保留 PA8 供电及 PA9/PA10 UART，支持 PA4 或放下后抬腕亮屏；LCD 先等在途 DMA 完成或超时安全收尾再进入休眠，亮屏发 Sleep Out 后至少等待 120ms。触摸恢复由独立任务复位并等待约 310ms，不阻塞 sensor。亮屏时气压、电池约 1 秒服务一次，温湿度约 2 秒触发一次；普通熄屏电池保持约 1 秒一次，环境与自动心率每 10 分钟测量，无姿态需求时 MPU 自主进行 5Hz 加速度采样，sensor 每 200ms 读取新帧。步数按本次开机累计，不写 EEPROM；首页脚印图标旁显示数值，向上图标提示辅助抬腕。活动、运动和心率所需采样频率保持原配置。
+Sleep / STOP 共用 Tickless 补时，运行时保持 1ms SysTick，单次最多 100ms。BLE 开启时保留 Sleep，UART、DMA 和背光 PWM 持续工作；BLE 关闭且满足空闲条件时暂停 SysTick，由 RTC WUT 或 PA4 / 传感器 EXTI 唤醒 STOP，先恢复 48MHz PLL 并同步 RTC 影子寄存器，再补齐 HAL / FreeRTOS / TIM2 诊断时间，最后开放中断。当前正常待机保持 BLE，仍使用 Sleep；SPORT 熄屏时可利用采样间隙进入 STOP，100Hz 服务周期不变。RTC 未就绪时退回 1ms Sleep，WUT 配置失败退回 Tickless Sleep；STOP 后 RTC 同步失败则停用 RTC 有效状态并退回 1ms Sleep，本次停钟间隔因缺少有效 RTC 读数无法准确补齐。实际功耗和采样裕量需上板测量。自动待机与 PA4 手动熄屏行为一致，普通模式保留 PA8 供电及 PA9/PA10 UART，支持 PA4 或放下后抬腕亮屏；LCD 先等在途 DMA 完成或超时安全收尾再进入休眠，亮屏发 Sleep Out 后至少等待 120ms。触摸恢复由独立任务复位并等待约 310ms，不阻塞 sensor。亮屏时气压、电池约 1 秒服务一次，温湿度约 2 秒触发一次；普通熄屏电池保持约 1 秒一次，环境与自动心率每 10 分钟测量，无姿态需求时 MPU 自主进行 5Hz 加速度采样，sensor 每 200ms 读取新帧。步数按本次开机累计，不写 EEPROM；首页脚印图标旁显示数值，向上图标提示辅助抬腕。活动、运动和心率所需采样频率保持原配置。
 
 心率测量已恢复约 30ms 读取，40～200 BPM 合成回归在稳定段逐帧检查有效输出，包含 200 BPM；范围外的估算仍不钳位。实板心率精度、总线时序及功耗尚需测量。具体实现见 [界面与低功耗说明](docs/watch-ui.md)。
 
@@ -122,6 +122,8 @@ python -B -X utf8 tests/ui/run.py
 
 ## 三工程打包与验证（2026-10-27）
 
+本节保留 `80766c0` 的历史打包记录；当前48MHz版本及本次修复的资源与验证结果见下方2026-10-28更新记录。
+
 本次功能源码沿用已发布的 `1ade1e3`，在 `watch` 的 `codex/low-power` 分支统一交付三个 Keil 工程。本次文档整理保持固件源码、工程配置和功能版本不变。
 
 - **问题**：三个工程的选择、构建环境、镜像输出和组合部署需要集中说明，避免取得源码后选错工程或镜像。
@@ -141,6 +143,27 @@ python -B -X utf8 tests/ui/run.py
 ## 更新记录
 
 以下日期取自 Git 提交日期。记录按新到旧排列，旧条目中的 4.2V 电量曲线等限制为当时状态，已由上述低功耗版本更新；各条目的验证结果仅适用于对应版本。
+
+### 2026-10-28 · 当前工作区 · 偶发手机同步失败与复位风险修复
+
+- **改动位置**：`interface/kt6368a.*`、`application/app_ui.c`记录并消费UART实际到达时间及错误边界；`application/app_reset.c`缩短正常存档的关中断窗口；`interface/watch_rtc.*`改为有界运行期校时；`tests/ble/`、`tests/ui/`、`tests/reset/`、`tests/clock/`补充对应故障回归。
+- **行为与作用**：修复后半包已到队列、显示任务延迟超过200ms才消费时将完整时间/天气拆坏的问题；真实空闲和无换行消息仍按200ms分帧。UART错误不再清空错误后全部队列，按损坏位置恢复；错误字节不作为有效业务输入。喂狗检查点在开中断时计算CRC，异常现场仍优先完整提交。RTC时钟丢失或同步失败时校时有界退出，下一条合法消息可在时钟恢复后重试，避免显示任务进入HAL的1s等待。
+- **资源与验证**：接收队列增加4096字节到达时间及256字节边界元数据，不新增任务。clock、sensors、startup、UI（诊断开/关）、BLE、bootloader、battery_log、reset、reset_ble、tickless、touch、watchdog、diagnostics共13套主机回归通过；新增覆盖250ms消费延迟、真实空闲和错误后的首帧、199/200ms入队竞态、UART错误回调顺序、RTC有界失败/恢复及1088个CRC中途异常注入点。普通/升级APP与Bootloader本次Keil增量构建均0 errors、0 warnings；两套APP的MAP压缩后ROM均219564 B、RW+ZI均104136 B，Bootloader ROM17916 B、RW+ZI15720 B。实际ARM反汇编确认正常检查点的CRC在恢复IRQ后计算，提交前重新核对异常状态；CRLF空白检查通过。
+- **实板边界**：没有烧录。软件修复不能覆盖MCU硬件复位时PA3释放导致TPS_EN掉锁的电源保持缺口；关机最初触发源仍需实板日志和波形确认。当前首页仍显示板载AHT21温湿度，手机天气在独立天气页显示，布局本次不改。
+
+### 2026-10-27 · 当前工作区 · 最新放电记录校准电量
+
+- **改动位置**：`application/app_battery.c`更新电压—百分比节点，`tests/sensors/battery_harness.c`同步标定与回弹回归；计算依据见[电压日志说明](docs/battery-log.md#2026-10-27-最新电压记录校准)。
+- **行为与作用**：依据1818条同电池、未充电且末尾仍正常运行的记录，使用1815条连续记录及末6小时下降趋势重标3.55～4.0V。3.60V由10%调整到约31%，新增3.55V/18%节点，改善旧低压段偏低的显示；保留4.00V/100%、3.50V/5%和3.30V/0%显示锚点。每秒采样、启动均值、1/8滤波、ADC失败处理及本次开机电量只降不升均不变。
+- **验证结果**：sensors与UI（诊断开/关）主机回归通过，覆盖新曲线插值、启动、电压回弹及ADC恢复；两套APP本次Keil增量构建均0 errors、0 warnings，ROM均218876 B、RW+ZI均99784 B。
+- **验证边界**：未烧录。3500mV到达时间来自短程趋势外推，5%与0%锚点仍待完整放电实测，不能把本次显示估算当作容量或精确剩余续航。
+
+### 2026-10-27 · 当前工作区 · STOP混合休眠与48MHz运行
+
+- **改动位置**：`application/app_tickless.*`、`application/app_task.*`、`interface/watch_rtc.*`、`Core/Src/stm32f4xx_it.c`及头文件负责STOP资格、RTC唤醒、时钟恢复和补时；`Core/Src/main.c`、`Core/Src/tim.c`、`FreeRTOSConfig.h`、`.ioc`同步48MHz/Scale3/Flash1及PWM；`common/my_i2c.c`、`interface/touch.c`同步软件总线延时，Bootloader保留100MHz原延时。
+- **行为与作用**：BLE开启时使用Tickless Sleep，保留115200串口接收；BLE关闭且熄屏、外设空闲时使用低功耗调压器STOP，由RTC/EXTI唤醒，恢复PLL和RTC影子后补齐HAL/RTOS/TIM2时间。降低运行主频及电压档，减少合适空闲间隙的MCU功耗；传感器采样周期、按键、辅助抬腕及双任务进度喂狗策略保持原配置。当前普通待机仍保留BLE，STOP主要用于SPORT熄屏后的采样间隙。
+- **验证结果**：clock、sensors、startup、UI（含诊断开/关）、BLE、bootloader、tickless、touch、watchdog、diagnostics共10套主机回归通过。两套APP全量Keil重编译均0 errors、13条既有LVGL warnings，最终增量构建均0 errors、0 warnings；ROM均218876 B，RW+ZI均99784 B。RTC/STOP测试覆盖有界等待、失败回退、提前唤醒、时钟/中断顺序、节拍及诊断补时、最近任务截止时间和外设忙时回退；CRLF空白检查通过。
+- **验证边界**：未烧录或实板测量；实际整板电流、100Hz采样裕量、软件I2C时序、UI帧率、连续BLE及STOP唤醒延迟待验证。硬件依据见[ST数据手册](https://www.st.com/resource/en/datasheet/stm32f411ce.pdf)：Scale3适用于HCLK≤64MHz，STOP停止USART所需时钟。
 
 ### 2026-10-26 · [1ade1e3](https://github.com/Mangta517/watch/commit/1ade1e3cd72d39fad42bb99fe45c8caf15b5ca4d) · 复位现场追加保存到 Flash 与蓝牙历史查询
 

@@ -16,9 +16,14 @@
  */
 #include "my_i2c.h"
 
-/* 按84MHz调整原100MHz位延时；仅SENSOR总线加倍，不改变触摸和EEPROM的节拍。 */
+/* Bootloader仍运行100MHz，保留原延时；APP按48/84缩放并留约5%余量，SENSOR仍加倍。 */
+#if defined(F411_BOOTLOADER)
 #define MY_I2C_DELAY_LOOPS        67
 #define MY_I2C_SENSOR_DELAY_LOOPS 134
+#else
+#define MY_I2C_DELAY_LOOPS        40
+#define MY_I2C_SENSOR_DELAY_LOOPS 80
+#endif
 
 /* ================================================================ 总线表 */
 typedef struct

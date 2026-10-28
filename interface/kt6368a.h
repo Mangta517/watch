@@ -21,6 +21,16 @@ extern "C"
 #define KT6368A_TX_MAX_SIZE    512
 #define KT6368A_BOOT_DELAY_MS  1200 /* 蓝牙模块上电等待时间 */
 #define KT6368A_AT_TIMEOUT_MS  500
+#define KT6368A_RX_IDLE_MS     200
+#define KT6368A_RX_GAP         1
+#define KT6368A_RX_LOSS        2
+
+    typedef struct
+    {
+        uint32_t received_ms; /* UART实际到达的HAL tick；空队列时为最近活动时刻。 */
+        uint32_t sampled_ms;  /* 空队列的原子检查时刻，不用检查后推进的时间结算残帧。 */
+        uint8_t flags;        /* 本块之前的真实空闲/丢字节边界。 */
+    } kt6368a_rx_info_struct;
 
     /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。
  * 兼容旧调用方的阻塞入口；手表启动使用下方begin/service。配置BLE名称、开启BLE并查询验证。
@@ -60,6 +70,8 @@ extern "C"
     uint8_t kt6368a_tx_is_busy(void);
     uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result);
     uint16_t kt6368a_read(uint8_t *data, uint16_t size);
+    /* 同一到达tick分块；遇空闲/错误边界另起一块，显示任务延迟不能切断消息。 */
+    uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct *info);
     uint8_t kt6368a_rx_pending(void);
     /* 接收启动前注册；积累128字节时在UART ISR调用一次，Bootloader可不注册。 */
     void kt6368a_set_rx_callback(void (*callback)(void));

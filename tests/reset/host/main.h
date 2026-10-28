@@ -50,6 +50,7 @@ void __DMB(void);
 void __DSB(void);
 uint32_t HAL_GetTick(void);
 void host_clear_reset_flags(void);
+void host_reset_checksum_bit(void);
 #define __HAL_RCC_CLEAR_RESET_FLAGS() host_clear_reset_flags()
 
 #endif

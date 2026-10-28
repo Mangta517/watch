@@ -26,6 +26,7 @@
 #include "task.h"
 #include "app_reset.h"
 #include "app_task.h"
+#include "watch_rtc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -280,6 +281,11 @@ void DMA2_Stream2_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void RTC_WKUP_IRQHandler(void)
+{
+    watch_rtc_stop_wakeup();
+}
+
 void SPI1_IRQHandler(void)
 {
     HAL_SPI_IRQHandler(&hspi1);

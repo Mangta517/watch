@@ -1,4 +1,4 @@
-/** Sleep下合并SysTick；RTC只测量休眠间隔，不使用可被手机修改的日历差值。 */
+/** 空闲时合并SysTick；BLE关闭且熄屏时使用RTC唤醒STOP，其余保留Sleep。 */
 #ifndef APP_TICKLESS_H
 #define APP_TICKLESS_H
 

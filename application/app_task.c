@@ -107,6 +107,12 @@ void app_task_set_power_state(uint8_t idle, uint8_t motion, uint8_t screen_off, 
         xTaskNotifyGive(s_touch_task_handle); /* 通知可先于阻塞到达，避免丢失快速按键唤醒。 */
     }
 }
+
+uint8_t app_task_is_screen_off(void)
+{
+    return (s_power_state & APP_POWER_SCREEN_OFF) != 0;
+}
+
 static struct
 {
     uint32_t started_ms;

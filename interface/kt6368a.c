@@ -24,10 +24,15 @@ typedef struct
 {
     uint8_t rx_byte;
     uint8_t rx_buffer[KT6368A_RX_BUFFER_SIZE];
+    uint32_t rx_time_ms[KT6368A_RX_BUFFER_SIZE];
+    uint8_t rx_flags[(KT6368A_RX_BUFFER_SIZE + 3) / 4]; /* 每槽两位，仅ISR写。 */
     volatile uint16_t rx_head;
     volatile uint16_t rx_tail;
     volatile uint32_t rx_dropped;
     volatile uint32_t rx_errors;
+    volatile uint32_t rx_activity_ms;
+    volatile uint8_t rx_have_byte;
+    volatile uint8_t rx_loss_pending;
     volatile uint8_t powered;
     uint32_t power_on_tick;
 } kt6368a_t;
@@ -86,11 +91,62 @@ uint16_t kt6368a_read(uint8_t *data, uint16_t size)
     return count;
 }
 
+static uint8_t kt6368a_rx_flags(uint16_t slot)
+{
+    return (uint8_t)((ble.rx_flags[slot / 4] >> ((slot % 4) * 2)) & 3);
+}
+
+uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct *info)
+{
+    uint16_t count = 0;
+    uint16_t slot;
+    uint32_t mask;
+    if (data == NULL || info == NULL || size == 0)
+    {
+        return 0;
+    }
+    /* 空队列的活动时间和丢字节状态必须来自同一份ISR快照。 */
+    mask = __get_PRIMASK();
+    __disable_irq();
+    if (ble.rx_tail == ble.rx_head)
+    {
+        info->received_ms = ble.rx_activity_ms;
+        info->sampled_ms = HAL_GetTick();
+        info->flags = 0;
+        if (ble.rx_loss_pending != 0)
+        {
+            info->flags = KT6368A_RX_LOSS;
+        }
+        __set_PRIMASK(mask);
+        return 0;
+    }
+    __set_PRIMASK(mask);
+    slot = ble.rx_tail;
+    __DMB();
+    info->received_ms = ble.rx_time_ms[slot];
+    info->flags = kt6368a_rx_flags(slot);
+    while (count < size && slot != ble.rx_head)
+    {
+        __DMB();
+        if (count != 0 && (ble.rx_time_ms[slot] != info->received_ms || kt6368a_rx_flags(slot) != 0))
+        {
+            break;
+        }
+        data[count++] = ble.rx_buffer[slot];
+        slot = (uint16_t)((slot + 1) % KT6368A_RX_BUFFER_SIZE);
+        __DMB();
+        ble.rx_tail = slot;
+    }
+    return count;
+}
+
 void kt6368a_flush_rx(void)
 {
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
     ble.rx_tail = ble.rx_head;
+    ble.rx_have_byte = 0;
+    ble.rx_loss_pending = 0;
     __set_PRIMASK(mask);
 }
 
@@ -730,6 +786,9 @@ HAL_StatusTypeDef kt6368a_init(void)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     uint16_t next;
+    uint32_t now_ms;
+    uint8_t flags = 0;
+    uint8_t shift;
     if ((huart != &huart1) || !ble.powered)
     {
         return;
@@ -741,14 +800,35 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         return;
     }
 #endif
+    now_ms = HAL_GetTick();
+    if (huart->ErrorCode != HAL_UART_ERROR_NONE)
+    {
+        /* HAL随后执行ErrorCallback；此处重开接收会清ErrorCode并误收损坏字节。 */
+        return;
+    }
+    if (ble.rx_have_byte == 0 || (uint32_t)(now_ms - ble.rx_activity_ms) >= KT6368A_RX_IDLE_MS)
+    {
+        flags = KT6368A_RX_GAP;
+    }
+    if (ble.rx_loss_pending != 0)
+    {
+        flags |= KT6368A_RX_LOSS;
+    }
+    ble.rx_activity_ms = now_ms;
+    ble.rx_have_byte = 1;
     next = (uint16_t)((ble.rx_head + 1) % KT6368A_RX_BUFFER_SIZE);
     if (next == ble.rx_tail)
     {
         ble.rx_dropped++;
+        ble.rx_loss_pending = 1;
     }
     else
     {
         ble.rx_buffer[ble.rx_head] = ble.rx_byte;
+        ble.rx_time_ms[ble.rx_head] = now_ms;
+        shift = (uint8_t)((ble.rx_head % 4) * 2);
+        ble.rx_flags[ble.rx_head / 4] = (uint8_t)((ble.rx_flags[ble.rx_head / 4] & ~(3 << shift)) | (flags << shift));
+        ble.rx_loss_pending = 0;
         __DMB();
         ble.rx_head = next;
         /* 按水位唤醒，避免115200串口逐字节触发业务任务；余量保留给调度延迟。 */
@@ -760,6 +840,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     if (HAL_UART_Receive_IT(huart, &ble.rx_byte, 1) != HAL_OK)
     {
         ble.rx_errors++;
+        ble.rx_loss_pending = 1;
     }
 }
 
@@ -777,6 +858,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     }
 #endif
     ble.rx_errors++;
+    ble.rx_activity_ms = HAL_GetTick();
+    ble.rx_have_byte = 1;
+    ble.rx_loss_pending = 1;
     /* 本工程没有UART RX DMA；AbortReceive仅关闭接收中断，不在ISR等待DMA。 */
     (void)HAL_UART_AbortReceive(huart);
     __HAL_UART_CLEAR_OREFLAG(huart);
