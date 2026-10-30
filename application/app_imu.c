@@ -6,7 +6,7 @@
   *          App_IMU_Init()/App_IMU_Service() 由 sensor 任务体调用,
   *          App_IMU_GetSnapshot() 供 UI 等消费方在自己的任务上下文取数。
   *          并发模式: 单生产者(sensor 任务)写 → 互斥锁保护快照 → 消费者加锁取。
-  *          MPU6050后台5Hz仅采加速度；姿态/校准50Hz、运动/心率100Hz时递推四元数。
+ *          MPU6050后台5Hz仅采加速度；心率参考100Hz仅采加速度，姿态/校准才递推四元数。
   ******************************************************************************
 ***/
 #include "app_imu.h"
@@ -78,6 +78,7 @@ static uint32_t s_euler_period_ms = APP_IMU_EULER_PERIOD_MS;
 static uint8_t s_have_euler;
 static common_activity_struct s_activity;
 static uint32_t s_sample_period_ms = MPU6050_SAMPLE_PERIOD_MS;
+static uint8_t s_accel_reference_requested, s_accel_reference;
 static uint32_t s_max_gap_ms = APP_IMU_MAX_GAP_MS;
 static uint32_t s_mag_poll_ms = APP_MAG_POLL_MS;
 static uint32_t s_mag_max_age_ms = APP_MAG_MAX_AGE_MS;
@@ -305,6 +306,7 @@ void App_IMU_Init(void)
 
     /* EEPROM与传感器均由sensor任务访问；读取在快照锁外执行。 */
     s_sample_period_ms = MPU6050_SAMPLE_PERIOD_MS;
+    s_accel_reference_requested = s_accel_reference = 0;
     s_euler_period_ms = APP_IMU_EULER_PERIOD_MS;
     s_max_gap_ms = APP_IMU_MAX_GAP_MS;
     s_mag_poll_ms = APP_MAG_POLL_MS;
@@ -357,9 +359,14 @@ void app_imu_set_sleep(uint8_t sleeping)
     }
 }
 
+void app_imu_set_accel_reference(uint8_t enabled)
+{
+    s_accel_reference_requested = enabled != 0;
+}
+
 uint32_t app_imu_set_sample_period(uint32_t period_ms)
 {
-    uint8_t calibrating;
+    uint8_t calibrating, accel_reference, accel_only, previous_accel_only;
     uint16_t mag_rate = 300;
     imu_lock();
     calibrating = s_mag_cal_state == APP_MAG_CAL_RUNNING || s_mag_cal_request == APP_MAG_CMD_START;
@@ -368,13 +375,16 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
     {
         period_ms = 20;
     }
-    if (my_mpu6050_set_sample_period(period_ms) != 0)
+    accel_reference = s_accel_reference_requested != 0 && calibrating == 0 && period_ms != 200;
+    if (my_mpu6050_set_sample_mode(period_ms, accel_reference) != 0)
     {
         period_ms = 20; /* 重配置期间继续推进其他服务，不阻塞任务。 */
     }
-    if (period_ms != s_sample_period_ms)
+    accel_only = period_ms == 200 || accel_reference != 0;
+    previous_accel_only = s_sample_period_ms == 200 || s_accel_reference != 0;
+    if (period_ms != s_sample_period_ms || accel_reference != s_accel_reference)
     {
-        if (period_ms == 200 || s_sample_period_ms == 200)
+        if (accel_only != previous_accel_only)
         {
             s_mag_sleep_pending = 1;
             s_mag_valid = 0;
@@ -383,15 +393,16 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
             imu_unlock();
         }
         s_sample_period_ms = period_ms;
+        s_accel_reference = accel_reference;
         s_max_gap_ms = period_ms * 5;
         s_have_sample = s_have_euler = 0;
     }
     if (s_mag_sleep_pending != 0)
     {
-        s_mag_sleep_pending = lsm303dlhc_mag_set_sleep(period_ms == 200);
+        s_mag_sleep_pending = lsm303dlhc_mag_set_sleep(accel_only);
         app_diag_sensor_init(APP_DIAG_MAG, s_mag_sleep_pending);
     }
-    if (period_ms == 200)
+    if (accel_only != 0)
     {
         return period_ms; /* 磁力计保持休眠，加速度帧不参与四元数和陀螺仪零漂更新。 */
     }
@@ -442,7 +453,7 @@ void App_IMU_Service(uint8_t read_mag)
     /* 1. 同一sensor任务先取磁参考，再以一笔事务轮询MPU最新帧。 */
     mag_online = 0;
     memset(mag_body, 0, sizeof(mag_body));
-    if (s_sample_period_ms != 200)
+    if (s_sample_period_ms != 200 && s_accel_reference == 0)
     {
         mag_online = mag_service(now, mag_body, read_mag);
     }
@@ -467,8 +478,12 @@ void App_IMU_Service(uint8_t read_mag)
                                (float)raw.Accel.Accel_y / MPU6050_ACCEL_LSB_PER_G,
                                (float)raw.Accel.Accel_z / MPU6050_ACCEL_LSB_PER_G, my_mpu6050_sample_ms());
     }
-    if (s_sample_period_ms == 200)
+    if (s_sample_period_ms == 200 || s_accel_reference != 0)
     {
+        if (read_result == 0 && s_accel_reference != 0)
+        {
+            app_heart_motion_update(raw.Accel.Accel_x, raw.Accel.Accel_y, raw.Accel.Accel_z, my_mpu6050_sample_ms());
+        }
         imu_lock();
         if (read_result == 0)
         {

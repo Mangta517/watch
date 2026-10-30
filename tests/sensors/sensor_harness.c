@@ -48,6 +48,7 @@ static uint8_t check_recovery_waits, spl_status_polls;
 static int spl_fail_read_at = -1, spl_fail_write_at = -1;
 static unsigned spl_reads, spl_writes;
 static unsigned mpu_reads, mpu_writes;
+static uint16_t mpu_last_frame_size;
 static int mpu_fail_read_at = -1, mpu_fail_write_at = -1;
 static uint8_t spl_reset_status = SPL06_SENSOR_RDY | SPL06_COEF_RDY;
 static TickType_t motion_at_tick;
@@ -242,6 +243,7 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, uint8_t *d
         if (dev == MPU6050_ADDR && reg == 0x3A)
         {
             assert(len == 1 || len == 7 || len == 15);
+            mpu_last_frame_size = len;
             if (mpu_auto_ready != 0)
             {
                 data[0] |= 1U; /* 默认模拟持续100Hz输出；新鲜度用例可暂停转换。 */
@@ -2764,6 +2766,130 @@ static void activity_tests(void)
     puts("PASS: real 5Hz cycle registers, accelerometer-only burst, magnetic sleep, no fusion/heart reference in low power, full-mode restore, retained steps and partial-mode failures.");
 }
 
+static void accel_reference_tests(void)
+{
+    const mpu6050_offset_struct offset = {{11, -22, 33}, {4, -5, 6}};
+    mpu6050_offset_struct restored;
+    app_imu_struct snapshot, previous;
+    Accel_Gyro_struct raw, untouched;
+    unsigned i, transactions, frames;
+    uint32_t started;
+    uint8_t recovery;
+
+    memset(eeprom, 0xFF, sizeof(eeprom));
+    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
+    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
+    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
+    assert(my_mpu6050_init() == 0 && lsm303dlhc_mag_init() == 0);
+    App_IMU_Init();
+    my_mpu6050_restore_offset(&offset);
+    word(MPU6050_ADDR, MPU6050_ACCEL_XOUT_H, 111);
+    word(MPU6050_ADDR, MPU6050_ACCEL_YOUT_H, -222);
+    word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, -8192);
+    word(MPU6050_ADDR, MPU6050_GYRO_ZOUT_H, 3280);
+    assert(app_imu_set_sample_period(20) == 20);
+    App_IMU_Service(0);
+    assert(App_IMU_GetSnapshot(&previous) != 0);
+
+    app_imu_set_accel_reference(1);
+    assert(app_imu_set_sample_period(10) == 10);
+    assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x08);
+    assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_2] == 0x07);
+    assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 9);
+    assert(regs[MPU6050_ADDR][MPU6050_CONFIG] == MPU6050_DLPF_CFG);
+    assert(regs[LSM303DLHC_MAG_ADDR][0x02] == 3);
+    frames = heart_motion_frames;
+    for (i = 0; i < 600; ++i)
+    {
+        transactions = bus_transactions;
+        assert(app_imu_set_sample_period(10) == 10 && bus_transactions == transactions);
+        tick += 10;
+        App_IMU_Service(1);
+        assert(bus_transactions == transactions + 1 && mpu_last_frame_size == 7);
+        assert(heart_motion_ms == tick && heart_motion_frames == frames + i + 1);
+        assert(heart_motion_accel[0] == 100 && heart_motion_accel[1] == -200 && heart_motion_accel[2] == -8225);
+    }
+    assert(App_IMU_GetSnapshot(&snapshot) == 0);
+    assert(snapshot.raw.Gyro.Gyro_x == 0 && snapshot.raw.Gyro.Gyro_y == 0 && snapshot.raw.Gyro.Gyro_z == 0);
+    assert(snapshot.pitch_deg == previous.pitch_deg && snapshot.roll_deg == previous.roll_deg && snapshot.yaw_deg == previous.yaw_deg);
+    assert(snapshot.mag_online == 0 && snapshot.mag_fused == 0);
+    my_mpu6050_get_offset(&restored);
+    assert(memcmp(&offset, &restored, sizeof(offset)) == 0);
+    assert(my_mpu6050_zero_offset_state() == MPU6050_CAL_RESTORED);
+
+    mpu_auto_ready = 0;
+    frames = heart_motion_frames;
+    tick += 10;
+    App_IMU_Service(1);
+    assert(heart_motion_frames == frames);
+    memset(&raw, 0x35, sizeof(raw));
+    untouched = raw;
+    assert(my_mpu6050_get_data(&raw) == MPU6050_DATA_NOT_READY && memcmp(&raw, &untouched, sizeof(raw)) == 0);
+    mpu_auto_ready = 1;
+    assert(my_mpu6050_set_sleep(1) == 0 && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x48);
+    tick += 2000;
+    assert(my_mpu6050_set_sleep(0) == 0 && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x08);
+
+    /* 同一10ms周期恢复六轴时也必须重新启用陀螺仪和磁力计。 */
+    app_imu_set_accel_reference(0);
+    assert(app_imu_set_sample_period(10) == 10);
+    assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 1 && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_2] == 0);
+    assert(regs[LSM303DLHC_MAG_ADDR][0x02] == 0);
+    tick += 100;
+    App_IMU_Service(0);
+    assert(mpu_last_frame_size == 15 && App_IMU_GetSnapshot(&snapshot) != 0);
+    assert(snapshot.raw.Gyro.Gyro_z == 3274);
+    assert(fabsf(snapshot.yaw_deg - previous.yaw_deg) < 2.0f);
+
+    app_imu_set_accel_reference(1);
+    assert(app_imu_set_sample_period(10) == 10);
+    assert(app_imu_set_sample_period(200) == 200);
+    frames = heart_motion_frames;
+    tick += 200;
+    App_IMU_Service(1);
+    assert(heart_motion_frames == frames && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x28);
+    assert(app_imu_set_sample_period(10) == 10);
+    assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x08 && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_2] == 7);
+    assert(regs[LSM303DLHC_MAG_ADDR][0x02] == 3);
+
+    /* 每一笔模式配置失败都不能发布半配置数据，恢复后重新应用加速度模式。 */
+    for (i = 0; i < 5; ++i)
+    {
+        assert(my_mpu6050_init() == 0);
+        mpu_fail_write_at = (int)mpu_writes + (int)i;
+        assert(app_imu_set_sample_period(10) == 20);
+        assert(my_mpu6050_get_data(&raw) == 1 && memcmp(&raw, &untouched, sizeof(raw)) == 0);
+        mpu_fail_write_at = -1;
+        started = tick;
+        do
+        {
+            recovery = checked_recovery_step(my_mpu6050_recover_step);
+            tick += 10;
+            assert((uint32_t)(tick - started) < 2000);
+        } while (recovery != 0);
+        assert(app_imu_set_sample_period(10) == 10);
+        assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x08 && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_2] == 7);
+        assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 9 && regs[LSM303DLHC_MAG_ADDR][0x02] == 3);
+    }
+
+    app_imu_set_accel_reference(0);
+    assert(app_imu_set_sample_period(20) == 20);
+    fail_dev = LSM303DLHC_MAG_ADDR;
+    fail_reg = 0x02;
+    app_imu_set_accel_reference(1);
+    assert(app_imu_set_sample_period(10) == 10 && regs[LSM303DLHC_MAG_ADDR][0x02] == 0);
+    fail_dev = fail_reg = -1;
+    assert(app_imu_set_sample_period(10) == 10 && regs[LSM303DLHC_MAG_ADDR][0x02] == 3);
+    transactions = bus_transactions;
+    assert(app_imu_set_sample_period(10) == 10 && bus_transactions == transactions);
+
+    App_IMU_MagCalibrate(1);
+    assert(app_imu_set_sample_period(10) == 20);
+    assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 1 && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_2] == 0);
+    assert(regs[LSM303DLHC_MAG_ADDR][0x02] == 0);
+    puts("PASS: 100Hz accel-only PPG reference preserves fresh calibrated acceleration, sleeps gyro/temp/MAG, skips fusion, restores full/5Hz modes and retries partial configuration/recovery failures.");
+}
+
 static void background_mag_sleep_retry_tests(void)
 {
     uint32_t i;
@@ -2827,6 +2953,7 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "activity") == 0)
     {
         activity_tests();
+        accel_reference_tests();
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "mag_sleep_recovery") == 0)

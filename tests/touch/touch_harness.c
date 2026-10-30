@@ -8,7 +8,7 @@ static uint16_t point_x, point_y;
 static uint8_t pressed, switch_screen;
 static unsigned int critical, reads;
 static unsigned int sleeps, wakes;
-static uint8_t chip_sleeping;
+static uint8_t chip_sleeping, sleep_result;
 
 void host_touch_enter_critical(void)
 {
@@ -41,11 +41,16 @@ uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
     *y = point_y;
     return pressed;
 }
-void Touch_Sleep(void)
+uint8_t Touch_Sleep(void)
 {
     assert(critical == 0 && chip_sleeping == 0);
-    chip_sleeping = 1;
     ++sleeps;
+    if (sleep_result != 0)
+    {
+        return 1;
+    }
+    chip_sleeping = 1;
+    return 0;
 }
 void Touch_Wakeup(void)
 {
@@ -173,6 +178,34 @@ int main(void)
     poll(TOUCH_READ_ERROR, 0, 0);
     sample = read_event(0, 0);
     assert(sample.canceled != 0);
+    /* 瞬态NACK不能假报休眠；每次服务至多尝试一次，成功后停止重发。 */
+    app_touch_set_enabled(0);
+    sleep_result = 1;
+    before = reads;
+    for (i = 0; i < 3; ++i)
+    {
+        app_touch_service();
+        assert(app_touch_is_sleeping() == 0 && chip_sleeping == 0);
+        assert(reads == before && sleeps == 2 + i && wakes == 1);
+    }
+    sleep_result = 0;
+    app_touch_service();
+    assert(app_touch_is_sleeping() != 0 && chip_sleeping != 0 && sleeps == 5);
+    app_touch_service();
+    assert(reads == before && sleeps == 5);
+    app_touch_set_enabled(1);
+    poll(0, 0, 0);
+    assert(app_touch_is_sleeping() == 0 && wakes == 2);
+    /* 重试未成功就亮屏，应直接恢复采样，不凭空执行休眠唤醒。 */
+    app_touch_set_enabled(0);
+    sleep_result = 1;
+    app_touch_service();
+    assert(app_touch_is_sleeping() == 0 && sleeps == 6);
+    before = reads;
+    app_touch_set_enabled(1);
+    poll(0, 0, 0);
+    assert(reads == before + 1 && wakes == 2 && sleeps == 6);
+    puts("PASS: sleep NACKs remain awake, retry once per service, stop after success and allow screen-on during retries.");
     puts("PASS: ordered press/move/release, short clicks, stale release, overflow/error cancellation, screen transitions, in-flight reads and tick wrap; consumer never reads I2C.");
     return 0;
 }

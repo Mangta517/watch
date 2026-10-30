@@ -1,6 +1,6 @@
 /**
  * @file app_battery.c
- * @brief 每秒进行一次 PA1/ADC1_IN1 单次转换，不在 UI 中等待 ADC。
+ * @brief PA1/ADC1_IN1 单次转换：启动/亮屏1s，启动稳定后熄屏10s，不在UI中等待ADC。
  */
 #include "app_battery.h"
 #include "app_diag.h"
@@ -16,10 +16,12 @@
 static SemaphoreHandle_t s_battery_mux;
 static app_battery_struct s_battery_data;
 static uint32_t s_attempt_ms;
+static uint32_t s_filter_ms;
 static int32_t s_filtered_mv_q8;
 static uint32_t s_startup_sum_mv;
 static uint8_t s_startup_samples;
 static uint8_t s_last_percent;
+static uint8_t s_sleep_mode;
 
 static uint8_t battery_percent(uint32_t voltage_mv)
 {
@@ -59,7 +61,13 @@ void app_battery_init(void)
     s_startup_samples = 0;
     s_startup_sum_mv = 0;
     s_last_percent = 0;
+    s_sleep_mode = 0;
     app_diag_sensor_init(APP_DIAG_BATTERY, 0);
+}
+
+void app_battery_set_sleep_mode(uint8_t sleeping)
+{
+    s_sleep_mode = sleeping != 0;
 }
 
 void app_battery_service(void)
@@ -69,7 +77,13 @@ void app_battery_service(void)
     uint32_t now = HAL_GetTick();
     uint32_t raw = 0;
     uint32_t read_started;
-    if (s_battery_mux == NULL || now - s_attempt_ms < APP_BATTERY_PERIOD_MS)
+    uint32_t period_ms = APP_BATTERY_PERIOD_MS;
+    uint32_t filter_steps;
+    if (s_sleep_mode != 0 && s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
+    {
+        period_ms = APP_BATTERY_SLEEP_PERIOD_MS;
+    }
+    if (s_battery_mux == NULL || now - s_attempt_ms < period_ms)
     {
         return;
     }
@@ -105,13 +119,24 @@ void app_battery_service(void)
             if (s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
             {
                 s_filtered_mv_q8 = (int32_t)(s_startup_sum_mv * 256 / APP_BATTERY_STARTUP_AVERAGE_SAMPLES);
+                s_filter_ms = now;
                 s_last_percent = battery_percent((uint32_t)(s_filtered_mv_q8 + 128) / 256);
             }
         }
         else
         {
-            /* Q8保留小数，避免1/8低通因整数取整停在旧值。 */
-            s_filtered_mv_q8 += ((int32_t)sample.voltage_mv * 256 - s_filtered_mv_q8) / 8;
+            /* 按经过秒数推进1/8低通，熄屏10s采样不把响应拖慢十倍；长故障后最多补10步。 */
+            filter_steps = (uint32_t)(now - s_filter_ms) / APP_BATTERY_PERIOD_MS;
+            if (filter_steps > APP_BATTERY_SLEEP_PERIOD_MS / APP_BATTERY_PERIOD_MS)
+            {
+                filter_steps = APP_BATTERY_SLEEP_PERIOD_MS / APP_BATTERY_PERIOD_MS;
+            }
+            while (filter_steps != 0)
+            {
+                s_filtered_mv_q8 += ((int32_t)sample.voltage_mv * 256 - s_filtered_mv_q8) / 8;
+                --filter_steps;
+            }
+            s_filter_ms = now;
         }
         if (s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
         {

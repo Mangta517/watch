@@ -117,6 +117,8 @@ extern "C"
     uint8_t my_mpu6050_init(void);
     /* 仅sensor任务：10/20/40ms为六轴100/50/25Hz，200ms为加速度5Hz低功耗循环。 */
     uint8_t my_mpu6050_set_sample_period(uint32_t period_ms);
+    /* accel_reference=1连续采加速度，陀螺仪/温度待机；200ms仍使用原5Hz循环。 */
+    uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference);
     uint8_t my_mpu6050_set_sleep(uint8_t sleeping);
     /* 仅sensor任务：begin使数据无效，step每拍至多一笔事务；0=就绪，1=失败冷却，2=推进中。 */
     void my_mpu6050_recover_begin(void);

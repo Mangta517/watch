@@ -57,6 +57,7 @@ static void finish_frame(void)
         s_weather.humidity_rh = (uint8_t)humidity;
         s_weather.received_ms = s_last_byte_ms;
         s_weather.valid = 1;
+        s_weather.cached = 0;
     }
     s_length = 0;
     s_overflow = 0;
@@ -104,6 +105,16 @@ void app_weather_get_snapshot(app_weather_struct *snapshot)
     if (snapshot != NULL)
     {
         *snapshot = s_weather;
+    }
+}
+
+void app_weather_restore(const app_weather_struct *snapshot)
+{
+    if (s_weather.valid == 0 && snapshot->valid != 0)
+    {
+        s_weather = *snapshot;
+        s_weather.cached = 1;
+        s_weather.received_ms = 0;
     }
 }
 

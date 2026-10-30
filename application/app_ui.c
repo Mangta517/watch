@@ -52,6 +52,7 @@
 #define UI_BT_READ_SIZE      64
 #define UI_BT_RX_BUDGET      256
 #define UI_BT_TX_TIMEOUT_MS  20
+#define UI_BT_ECO_QUIET_MS   1000
 #define UI_TREND_POINTS      24
 #define UI_TREND_SAMPLE_MS   1000
 #define UI_BARO_REFRESH_MS   5000
@@ -161,6 +162,7 @@ static lv_obj_t *s_bt_tx_status;
 static lv_obj_t *s_bt_clock_status;
 static lv_obj_t *s_bt_log;
 static lv_obj_t *s_bt_log_box;
+static lv_obj_t *s_bt_power_label;
 /* 接收历史由LVGL任务独占，切页只删除控件，不清除RAM中的内容。 */
 static char s_bt_text[UI_BT_LOG_SIZE];
 static uint16_t s_bt_text_length;
@@ -178,6 +180,8 @@ static uint8_t s_brightness = 50;
 static uint8_t s_screen_on = 1;
 static uint8_t s_sport_mode;
 static uint8_t s_bt_phone_ready, s_bt_uptime_sent;
+static uint8_t s_bt_eco, s_bt_enabled = 1, s_bt_management_busy;
+static uint32_t s_bt_quiet_tick;
 static uint32_t s_bt_clock_frames;
 static lv_obj_t *s_sport_button;
 static lv_obj_t *s_sport_label;
@@ -1225,7 +1229,7 @@ static void baro_page(int y)
     label(card, "hPa", 182, 75, &lv_font_montserrat_10, UI_MUTED);
     trend_create(&s_altitude_trend, "ALTITUDE TREND / m", y + 102, 116, UI_BLUE, APP_BARO_HISTORY_PERIOD_MS);
     note(s_body, "Altitude uses standard sea-level pressure. Weather can change this estimate.", y + 232);
-    note(s_body, "SPL006 / live sensor snapshot", y + 286);
+    note(s_body, "SPL006 / sample every 5 min", y + 286);
 }
 
 static void brightness_cb(lv_event_t *event)
@@ -1267,7 +1271,7 @@ static void bluetooth_receive(void)
     kt6368a_rx_info_struct info;
 
     /* AT响应留给初始化；RTC未就绪时先保留手机校时等业务字节。 */
-    if (s_sport_mode != 0 || kt6368a_init_is_pending() != 0 || watch_rtc_init_is_pending() != 0)
+    if (s_bt_enabled == 0 || s_sport_mode != 0 || kt6368a_init_is_pending() != 0 || watch_rtc_init_is_pending() != 0)
     {
         return;
     }
@@ -1292,6 +1296,7 @@ static void bluetooth_receive(void)
             break;
         }
         budget -= received;
+        s_bt_quiet_tick = lv_tick_get();
         now_ms = info.received_ms + tick_offset;
         if ((info.flags & KT6368A_RX_LOSS) != 0)
         {
@@ -1494,10 +1499,12 @@ static void bluetooth_send_heart(void)
     {
         if (kt6368a_take_tx_result(&status) == 0)
         {
+            s_bt_management_busy = 1;
             return;
         }
         app_diag_heart_tx(pending_count, status == HAL_OK);
         pending_count = 0;
+        s_bt_quiet_tick = lv_tick_get();
         if (status == HAL_OK)
         {
             s_bt_tx_text = "TX HEART OK";
@@ -1510,14 +1517,19 @@ static void bluetooth_send_heart(void)
         }
     }
 #endif
-    if (app_battery_log_ble_service(s_sport_mode == 0 && kt6368a_init_is_pending() == 0, lv_tick_get()) != 0)
+    if (app_battery_log_ble_service(s_bt_enabled != 0 && s_sport_mode == 0 && kt6368a_init_is_pending() == 0, lv_tick_get()) != 0)
     {
         management_busy = 1;
     }
-    if (app_reset_ble_service(s_sport_mode == 0 && kt6368a_init_is_pending() == 0, lv_tick_get()) != 0)
+    if (app_reset_ble_service(s_bt_enabled != 0 && s_sport_mode == 0 && kt6368a_init_is_pending() == 0, lv_tick_get()) != 0)
     {
         management_busy = 1;
     }
+    if (s_bt_management_busy != 0 || management_busy != 0)
+    {
+        s_bt_quiet_tick = lv_tick_get();
+    }
+    s_bt_management_busy = management_busy;
     if (management_busy != 0)
     {
         /* 两个命令服务都须收回自己的TX结果，避免另一个待发命令挡住结果回收。 */
@@ -1526,6 +1538,7 @@ static void bluetooth_send_heart(void)
     }
     if (bluetooth_send_uptime() != 0)
     {
+        s_bt_quiet_tick = lv_tick_get();
         return;
     }
 #if APP_DEBUG_TELEMETRY
@@ -1576,6 +1589,15 @@ static void bluetooth_send_heart(void)
 #endif
 }
 
+static void bluetooth_power_cb(lv_event_t *event)
+{
+    (void)event;
+    s_bt_eco = s_bt_eco == 0;
+    s_bt_quiet_tick = lv_tick_get();
+    bluetooth_update_power();
+    refresh_bluetooth();
+}
+
 static void bluetooth_page(void)
 {
     lv_obj_t *button, *caption;
@@ -1611,6 +1633,14 @@ static void bluetooth_page(void)
     lv_label_set_long_mode(s_bt_log, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_line_space(s_bt_log, 3, 0);
     s_bt_clock_status = label(s_body, "Send HH:MM:SS to set time", 4, 200, &lv_font_montserrat_10, UI_MUTED);
+    button = panel(s_body, 0, 228, 212, 36, UI_BORDER);
+    s_bt_power_label = label(button, "BLE: KEEP CONNECTED", 0, 0, &lv_font_montserrat_10, UI_TEXT);
+    lv_obj_center(s_bt_power_label);
+    lv_obj_clear_flag(s_bt_power_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(button, bluetooth_power_cb, LV_EVENT_CLICKED, NULL);
+    note(s_body, "ECO disconnects after screen off.", 274);
+    note(s_body, "Wake to reconnect. Resets on reboot.", 292);
     s_bt_dirty = 1;
 }
 
@@ -1629,6 +1659,10 @@ static void refresh_bluetooth(void)
     {
         text = "OFF / SPORT MODE";
     }
+    else if (s_bt_enabled == 0)
+    {
+        text = "OFF / ECO MODE";
+    }
     else if (status != HAL_OK)
     {
         if (status == HAL_TIMEOUT)
@@ -1646,6 +1680,14 @@ static void refresh_bluetooth(void)
         color = UI_ORANGE;
     }
     set_label_text(s_bt_status, text);
+    if (s_bt_eco != 0)
+    {
+        set_label_text(s_bt_power_label, "BLE: ECO / SCREEN OFF");
+    }
+    else
+    {
+        set_label_text(s_bt_power_label, "BLE: KEEP CONNECTED");
+    }
     set_text_color(s_bt_status, color);
     set_label_text_fmt(s_bt_count, "RX %lu B", (unsigned long)s_bt_rx_bytes);
     set_label_text(s_bt_tx_status, s_bt_tx_text);
@@ -1915,7 +1957,7 @@ static void climate_page(void)
     label(s_aht21_card, "C", 184, 142, &lv_font_montserrat_10, UI_ORANGE);
     s_air_temperature = label(s_aht21_card, "--", 14, 132, &lv_font_montserrat_30, UI_ORANGE);
     lv_obj_set_width(s_air_temperature, 146);
-    s_aht21_samples = label(s_aht21_card, "SAMPLES 0 / 2s", 14, 186, &lv_font_montserrat_10, UI_MUTED);
+    s_aht21_samples = label(s_aht21_card, "SAMPLES 0 / 1s", 14, 186, &lv_font_montserrat_10, UI_MUTED);
 }
 
 static void settings_page(void)
@@ -1968,7 +2010,7 @@ static void clear_page_refs(void)
     s_mag_status = s_yaw_source = s_mag_cal_label = NULL;
     s_mag_cal_status = NULL;
     s_bt_status = s_bt_count = s_bt_tx_status = s_bt_log = s_bt_log_box = NULL;
-    s_bt_clock_status = NULL;
+    s_bt_clock_status = s_bt_power_label = NULL;
     s_last_second = UINT32_MAX;
 }
 
@@ -2133,7 +2175,7 @@ static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
             sport_page();
             break;
         case PAGE_WEATHER:
-            s_weather_value = metric("TODAY'S WEATHER", "BLE", 4, UI_BLUE);
+            s_weather_value = metric("PHONE WEATHER", "BLE", 4, UI_BLUE);
             lv_obj_set_height(lv_obj_get_parent(s_weather_value), 132);
             lv_obj_set_pos(s_weather_value, 88, 48);
             lv_obj_set_width(s_weather_value, 110);
@@ -2393,7 +2435,7 @@ static void refresh_aht21(void)
     }
     set_label_text(s_aht21_status, status);
     set_text_color(s_aht21_status, color);
-    set_label_text_fmt(s_aht21_samples, "SAMPLES %lu / 2s", (unsigned long)snapshot.sample_count);
+    set_label_text_fmt(s_aht21_samples, "SAMPLES %lu / 1s", (unsigned long)snapshot.sample_count);
 }
 
 static void refresh_weather(void)
@@ -2425,10 +2467,18 @@ static void refresh_weather(void)
             s_weather_icon_code = weather.code;
             lv_obj_invalidate(s_weather_icon);
         }
-        set_label_text_fmt(s_weather_label, "%s%ld.%ldC / RH %u%%\n%lu min ago", sign,
-                           (long)(magnitude / 10), (long)(magnitude % 10), (unsigned)weather.humidity_rh,
-                           (unsigned long)(lv_tick_elaps(weather.received_ms) / 60000));
-        if (lv_tick_elaps(weather.received_ms) >= 3600000)
+        if (weather.cached != 0)
+        {
+            set_label_text_fmt(s_weather_label, "%s%ld.%ldC / RH %u%%\nCACHED / UPDATE VIA BLE", sign,
+                               (long)(magnitude / 10), (long)(magnitude % 10), (unsigned)weather.humidity_rh);
+        }
+        else
+        {
+            set_label_text_fmt(s_weather_label, "%s%ld.%ldC / RH %u%%\n%lu min ago", sign,
+                               (long)(magnitude / 10), (long)(magnitude % 10), (unsigned)weather.humidity_rh,
+                               (unsigned long)(lv_tick_elaps(weather.received_ms) / 60000));
+        }
+        if (weather.cached != 0 || lv_tick_elaps(weather.received_ms) >= 3600000)
         {
             set_text_color(s_weather_label, UI_MUTED);
             set_text_color(s_weather_condition, UI_MUTED);
@@ -2697,12 +2747,40 @@ static void poll_key(void)
     }
 }
 
-/* 仅SPORT启停切换蓝牙电源；屏幕明暗不代表手机连接状态。 */
+/* 保连默认不随屏幕切电；ECO等待当前命令和TX完成，再留1秒安静期供模块发送。 */
 static void bluetooth_update_power(void)
 {
+    uint8_t enabled = s_sport_mode == 0;
+    uint32_t now_ms = lv_tick_get();
+    if (enabled != 0)
+    {
+        if (s_bt_eco == 0 || s_screen_on != 0)
+        {
+            s_bt_quiet_tick = now_ms;
+        }
+        else
+        {
+            if (kt6368a_init_is_pending() != 0 || s_bt_management_busy != 0 ||
+                kt6368a_tx_is_busy() != 0 || kt6368a_rx_pending() != 0)
+            {
+                s_bt_quiet_tick = now_ms;
+                return;
+            }
+            if ((uint32_t)(now_ms - s_bt_quiet_tick) < UI_BT_ECO_QUIET_MS)
+            {
+                return;
+            }
+            enabled = 0;
+        }
+    }
+    if (enabled == s_bt_enabled)
+    {
+        return;
+    }
+    s_bt_enabled = enabled;
     s_bt_phone_ready = 0;
     s_bt_clock_frames = app_clock_get_received_count();
-    kt6368a_set_enabled(s_sport_mode == 0);
+    kt6368a_set_enabled(enabled);
     app_clock_reset_receive();
     app_weather_reset_receive();
     app_diag_reset_receive();
@@ -2719,6 +2797,8 @@ static void set_screen_on(uint8_t screen_on)
     lv_indev_t *indev;
 
     s_screen_on = screen_on;
+    s_bt_quiet_tick = lv_tick_get();
+    bluetooth_update_power();
     app_touch_set_enabled(s_screen_on);
     publish_power_state(); /* 每次切换立即发布，保留同一轮熄屏再抬腕亮屏的触摸唤醒通知。 */
     if (s_screen_on)
@@ -2828,6 +2908,7 @@ static void ui_timer_cb(lv_timer_t *timer)
     poll_touch_idle();
     poll_wrist_raise();
     publish_power_state();
+    bluetooth_update_power();
     /* Rebuild only after release and after the previous animation, so event
      * targets stay valid and a gesture cannot turn into a card click. */
     if (s_screen_on && !s_transition && !touch_pressed())
@@ -2895,6 +2976,7 @@ void App_UI_ServiceSleeping(void)
     poll_key();
     poll_wrist_raise();
     publish_power_state();
+    bluetooth_update_power();
 }
 
 void App_UI_Create(void)

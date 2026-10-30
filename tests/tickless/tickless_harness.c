@@ -272,10 +272,18 @@ int main(void)
     assert(kernel_tick == 20U);
 
     reset(0);
-    sleep_rtc_counts = 3000U;
-    step_limit = 100U;
+    sleep_rtc_counts = 6000;
+    step_limit = 200;
     app_tickless_sleep(UINT32_MAX);
-    assert(kernel_tick == 91U && requested_load == 100U * HOST_COUNTS_PER_TICK - 1U);
+    assert(kernel_tick == 183 && requested_load == 200 * HOST_COUNTS_PER_TICK - 1);
+
+    reset(0);
+    rtc_count = 32000;
+    sleep_rtc_counts = 6554;
+    step_limit = 200;
+    deadline_tick = 1;
+    app_tickless_sleep(200);
+    assert(kernel_tick == 200 && requested_load == 200 * HOST_COUNTS_PER_TICK - 1);
 
     reset(0);
     kernel_tick = uwTick = UINT32_MAX - 5U;
@@ -343,7 +351,7 @@ int main(void)
         }
         assert(runs[0] == 20U && runs[1] == 9U && runs[2] == 4U);
     }
-    puts("PASS: RTC early/deadline wake, partial ticks, fractional accumulation, second/midnight and tick wrap, pending/abort, LSE fallback and 100ms limit.");
+    puts("PASS: RTC early/deadline wake, partial ticks, fractional accumulation, second/midnight and tick wrap, pending/abort, LSE fallback and 200ms limit.");
     puts("PASS: mixed 5/10/20ms blocked-task deadlines retain their phases; the sleep adapter never steps over the earliest unblock time.");
     puts("PASS: CPU time during RTC reads is compensated, including cycle-counter wrap.");
 
@@ -365,6 +373,22 @@ int main(void)
     app_tickless_sleep(20U);
     assert(stops == 1 && sleeps == 0 && kernel_tick == 10 && TIM2->CNT == 100);
     assert(wakeup_counts == 19U * WATCH_RTC_SUBSECOND_HZ / 1000U);
+
+    reset(0);
+    screen_off = 1;
+    rtc_count = 32000;
+    sleep_rtc_counts = 6000;
+    step_limit = 200;
+    app_tickless_sleep(UINT32_MAX);
+    assert(stops == 1 && sleeps == 0 && kernel_tick == 183 && TIM2->CNT == 1831);
+    assert(wakeup_counts == 199 * WATCH_RTC_SUBSECOND_HZ / 1000);
+
+    reset(0);
+    screen_off = 1;
+    sleep_rtc_counts = 1213; /* PA4等外部中断仍可在200ms期限之前唤醒。 */
+    step_limit = 200;
+    app_tickless_sleep(200);
+    assert(stops == 1 && sleeps == 0 && kernel_tick == 37 && !wakeup_armed);
 
     reset(0);
     screen_off = 1;

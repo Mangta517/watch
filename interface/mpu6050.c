@@ -39,6 +39,7 @@ static volatile uint8_t mpu6050_int_status; /* sensor 任务读回的状态 */
 static volatile uint16_t mpu6050_int_edges;
 static uint8_t mpu6050_ready;
 static uint32_t s_mpu_period_ms = MPU6050_SAMPLE_PERIOD_MS;
+static uint8_t s_mpu_accel_reference;
 
 /* 零偏由sensor任务的校准/恢复接口维护；读取方通过get_offset取得副本。 */
 static int16_t offset_accel_x;
@@ -111,6 +112,7 @@ void my_mpu6050_recover_begin(void)
 {
     mpu6050_ready = 0;
     s_mpu_period_ms = MPU6050_SAMPLE_PERIOD_MS;
+    s_mpu_accel_reference = 0;
     mpu_recovery.no_data = 0;
     mpu_recovery.sleeping = 0;
     mpu_recovery.phase = MPU_RECOVER_PROBE;
@@ -250,9 +252,17 @@ uint8_t my_mpu6050_set_sleep(uint8_t sleeping)
 {
     uint8_t config = 0x01;
     uint32_t now_ms, elapsed_ms;
+    if (s_mpu_period_ms == 200)
+    {
+        config = 0x28;
+    }
+    else if (s_mpu_accel_reference != 0)
+    {
+        config = 0x08;
+    }
     if (sleeping != 0)
     {
-        config = 0x41; /* 保留PLL时钟选择，置SLEEP，不复位零偏及采样配置。 */
+        config = (uint8_t)((config & (uint8_t)~0x20) | 0x40); /* 暂停循环，保留温度和时钟选择，唤醒恢复当前模式。 */
     }
     if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, config) != 0)
     {
@@ -281,6 +291,11 @@ uint8_t my_mpu6050_set_sleep(uint8_t sleeping)
 
 uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
 {
+    return my_mpu6050_set_sample_mode(period_ms, 0);
+}
+
+uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference)
+{
     uint8_t filter;
     if (period_ms != 10 && period_ms != 20 && period_ms != 40 && period_ms != 200)
     {
@@ -290,11 +305,12 @@ uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
     {
         return 1;
     }
-    if (period_ms == s_mpu_period_ms)
+    accel_reference = accel_reference != 0 && period_ms != 200;
+    if (period_ms == s_mpu_period_ms && accel_reference == s_mpu_accel_reference)
     {
         return 0;
     }
-    if (period_ms == 200 || s_mpu_period_ms == 200)
+    if (period_ms == 200 || s_mpu_period_ms == 200 || accel_reference != s_mpu_accel_reference)
     {
         /* 先退出循环并使用内部时钟，再启停陀螺仪，最后接通目标模式。 */
         uint8_t power_2 = 0x00;
@@ -303,6 +319,11 @@ uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
         {
             power_2 = 0x47; /* LP_WAKE_CTRL=1(5Hz)，三轴陀螺仪待机，加速度保持启用。 */
             power_1 = 0x28; /* CYCLE=1、SLEEP=0、TEMP_DIS=1，内部8MHz时钟。 */
+        }
+        else if (accel_reference != 0)
+        {
+            power_2 = 0x07; /* 三轴陀螺仪待机，加速度连续转换，周期仍由SMPLRT_DIV设置。 */
+            power_1 = 0x08; /* 温度关闭、内部8MHz时钟；不能选择已停用的陀螺仪PLL。 */
         }
         if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x08) != 0 ||
             my_mpu6050_write_reg(MPU6050_PWR_MGMT_2, power_2) != 0 ||
@@ -316,6 +337,7 @@ uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
         if (period_ms == 200)
         {
             s_mpu_period_ms = period_ms;
+            s_mpu_accel_reference = 0;
             return 0;
         }
     }
@@ -335,6 +357,7 @@ uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
         return 1;
     }
     s_mpu_period_ms = period_ms;
+    s_mpu_accel_reference = accel_reference;
     return 0;
 }
 
@@ -659,7 +682,7 @@ uint8_t my_mpu6050_get_accel(Accel_struct *accel)
     return 0;
 }
 
-/* 一笔读状态与六轴；5Hz循环只读0x3A..0x40加速度，无新帧不覆盖输出。 */
+/* 一笔读状态与六轴；加速度模式只读0x3A..0x40，无新帧不覆盖输出。 */
 uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
 {
     uint8_t packet[15];
@@ -667,7 +690,7 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
     uint32_t started_ms;
     uint16_t packet_size = sizeof(packet);
 
-    if (s_mpu_period_ms == 200)
+    if (s_mpu_period_ms == 200 || s_mpu_accel_reference != 0)
     {
         packet_size = 7; /* 低功耗只读状态和加速度，不读取停用的温度/陀螺仪寄存器。 */
     }
@@ -693,7 +716,7 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
     data->Accel.Accel_x = (int16_t)(((buf[0] << 8) | buf[1]) - offset_accel_x);
     data->Accel.Accel_y = (int16_t)(((buf[2] << 8) | buf[3]) - offset_accel_y);
     data->Accel.Accel_z = (int16_t)(((buf[4] << 8) | buf[5]) - offset_accel_z);
-    if (s_mpu_period_ms == 200)
+    if (s_mpu_period_ms == 200 || s_mpu_accel_reference != 0)
     {
         memset(&data->Gyro, 0, sizeof(data->Gyro));
     }

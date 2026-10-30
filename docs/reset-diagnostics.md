@@ -88,7 +88,7 @@ RTC 备份寄存器在备份电源消失、备份域重置或记录校验失败�
 ```text
 STATE,RTC,READY,1,LSE,1,MARKER,0x52544331,SYNCED,1,READ,0,TIME,14:35:47
 STATE,CLOCK,UP_MS,600000,RX,1,RESULT,1
-STATE,WEATHER,VALID,1,CODE,3,TEMP_X10,263,RH,80,RX_MS,590000,AGE_MS,10000
+STATE,WEATHER,VALID,1,CODE,3,TEMP_X10,263,RH,80,RX_MS,590000,AGE_MS,10000,CACHED,0
 STATE,END
 ```
 
@@ -96,7 +96,7 @@ STATE,END
 
 `UP_MS` 为捕获快照时的LVGL毫秒tick；`RX` 是本次开机收到的合法校时消息数，包含RTC写入失败的合法消息。`RESULT` 是最近一次校时解析结果：0未校时、1成功、2消息无效、3写RTC失败；它是历史结果，不代替本次 `READ` 或 `SYNCED`。
 
-天气 `VALID` 表示缓存是否有效；`CODE` 是WMO码，`TEMP_X10` 是摄氏温度乘10，`RH` 是湿度百分比。`RX_MS` 为最近有效天气的接收tick，`AGE_MS` 为快照时距该次接收的毫秒数；`VALID=0` 时 `AGE_MS=0` 不表示新鲜天气。32位tick约49.7天回绕，年龄按无符号差计算。
+天气 `VALID` 表示缓存是否有效；`CODE` 是WMO码，`TEMP_X10` 是摄氏温度乘10，`RH` 是湿度百分比。`RX_MS` 为最近有效天气的接收tick，`AGE_MS` 为快照时距该次接收的毫秒数；`VALID=0` 时 `AGE_MS=0` 不表示新鲜天气。32位tick约49.7天回绕，年龄按无符号差计算。2026-10-29新增末尾`CACHED`字段：EEPROM恢复后为1，此时`RX_MS=0`、`AGE_MS=4294967295`表示更新时间未知；收到本次开机的新手机天气后为0，恢复正常接收tick和年龄。
 
 故障出现后先查 `STATE,READ`，再查 `RESET,READ` 和 `BATLOG,STATUS`，保留原始回包；重新校时或同步天气会改变待诊断状态。前后快照可区分校时标记丢失、RTC读取失败、天气缓存无效和界面显示异常，不能单凭一个状态包确定具体硬件故障。
 

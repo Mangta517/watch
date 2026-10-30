@@ -20,9 +20,15 @@ static uint32_t s_period_ms = APP_AHT21_PERIOD_MS;
 
 void app_aht21_set_period(uint32_t period_ms)
 {
+    uint8_t sample_due = period_ms < s_period_ms;
     s_period_ms = period_ms;
     s_period_start_ms = HAL_GetTick();
-    s_pending = s_sample_due = 0;
+    if (sample_due != 0 && (s_pending != 0 || s_recovering != 0))
+    {
+        return; /* 进入详情页沿用正在转换/恢复的本次采样，避免芯片忙时重复触发。 */
+    }
+    s_pending = 0;
+    s_sample_due = sample_due;
     if (s_recovering != 0)
     {
         s_recovering = 0;

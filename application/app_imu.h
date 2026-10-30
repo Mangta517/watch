@@ -85,6 +85,8 @@ extern "C"
     void App_IMU_Service(uint8_t read_mag);
     /* 仅sensor任务：后台200ms为加速度低功耗，运动10ms，姿态/校准20ms。 */
     uint32_t app_imu_set_sample_period(uint32_t period_ms);
+    /* 仅sensor任务：先设置请求，再调用set_sample_period；心率参考不启动姿态/磁融合。 */
+    void app_imu_set_accel_reference(uint8_t enabled);
     /* 兼容器件完全休眠接口；唤醒只丢弃旧时间/磁参考，保留四元数。 */
     void app_imu_set_sleep(uint8_t sleeping);
     /* 校准命令、采集或校准记录保存尚未完成时返回1。 */

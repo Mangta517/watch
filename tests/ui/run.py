@@ -49,6 +49,7 @@ touch_sources = ["application/app_touch.c", "application/app_reset_ble.c",
                  "Middlewares/LVGL/lvgl/examples/porting/lv_port_indev_template.c"]
 subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-DAPP_DEBUG_TELEMETRY=1", "-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
+subprocess.run([str(exe), "cached_weather"], cwd=ROOT, check=True)
 quiet_exe = OUT / "ui_quiet.exe"
 subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-DAPP_DEBUG_TELEMETRY=0", "-Wall", "-Wextra", "-Werror",
                "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c",

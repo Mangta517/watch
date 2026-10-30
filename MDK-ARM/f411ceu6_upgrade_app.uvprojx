@@ -1121,6 +1121,11 @@
               <FilePath>..\application\app_uptime.c</FilePath>
             </File>
             <File>
+              <FileName>app_weather_store.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_weather_store.c</FilePath>
+            </File>
+            <File>
               <FileName>app_battery_log.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\application\app_battery_log.c</FilePath>

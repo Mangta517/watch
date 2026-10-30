@@ -81,7 +81,7 @@ void vTaskDelay(TickType_t ticks)
 uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
 {
     uint32_t result;
-    assert(clear == pdTRUE && wait == 100);
+    assert(clear == pdTRUE && wait == 200);
     ++wait_count;
     if (wait_race == 1)
     {
@@ -95,7 +95,7 @@ uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
         if (wait_race == 2 && wait == 0)
         {
             wait_race = 0;
-            inject_bytes(128); /* 100ms到期与RX水位同时到达。 */
+            inject_bytes(128); /* 200ms到期与RX水位同时到达。 */
         }
     }
     result = notifications;
@@ -133,7 +133,7 @@ int main(void)
     uint32_t before, waits, delays;
     reset_receiver();
     app_lvgl_wait(20, 1);
-    assert(tick == 100 && wait_count == 1 && irq_count == 0);
+    assert(tick == 200 && wait_count == 1 && irq_count == 0);
 
     before = tick;
     wait_race = 1;
@@ -143,7 +143,7 @@ int main(void)
     before = tick;
     wait_race = 2;
     app_lvgl_wait(20, 1);
-    assert(tick - before == 100 && notifications == 0);
+    assert(tick - before == 200 && notifications == 0);
     consume_budget();
 
     inject_bytes(700);
@@ -159,7 +159,7 @@ int main(void)
     app_lvgl_wait(20, 1); /* 回收已到达的水位通知。 */
     before = tick;
     app_lvgl_wait(20, 1);
-    assert(tick - before == 100 && kt6368a_get_rx_dropped() == 0);
+    assert(tick - before == 200 && kt6368a_get_rx_dropped() == 0);
 
     reset_receiver();
     wire_remaining = 50000;
@@ -184,6 +184,6 @@ int main(void)
     before = tick;
     app_lvgl_wait(20, 1);
     assert(tick - before == 20); /* PA4消抖保持原轮询周期。 */
-    puts("PASS: real UART RX and LVGL sleep wait preserve 50kB at 115200, drain backlog, batch notifications, retain early/deadline wakes and idle 100ms waits.");
+    puts("PASS: real UART RX and LVGL sleep wait preserve 50kB at 115200, drain backlog, batch notifications, retain early/deadline wakes and idle 200ms waits.");
     return 0;
 }

@@ -291,6 +291,11 @@ uint8_t kt6368a_tx_is_busy(void)
     return host_bt_tx_busy;
 }
 
+uint8_t kt6368a_rx_pending(void)
+{
+    return host_bt_rx_pos != host_bt_rx_size;
+}
+
 HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t timeout_ms)
 {
     assert(data != NULL && size < sizeof(host_bt_tx_data));
@@ -768,11 +773,12 @@ uint8_t Touch_Init(void)
     assert(host_touch_critical == 0);
     return 0xB5;
 }
-void Touch_Sleep(void)
+uint8_t Touch_Sleep(void)
 {
     assert(host_touch_critical == 0 && host_tp_sleeping == 0);
     host_tp_sleeping = 1;
     ++host_tp_sleeps;
+    return 0;
 }
 void Touch_Wakeup(void)
 {
@@ -1282,6 +1288,96 @@ static void bluetooth_sleep_tests(void)
     puts("PASS: BLE stays powered across PA4/idle/wrist screen changes; fragmented clock/weather and sleeping STATE RX/TX survive without UART restart or parser reset.");
 }
 
+static void bluetooth_eco_tests(void)
+{
+    unsigned resets, enables, disables;
+    uint32_t frames = app_clock_get_received_count();
+    app_weather_struct before, after;
+    assert(s_bt_eco == 0 && s_bt_enabled != 0 && host_async_active == 0);
+    host_previous_valid = host_heart_samples_count = host_log_busy = 0;
+    host_bt_pending = host_rtc_pending = 0;
+    host_wake = GPIO_PIN_RESET;
+    create_page(PAGE_BLUETOOTH, 0, 0);
+    advance(220);
+    assert(strcmp(lv_label_get_text(s_bt_power_label), "BLE: KEEP CONNECTED") == 0);
+    lv_obj_scroll_to_view(lv_obj_get_parent(s_bt_power_label), LV_ANIM_OFF);
+    advance(30);
+    tap_object(lv_obj_get_parent(s_bt_power_label));
+    assert(s_bt_eco != 0 && host_bt_powered != 0);
+    assert(strcmp(lv_label_get_text(s_bt_power_label), "BLE: ECO / SCREEN OFF") == 0);
+    screenshot("bluetooth_eco");
+    resets = host_log_reset;
+    disables = host_bt_disable_calls;
+    app_weather_get_snapshot(&before);
+    set_screen_on(0);
+    host_tick += UI_BT_ECO_QUIET_MS - 1;
+    App_UI_ServiceSleeping();
+    assert(host_bt_powered != 0);
+
+    /* 接收分包、日志导出、在途TX和初始化都延后ECO断电。 */
+    host_bluetooth_feed((const uint8_t *)"12:", 3);
+    App_UI_ServiceSleeping();
+    host_tick += 100;
+    host_bluetooth_feed((const uint8_t *)"34:56\n", 6);
+    App_UI_ServiceSleeping();
+    assert(app_clock_get_received_count() == frames + 1 && host_log_reset == resets);
+    host_log_busy = 1;
+    host_tick += 2 * UI_BT_ECO_QUIET_MS;
+    App_UI_ServiceSleeping();
+    assert(host_bt_powered != 0 && host_log_reset == resets);
+    host_log_busy = 0;
+    host_bt_tx_busy = 1;
+    host_tick += 2 * UI_BT_ECO_QUIET_MS;
+    App_UI_ServiceSleeping();
+    assert(host_bt_powered != 0);
+    host_bt_tx_busy = 0;
+    host_bt_pending = 1;
+    host_tick += 2 * UI_BT_ECO_QUIET_MS;
+    App_UI_ServiceSleeping();
+    assert(host_bt_powered != 0);
+    host_bt_pending = 0;
+    host_tick += UI_BT_ECO_QUIET_MS - 1;
+    App_UI_ServiceSleeping();
+    assert(host_bt_powered != 0);
+    ++host_tick;
+    App_UI_ServiceSleeping();
+    assert(host_bt_powered == 0 && s_bt_enabled == 0 && host_bt_disable_calls == disables + 1);
+    assert(host_log_reset == resets + 1 && s_screen_on == 0);
+    app_weather_get_snapshot(&after);
+    assert(after.valid == before.valid && after.received_ms == before.received_ms);
+    enables = host_bt_enable_calls;
+    set_screen_on(1);
+    assert(s_bt_enabled != 0 && host_bt_enable_calls == enables + 1);
+
+    /* SPORT始终断电；退出时遵守当前ECO/屏幕选择。 */
+    s_sport_mode = 1;
+    bluetooth_update_power();
+    assert(host_bt_powered == 0);
+    set_screen_on(0);
+    host_tick += UI_BT_ECO_QUIET_MS;
+    s_sport_mode = 0;
+    bluetooth_update_power();
+    assert(host_bt_powered == 0);
+    set_screen_on(1);
+    assert(host_bt_powered != 0);
+
+    /* 32位tick回绕后仍完整等待安静期，切回保连立即恢复供电。 */
+    host_tick = UINT32_MAX - 500;
+    set_screen_on(0);
+    host_tick += UI_BT_ECO_QUIET_MS - 1;
+    App_UI_ServiceSleeping();
+    assert(host_bt_powered != 0);
+    ++host_tick;
+    App_UI_ServiceSleeping();
+    assert(host_bt_powered == 0);
+    bluetooth_power_cb(NULL);
+    assert(s_bt_eco == 0 && host_bt_powered != 0);
+    set_screen_on(1);
+    create_page(PAGE_WATCH, 0, 0);
+    advance(220);
+    puts("PASS: BLE ECO UI, quiet grace, fragmented RX, export/TX/init deferral, SPORT override, cached weather and tick-wrap reconnect.");
+}
+
 static void touch_idle_tests(void)
 {
     uint8_t brightness = s_brightness;
@@ -1373,6 +1469,7 @@ static void touch_idle_tests(void)
     assert(s_screen_on && host_light == brightness && s_page == PAGE_WATCH);
     assert(host_bt_enable_calls == enables && host_bt_disable_calls == disables);
     bluetooth_sleep_tests();
+    bluetooth_eco_tests();
     puts("PASS: 10s idle and PA4 sleep keep BLE power/RX without restarting UART; LCD/touch sleep and RTC wake restore survive tick wrap.");
 }
 
@@ -1572,7 +1669,7 @@ static void reset_report_tests(void)
     state_report_tests();
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     static lv_disp_draw_buf_t buffer;
     static lv_disp_drv_t display;
@@ -1580,7 +1677,11 @@ int main(void)
     unsigned iteration;
     lv_mem_monitor_t before, after;
     lv_obj_t *cached_main[2];
-    bluetooth_clear_frame_tests();
+    uint8_t cached_test = argc > 1 && strcmp(argv[1], "cached_weather") == 0;
+    if (cached_test == 0)
+    {
+        bluetooth_clear_frame_tests();
+    }
     lv_init();
     lv_disp_draw_buf_init(&buffer, draw_buffer, NULL, 240 * 12);
     lv_disp_drv_init(&display);
@@ -1593,6 +1694,33 @@ int main(void)
     lv_port_indev_init();
     host_wake = GPIO_PIN_SET; /* 模拟按住 SW2 开机。 */
     App_UI_Create();
+    if (cached_test != 0)
+    {
+        app_weather_struct cached = {0};
+        static const char fresh[] = "WEATHER,3,-53,81\n";
+        cached.valid = 1;
+        cached.code = 3;
+        cached.temperature_x10 = -53;
+        cached.humidity_rh = 81;
+        cached.received_ms = UINT32_MAX - 123;
+        app_weather_restore(&cached);
+        create_page(PAGE_WEATHER, 0, 0);
+        refresh_weather();
+        assert(strcmp(lv_label_get_text(s_weather_value), "-5.3 C") == 0);
+        assert(strstr(lv_label_get_text(s_weather_label), "CACHED / UPDATE VIA BLE") != NULL);
+        assert(strstr(lv_label_get_text(s_weather_label), "min ago") == NULL);
+        assert(lv_color_to32(lv_obj_get_style_text_color(s_weather_condition, 0)) == lv_color_to32(lv_color_hex(UI_MUTED)));
+        advance_active(220);
+        assert(s_transition == 0);
+        screenshot("cached_weather");
+        app_weather_receive((const uint8_t *)fresh, sizeof(fresh) - 1, lv_tick_get());
+        refresh_weather();
+        assert(strstr(lv_label_get_text(s_weather_label), "0 min ago") != NULL);
+        assert(strstr(lv_label_get_text(s_weather_label), "CACHED") == NULL);
+        assert(lv_color_to32(lv_obj_get_style_text_color(s_weather_condition, 0)) == lv_color_to32(lv_color_hex(UI_TEXT)));
+        puts("PASS: restored weather displays cached status with unknown age; a matching phone update restores freshness.");
+        return 0;
+    }
     if (APP_DEBUG_TELEMETRY == 0)
     {
         host_heart_samples_count = 2;
@@ -2224,7 +2352,7 @@ int main(void)
     assert(strcmp(lv_label_get_text(s_humidity), "50.0") == 0);
     assert(strcmp(lv_label_get_text(s_air_temperature), "25.0") == 0);
     assert(strcmp(lv_label_get_text(s_aht21_status), "ONLINE / CRC OK") == 0);
-    assert(strcmp(lv_label_get_text(s_aht21_samples), "SAMPLES 12 / 2s") == 0);
+    assert(strcmp(lv_label_get_text(s_aht21_samples), "SAMPLES 12 / 1s") == 0);
     assert_static_refresh();
     /* 原始值变化但一位小数相同，不刷新；跨过显示精度后必须刷新。 */
     {

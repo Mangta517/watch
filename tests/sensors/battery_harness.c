@@ -181,6 +181,76 @@ static void check_full_voltage(void)
     puts("PASS: latest discharge calibration, measured low-voltage interpolation, upper clamp and retained unmeasured anchors.");
 }
 
+static void check_sleep_sampling(void)
+{
+    app_battery_struct snapshot;
+    uint32_t initial_starts, awake_voltage_mv = 0;
+    unsigned wrap, sample, profile;
+    for (wrap = 0; wrap < 2; ++wrap)
+    {
+        now_ms = 0;
+        if (wrap != 0)
+        {
+            now_ms = UINT32_MAX - 12000;
+        }
+        app_battery_init();
+        app_battery_set_sleep_mode(1);
+        adc_value = (3900 * 4095 + 3300) / 6600;
+        initial_starts = starts;
+        for (sample = 0; sample < 8; ++sample)
+        {
+            next_sample();
+        }
+        app_battery_get_snapshot(&snapshot);
+        assert(snapshot.valid && starts == initial_starts + 8);
+        now_ms += APP_BATTERY_SLEEP_PERIOD_MS - 1;
+        app_battery_service();
+        assert(starts == initial_starts + 8);
+        ++now_ms;
+        app_battery_service();
+        assert(starts == initial_starts + 9 && stops == polls);
+        app_battery_set_sleep_mode(0);
+        next_sample();
+        assert(starts == initial_starts + 10);
+    }
+    /* 相同的10秒电压变化，亮屏逐秒更新与熄屏一次更新保持相同滤波响应。 */
+    for (profile = 0; profile < 2; ++profile)
+    {
+        now_ms = 0;
+        app_battery_init();
+        adc_value = (3900 * 4095 + 3300) / 6600;
+        for (sample = 0; sample < 8; ++sample)
+        {
+            next_sample();
+        }
+        adc_value = (3750 * 4095 + 3300) / 6600;
+        if (profile == 0)
+        {
+            for (sample = 0; sample < 10; ++sample)
+            {
+                next_sample();
+            }
+        }
+        else
+        {
+            app_battery_set_sleep_mode(1);
+            now_ms += APP_BATTERY_SLEEP_PERIOD_MS;
+            app_battery_service();
+        }
+        app_battery_get_snapshot(&snapshot);
+        assert(snapshot.valid && snapshot.percent < 88);
+        if (profile == 0)
+        {
+            awake_voltage_mv = snapshot.voltage_mv;
+        }
+        else
+        {
+            assert(snapshot.voltage_mv == awake_voltage_mv);
+        }
+    }
+    puts("PASS: screen-off keeps eight 1s startup samples, switches to 10s across tick wrap, resumes 1s on wake and preserves filter response.");
+}
+
 int main(int argc, char **argv)
 {
     app_battery_struct snapshot;
@@ -276,6 +346,7 @@ int main(int argc, char **argv)
     }
     app_battery_get_snapshot(NULL);
     assert(!locked && fatal_errors == 0);
+    check_sleep_sampling();
     puts("PASS: battery startup sampling, filtered voltage, ADC cleanup, failures/recovery and tick wrap.");
     return 0;
 }

@@ -1,6 +1,10 @@
 #ifndef STARTUP_HOST_TASK_H
 #define STARTUP_HOST_TASK_H
 #include "FreeRTOS.h"
+void vPortEnterCritical(void);
+void vPortExitCritical(void);
+#define taskENTER_CRITICAL() vPortEnterCritical()
+#define taskEXIT_CRITICAL()  vPortExitCritical()
 BaseType_t xTaskCreate(TaskFunction_t entry, const char *name, uint16_t stack, void *arg, UBaseType_t priority, TaskHandle_t *handle);
 void vTaskStartScheduler(void);
 TickType_t xTaskGetTickCount(void);

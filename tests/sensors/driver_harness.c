@@ -386,6 +386,29 @@ static void init_delay_tests(int state)
         assert(task_waits == 0 && hal_waits == 3);
     }
 }
+static void touch_sleep_failure_tests(void)
+{
+    unsigned i, nack_byte;
+
+    reset_observations(taskSCHEDULER_RUNNING);
+    /* 地址、寄存器和数据任一字节NACK，都必须向应用返回失败。 */
+    for (nack_byte = 0; nack_byte < 3; ++nack_byte)
+    {
+        reply_count = reply_pos = 0;
+        for (i = 0; i < nack_byte; ++i)
+        {
+            queue_bit(GPIO_PIN_RESET);
+        }
+        queue_bit(GPIO_PIN_SET);
+        assert(Touch_Sleep() == 1 && reply_pos == reply_count);
+    }
+    reply_count = reply_pos = 0;
+    queue_write();
+    assert(Touch_Sleep() == 0 && reply_pos == reply_count);
+    assert(task_waits == 0 && hal_waits == 0 && tp_resets == 0);
+    puts("PASS: real touch sleep propagates address/register/data NACKs and succeeds after ACKs without delay or reset.");
+}
+
 static void touch_recovery_tests(void)
 {
     uint16_t x = 123, y = 456;
@@ -859,6 +882,7 @@ int main(void)
     init_delay_tests(taskSCHEDULER_NOT_STARTED);
     init_delay_tests(taskSCHEDULER_RUNNING);
     init_delay_tests(taskSCHEDULER_SUSPENDED);
+    touch_sleep_failure_tests();
     touch_recovery_tests();
     touch_coordinate_failure_tests();
     touch_sda_handoff_tests();

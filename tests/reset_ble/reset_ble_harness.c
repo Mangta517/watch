@@ -419,7 +419,7 @@ static void state_tests(void)
     assert(strcmp(host_output,
                   "STATE,RTC,READY,0,LSE,0,MARKER,0x12345678,SYNCED,0,READ,1,TIME,00:00:00\r\n"
                   "STATE,CLOCK,UP_MS,2000,RX,0,RESULT,0\r\n"
-                  "STATE,WEATHER,VALID,0,CODE,0,TEMP_X10,0,RH,0,RX_MS,0,AGE_MS,0\r\n"
+                  "STATE,WEATHER,VALID,0,CODE,0,TEMP_X10,0,RH,0,RX_MS,0,AGE_MS,0,CACHED,0\r\n"
                   "STATE,END\r\n") == 0);
 
     host_reset();
@@ -455,8 +455,15 @@ static void state_tests(void)
     assert(strcmp(host_output,
                   "STATE,RTC,READY,1,LSE,1,MARKER,0x52544331,SYNCED,1,READ,0,TIME,23:59:58\r\n"
                   "STATE,CLOCK,UP_MS,0,RX,4294967295,RESULT,3\r\n"
-                  "STATE,WEATHER,VALID,1,CODE,99,TEMP_X10,-1000,RH,100,RX_MS,1,AGE_MS,4294967295\r\n"
+                  "STATE,WEATHER,VALID,1,CODE,99,TEMP_X10,-1000,RH,100,RX_MS,1,AGE_MS,4294967295,CACHED,0\r\n"
                   "STATE,END\r\n") == 0);
+
+    host_reset();
+    host_weather.valid = 1;
+    host_weather.cached = 1;
+    host_state_query();
+    host_finish_state();
+    assert(strstr(host_output, "RX_MS,0,AGE_MS,4294967295,CACHED,1\r\n") != NULL);
 
     host_reset();
     host_receive("STATE,READ,EXTRA\n");

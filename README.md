@@ -2,7 +2,7 @@
 
 基于 STM32F411CEU6、FreeRTOS 和 LVGL 的手表工程，包含 RTC 表盘、蓝牙校时与天气同步、运动与环境传感器、心率和电池显示。
 
-本页对应 `codex/low-power` 分支，当前版本包含64MHz / STOP低功耗调度、外设停钟、传感器错峰、按需任务与心率故障诊断、计步与辅助抬腕、日常BLE通信、复位和电压日志，以及Bootloader SPP升级。普通APP和升级APP共用业务源码。改动位置、行为、优化作用和验证结果见[更新记录](#更新记录)；历史条目保留原提交的交付记录，当前行为以本页首节及当前源码为准。
+本页对应 `codex/low-power` 分支，当前版本包含64MHz / STOP低功耗调度、BLE保连 / ECO模式、按屏幕状态和固定窗口采样、天气掉电缓存、按需任务与心率故障诊断、计步与辅助抬腕、复位和电压日志，以及Bootloader SPP升级。普通APP和升级APP共用业务源码。改动位置、行为、优化作用和验证结果见[更新记录](#更新记录)；历史条目保留原提交的交付记录，当前行为以本页首节及当前源码为准。
 
 `watch` 仓库统一提供 **独立 APP、Bootloader、升级 APP** 三个可分别编译的 Keil 工程。三个工程共享本仓库中的驱动、库和业务源码，下载时请保留完整目录。工程选择、Flash 分区和部署组合见[三个 Keil 工程](#三个-keil-工程)，首次编译见[获取与编译](#获取与编译)。
 
@@ -14,22 +14,28 @@
 | CPU Sleep / STOP | BLE 开启或外设仍需时钟时使用 Tickless Sleep；BLE 断电且 USART1 关闭、熄屏、PWM 为 0、SPI / DMA / ADC 空闲且预期空闲至少 5ms 时使用低功耗调压器 STOP；STOP 开关默认启用，同时开启 Flash 掉电和稳压器低电压模式 |
 | GPIO 与外设停钟 | 空闲 PA0/PA2/PA6/PA7/PB10/PC13 配置为模拟无上下拉，移除电源保持及屏幕控制等推挽输出的内部下拉；熄屏停止 TIM3 并关闭 TIM3/SPI1/DMA2 时钟，ADC 在 Sleep 停钟 |
 | 手机性能与心率诊断 | DIAG,1 / DIAG,0 按需开启或关闭原 WDG1 诊断，补齐 touch 业务计时；HEART,READ 查询心率状态及具体故障，默认静默 |
-| 无触摸待机 | 连续 10 秒无操作后，与 PA4 手动熄屏共用处理：背光 0%、保留蓝牙供电/UART、暂停绘图，LCD/触摸芯片休眠且触摸任务阻塞；PA4 或辅助抬腕亮屏，恢复原亮度和当前 RTC 时间 |
-| 显示与触摸轮询 | 活跃约 5ms；熄屏无按键时等待 PA4 通知或约 100ms 期限，按键消抖/按住期间保持 20ms，触摸休眠后阻塞 |
-| MPU6050 | 心率测量及独立运动模式 100Hz，姿态页与校准 50Hz；无姿态需求的亮屏页面与普通熄屏使用 5Hz 加速度低功耗循环，关闭陀螺仪和温度，持续计步及辅助抬腕；自动心率窗口保留 100Hz |
-| 磁力计 | 心率测量及独立运动模式 75Hz，活动/校准 30Hz；5Hz 加速度后台模式下保持 sleep，进入姿态/校准/运动/心率场景恢复 |
-| 心率读取 | sensor 目标 10ms，PPG 读取下限 30ms；有 PPG 事务时将磁读取延后一轮，MPU 继续读取；心率测量期间 MPU 配置 100Hz，校准期间 50Hz，实际采集率以实板诊断为准 |
+| BLE 策略 | 默认保连，熄屏继续接收校时、天气和诊断；Settings → Bluetooth 可选 ECO，熄屏完成当前事务并等待1秒安静期后关闭模块 / UART，亮屏恢复并需手机重连；重启恢复保连，SPORT仍关闭蓝牙 |
+| 无触摸待机 | 连续 10 秒无操作后，与 PA4 手动熄屏共用处理：背光 0%、暂停绘图，LCD / 触摸芯片休眠；触摸休眠写入成功后才阻塞，失败保留重试；PA4 或辅助抬腕亮屏，恢复原亮度和当前 RTC 时间 |
+| 显示与触摸轮询 | 活跃约 5ms；稳定熄屏时 sensor 与 LVGL 按 200ms 基础服务协同运行，sensor 完成后通知 LVGL；PA4 与 UART 水位立即通知，按键消抖 / 按住期间保持 20ms |
+| MPU6050 | 心率 / SPORT 使用 100Hz 加速度参考，关闭陀螺仪、温度及姿态融合；姿态页与校准保留完整 IMU 路径及 50Hz 配置；无姿态需求时使用 5Hz 加速度低功耗循环，持续计步及辅助抬腕 |
+| 磁力计 | 心率 / SPORT 加速度参考与 5Hz 后台模式下保持 sleep；姿态页 / 校准按原完整 IMU 路径恢复 |
+| 心率读取 | sensor 目标 10ms，PPG 读取下限 30ms；MPU 保留 100Hz 加速度参考及运动参考时间戳，每帧只读状态和三轴加速度，实际采集率以实板诊断为准 |
 | 首页心率 | 显示本次开机最近一次有效结果，停测和故障后保留；详情、趋势及蓝牙继续使用实时状态与读数 |
 | 零偏校准 | 保留 100 帧静止确认和 100 帧平均，50Hz 下约 4 秒；两个阶段超时分别为 6 秒、4 秒 |
-| 电池估算 | 4.0V 为满电点，2026-10-27依据最新未充电记录重标：3.6V约31%、3.55V约18%；3.50V/5%和耗尽端仍待实测，保留每秒采样、启动均值、滤波及本次开机百分比只降不升 |
+| 环境采样 | 温湿度亮屏1秒、熄屏60秒；气压启动后先测一个约1.6秒窗口，此后固定每5分钟测量，其他时间standby，页面 / 屏幕切换不重置相位，SPORT期间暂停 |
+| 电池估算 | 4.0V 为满电点，2026-10-27依据最新未充电记录重标：3.6V约31%、3.55V约18%；启动前8次有效采样及亮屏每秒采样，启动稳定后熄屏10秒；滤波按经过秒数推进，本次开机百分比只降不升，低压端仍待实测 |
 
-Sleep / STOP 共用 Tickless 补时，运行时保持 1ms SysTick，单次最多 100ms。BLE 开启时保留 Sleep，UART、DMA 和背光 PWM 持续工作；BLE 关闭且满足空闲条件时暂停 SysTick，由 RTC WUT 或 PA4 / 传感器 EXTI 唤醒 STOP，先恢复 64MHz PLL 并同步 RTC 影子寄存器，再补齐 HAL / FreeRTOS / TIM2 诊断时间，最后开放中断。当前正常待机保持 BLE，仍使用 Sleep；SPORT 熄屏时可利用采样间隙进入 STOP，100Hz 服务周期不变。RTC 未就绪时退回 1ms Sleep，WUT 配置失败退回 Tickless Sleep；STOP 后 RTC 同步失败则停用 RTC 有效状态并退回 1ms Sleep，本次停钟间隔因缺少有效 RTC 读数无法准确补齐。实际功耗和采样裕量需上板测量。自动待机与 PA4 手动熄屏行为一致，普通模式保留 PA8 供电及 PA9/PA10 UART，支持 PA4 或放下后抬腕亮屏；LCD 先等在途 DMA 完成或超时安全收尾再进入休眠，亮屏发 Sleep Out 后至少等待 120ms。触摸恢复由独立任务复位并等待约 310ms，不阻塞 sensor。亮屏时气压、电池约 1 秒服务一次，温湿度约 2 秒触发一次；普通熄屏电池保持约 1 秒一次，环境与自动心率每 10 分钟测量，无姿态需求时 MPU 自主进行 5Hz 加速度采样，sensor 每 200ms 读取新帧。步数按本次开机累计，不写 EEPROM；首页脚印图标旁显示数值，向上图标提示辅助抬腕。活动、运动和心率所需采样频率保持原配置。
+Sleep / STOP 共用 Tickless 补时，运行时保持 1ms SysTick，单次最多 200ms。BLE 开启时保留 Sleep；BLE 关闭且满足空闲条件时暂停 SysTick，由 RTC WUT 或 PA4 / 传感器 EXTI 唤醒 STOP，先恢复 64MHz PLL 并同步 RTC 影子寄存器，再补齐 HAL / FreeRTOS / TIM2 诊断时间，最后开放中断。默认保连待机使用 Sleep；ECO 或 SPORT 熄屏关闭蓝牙后可在符合条件的采样间隙进入 STOP，自动心率服务仍保持 10ms。RTC 未就绪时退回 1ms Sleep，WUT 配置失败退回 Tickless Sleep；STOP 后 RTC 同步失败则停用 RTC 有效状态并退回 1ms Sleep，本次停钟间隔因缺少有效 RTC 读数无法准确补齐。实际功耗和采样裕量需上板测量。
+
+自动待机与 PA4 手动熄屏行为一致。默认保连保留 PA8 供电及 PA9/PA10 UART；ECO关闭模块后沿用UART停用和PA9/PA10模拟输入流程。LCD 先等在途 DMA 完成或超时安全收尾再进入休眠，亮屏发 Sleep Out 后至少等待 120ms。触摸恢复由独立任务复位并等待约 310ms，不阻塞 sensor。温湿度周期只随屏幕明暗切换；气压按独立5分钟时间线测量，历史仍以10分钟槽记录，暂停期间留空。电池启动前8次有效采样完成后才允许熄屏10秒周期。温湿度转换 / 恢复窗口仍保持100ms检查。无姿态需求时MPU自主进行5Hz加速度采样，sensor每200ms读取新帧；心率 / SPORT临时切为100Hz加速度参考，恢复完整姿态模式时重新预热100ms。步数按本次开机累计，不写EEPROM。具体策略见[低功耗说明](docs/low-power.md)。
 
 心率测量已恢复约 30ms 读取，40～200 BPM 合成回归在稳定段逐帧检查有效输出，包含 200 BPM；范围外的估算仍不钳位。实板心率精度、总线时序及功耗尚需测量。具体实现见 [界面与低功耗说明](docs/watch-ui.md)。
 
 ## 蓝牙与 OTA
 
-普通 APP 和升级 APP 日常始终仅开启 BLE（`T4+01`、`T5+00`），用于校时、天气及现有接收协议。只有进入 Bootloader 升级模式时才开启 SPP（`T5+01`，BLE 仍保留）；正常启动直接跳转 APP，升级成功回到 APP 后重新关闭 SPP，需要手机重新连接 BLE。
+普通 APP 和升级 APP 日常通信仅使用 BLE（`T4+01`、`T5+00`），默认保连；可选 ECO 模式会在熄屏事务完成及1秒安静期后断电，亮屏恢复后需手机重新连接。只有进入 Bootloader 升级模式时才开启 SPP（`T5+01`，BLE 仍保留）；正常启动直接跳转 APP，升级成功回到 APP 后重新关闭 SPP，需要手机重新连接 BLE。
+
+手机天气由sensor在EEPROM `0xC0` / `0xD0`双槽轮换保存，带序号及CRC32，分步写入并读回确认；开机恢复最近有效副本，在收到新手机天气前显示`CACHED / UPDATE VIA BLE`。已有本次开机手机天气时，EEPROM恢复不会覆盖它；掉电期间经过时间未知，缓存不显示“几分钟前”。详情见[蓝牙与天气协议](docs/bluetooth.md)。
 
 按住 KEY_1（PA5，低电平）上电或复位进入升级模式；APP 无效时也会停留在升级模式。连接 SPP 串口后使用 `start:长度:CRC32` 协议发送升级 APP 的原始 BIN。设备返回 ready 后才发送正文，连续 30 秒无新字节会中止；该方案为单 APP，开始升级后会擦除旧镜像。完整部署、串口脚本及错误处理见 [Bootloader 说明](docs/bootloader.md)。
 
@@ -91,6 +97,7 @@ SPP 升级使用升级 APP 的原始 BIN；fromelf 导出及 `tools/send_bootloa
 | 内容 | 文档 |
 | --- | --- |
 | 界面、低功耗、电池条和电量估算 | [docs/watch-ui.md](docs/watch-ui.md) |
+| BLE ECO、采样周期与休眠策略 | [docs/low-power.md](docs/low-power.md) |
 | 电压历史记录、蓝牙导出与清空 | [docs/battery-log.md](docs/battery-log.md) |
 | 蓝牙、校时和天气协议 | [docs/bluetooth.md](docs/bluetooth.md) |
 | 启动流程与等待优化 | [docs/startup-optimization.md](docs/startup-optimization.md) |
@@ -119,13 +126,14 @@ python -B -X utf8 tests/touch/run.py
 python -B -X utf8 tests/watchdog/run.py
 python -B -X utf8 tests/diagnostics/run.py "$env:TEMP/watch-diagnostics.bin"
 python -B -X utf8 tests/ui/run.py
+python -B -X utf8 tests/weather_store/run.py
 ```
 
 需要 Python、桌面 GCC；UI 渲染还需要 Pillow。主机测试、Keil 编译和实板测试是三种不同证据，不能相互代替。
 
 ## 三工程打包与验证（2026-10-27）
 
-本节保留 `80766c0` 的历史打包记录；当前64MHz版本的资源与验证结果见下方2026-10-28更新记录。
+本节保留 `80766c0` 的历史打包记录；当前64MHz版本的资源与验证结果见下方2026-10-30更新记录。
 
 本次功能源码沿用已发布的 `1ade1e3`，在 `watch` 的 `codex/low-power` 分支统一交付三个 Keil 工程。本次文档整理保持固件源码、工程配置和功能版本不变。
 
@@ -146,6 +154,13 @@ python -B -X utf8 tests/ui/run.py
 ## 更新记录
 
 以下日期取自 Git 提交日期。记录按新到旧排列，旧条目中的 4.2V 电量曲线等限制为当时状态，已由上述低功耗版本更新；各条目的验证结果仅适用于对应版本。
+
+### 2026-10-30 · BLE ECO、采样调度与天气缓存
+
+- **改动与作用**：新增可选熄屏BLE ECO模式，默认保连；心率 / SPORT改用100Hz加速度参考，关闭不需要的陀螺仪、温度及磁力计。温湿度改为亮屏1秒 / 熄屏60秒，气压沿独立5分钟时间线测量，电池启动稳定后熄屏10秒；稳定熄屏时sensor / LVGL协同按200ms服务，Tickless上限同步为200ms，减少空闲唤醒。
+- **天气与触摸**：手机天气通过EEPROM双槽及CRC32保存，重启后以缓存状态显示；触摸睡眠写入失败时保留重试，成功后才标为休眠。普通 / 升级APP工程补入天气保存服务，新增`weather_store`回归入口，详见[低功耗策略](docs/low-power.md)和[蓝牙协议](docs/bluetooth.md)。
+- **发布验证**：隔离发布工作区的14套主机回归全部通过：clock、sensors、startup、UI（含quiet-debug）、BLE、bootloader、battery_log、reset、reset_ble、tickless、touch、watchdog、diagnostics、weather_store；三个Keil工程源码引用无缺失。三个工程均0错误，两套APP各有13条既有LVGL警告，Bootloader无警告。普通 / 升级APP的Program Size均为Code 179876 B、RO-data 42408 B、RW-data 1236 B、ZI-data 103116 B；Bootloader为Code 17070 B、RO-data 674 B、RW-data 172 B、ZI-data 15548 B。
+- **实板边界**：本次未烧录；功耗、ECO重连、采样时序、天气掉电恢复及熄屏后唤醒触摸仍需实板验证。
 
 ### 2026-10-28 · [146af34](https://github.com/Mangta517/watch/commit/146af34beb52b2eb2a95ae6f548c81d961b8eeb8) · 64MHz 低功耗与传感器错峰调度
 

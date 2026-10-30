@@ -27,17 +27,19 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
         "-Itests/startup/host", "-Itests/sensors/host", "-ICore/Inc",
         "-Iapplication", "-Iinterface", "-Icommon",
         "-IMiddlewares/LVGL/lvgl/examples/porting",
-        "tests/startup/startup_harness.c", "application/app_uptime.c", "tests/diagnostics/diag_stub.c", "-o", exe,
+        "tests/startup/startup_harness.c", "application/app_uptime.c", "application/app_weather.c",
+        "application/app_weather_store.c", "tests/diagnostics/diag_stub.c", "-o", exe,
     ], cwd=root, check=True)
     for mode in ["ok", "devices_failed", "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
                  "cal_success", "cal_failed", "save_error", "manual_cal", "watchdog_progress", "watchdog_wrap",
                  "watchdog_startup", "watchdog_startup_wrap", "first_frame_stall", "first_frame_slow",
                  "first_frame_deadline", "first_frame_sparse", "runtime_slow", "runtime_sparse",
-                 "runtime_sensor_stalled", "runtime_deadline", "baro_cadence", "touch_alloc_failed", "touch_overrun",
+                 "runtime_sensor_stalled", "runtime_deadline", "baro_cadence", "environment_policy", "environment_policy_wrap", "environment_policy_sleep_retry",
+                 "reference_recovery", "touch_alloc_failed", "touch_overrun",
                  "power_background", "power_idle", "power_motion", "power_heart", "power_calibration", "power_heart_calibration",
                  "sleep_cycle", "sleep_wrap", "sleep_calibration", "sleep_heart_early", "sleep_heart_offset",
                  "sleep_recovery", "sleep_recovery_wrap",
-                 "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime", "touch_sleep", "touch_sleep_early",
+                 "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime", "sport_weather", "touch_sleep", "touch_sleep_early",
                  "background_cycle", "background_wrap", "background_calibration", "lvgl_wake",
                  "sensor_timing", "sensor_timing_overload", "sensor_timing_wrap", "sensor_timing_exact"]:
         subprocess.run([exe, mode], cwd=root, check=True)

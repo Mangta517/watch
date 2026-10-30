@@ -36,7 +36,7 @@ extern "C"
     uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y);
 
     void Touch_Reset(void);
-    void Touch_Sleep(void);  /* 本板无TP_INT，休眠后由PA4触发复位唤醒。 */
+    uint8_t Touch_Sleep(void); /* 0=休眠写入成功，1=失败；本板无TP_INT，由PA4触发复位唤醒。 */
     void Touch_Wakeup(void); /* 复位唤醒 */
 
 #ifdef __cplusplus

@@ -52,8 +52,11 @@ void app_touch_service(void)
     {
         if (s_sleeping == 0)
         {
-            Touch_Sleep();
-            s_sleeping = 1;
+            /* 写入失败时保持未休眠，由任务在下一周期重试。 */
+            if (Touch_Sleep() == 0)
+            {
+                s_sleeping = 1;
+            }
         }
         return;
     }

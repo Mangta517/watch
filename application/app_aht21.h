@@ -1,13 +1,14 @@
 /**
  * @file app_aht21.h
- * @brief AHT21 两秒采样服务；sensor 任务访问硬件，UI 只读取一致快照。
+ * @brief AHT21亮屏1秒、熄屏1分钟采样；sensor任务访问硬件，UI只读取一致快照。
  */
 #ifndef __APP_AHT21_H__
 #define __APP_AHT21_H__
 
 #include "aht21.h"
 
-#define APP_AHT21_PERIOD_MS 2000
+#define APP_AHT21_PERIOD_MS 1000
+#define APP_AHT21_SLEEP_PERIOD_MS 60000
 
 typedef struct
 {
@@ -23,7 +24,7 @@ typedef struct
 void app_aht21_init(void);
 /* sensor 每轮调用；触发与读取分离，转换等待期间不占总线、不延时。 */
 void app_aht21_service(void);
-/* sensor任务切换固定周期；取消在途结果，下一次到期再触发，AHT21转换后自动待机。 */
+/* sensor任务切换周期；缩短时沿用在途转换或立即申请新采样，拉长时取消在途结果。 */
 void app_aht21_set_period(uint32_t period_ms);
 void app_aht21_get_snapshot(app_aht21_struct *snapshot);
 

@@ -8,8 +8,8 @@
 #error Tickless HAL compensation requires a 1ms RTOS tick.
 #endif
 
-/* Sleep保留串口接收，合适的熄屏间隙用RTC唤醒STOP；最长100ms，不越过喂狗周期。 */
-#define APP_TICKLESS_MAX_TICKS 100
+/* Sleep保留串口接收，合适的熄屏间隙用RTC唤醒STOP；最长200ms，保留5Hz后台采样和喂狗余量。 */
+#define APP_TICKLESS_MAX_TICKS 200
 #define APP_TICKLESS_STOP_MIN_TICKS 5
 
 static uint32_t s_rtc_fraction;

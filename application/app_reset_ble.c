@@ -130,11 +130,16 @@ static int app_state_ble_format(uint32_t now_ms)
         if (s_ble.weather.valid != 0)
         {
             age_ms = s_ble.snapshot_ms - s_ble.weather.received_ms;
+            if (s_ble.weather.cached != 0)
+            {
+                age_ms = UINT32_MAX; /* 完全断电的经过时间未知。 */
+            }
         }
         return snprintf(s_ble.tx, sizeof(s_ble.tx),
-                        "STATE,WEATHER,VALID,%u,CODE,%u,TEMP_X10,%d,RH,%u,RX_MS,%lu,AGE_MS,%lu\r\n",
+                        "STATE,WEATHER,VALID,%u,CODE,%u,TEMP_X10,%d,RH,%u,RX_MS,%lu,AGE_MS,%lu,CACHED,%u\r\n",
                         (unsigned)s_ble.weather.valid, (unsigned)s_ble.weather.code, (int)s_ble.weather.temperature_x10,
-                        (unsigned)s_ble.weather.humidity_rh, (unsigned long)s_ble.weather.received_ms, (unsigned long)age_ms);
+                        (unsigned)s_ble.weather.humidity_rh, (unsigned long)s_ble.weather.received_ms, (unsigned long)age_ms,
+                        (unsigned)s_ble.weather.cached);
     default:
         return snprintf(s_ble.tx, sizeof(s_ble.tx), "STATE,END\r\n");
     }

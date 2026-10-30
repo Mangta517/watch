@@ -41,7 +41,7 @@ extern "C"
     /* LVGL循环分步启动：20ms放电/1200ms上电/AT查询/参数保存均不长时间等待。
      * pending期间由本状态机独占UART RX，业务write返回BUSY。 */
     void kt6368a_init_begin(void);
-    /* LVGL任务的SPORT启停切换：0断电/停UART/释放PA9/PA10，1重新分步启动；熄屏不调用。 */
+    /* LVGL任务的SPORT/ECO电源策略：0断电/停UART/释放PA9/PA10，1重新分步启动。 */
     void kt6368a_set_enabled(uint8_t enabled);
     HAL_StatusTypeDef kt6368a_init_service(void);
     uint8_t kt6368a_init_is_pending(void);

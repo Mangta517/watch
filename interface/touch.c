@@ -511,10 +511,10 @@ uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
     return num;
 }
 
-void Touch_Sleep(void)
+uint8_t Touch_Sleep(void)
 {
     /* 熄屏后由touch任务进入睡眠；无INT时唤醒只能靠复位 */
-    (void)tp_write_reg(REG_SLEEP_CTRL, 0x03);
+    return tp_write_reg(REG_SLEEP_CTRL, 0x03);
 }
 
 void Touch_Wakeup(void)

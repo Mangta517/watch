@@ -12,6 +12,7 @@
 #include "app_reset.h"
 #include "app_imu_store.h"
 #include "app_uptime.h"
+#include "app_weather_store.h"
 #include "app_battery_log.h"
 
 #include "main.h" /* Error_Handler() 声明 */
@@ -55,10 +56,11 @@
 #define APP_POWER_SCREEN_OFF                4
 #define APP_POWER_SPORT                     8
 #define APP_SENSOR_SPORT_PERIOD_MS          10
-#define APP_SENSOR_SLEEP_PERIOD_MS          600000
 #define APP_SENSOR_SLEEP_WINDOW_MS          1600 /* 等待1Hz气压新转换。 */
 #define APP_SENSOR_BACKGROUND_IMU_PERIOD_MS 200 /* 后台5Hz加速度循环，用于计步和辅助抬腕。 */
-#define APP_SENSOR_SLEEP_POLL_MS            100  /* 保留sensor进度检查和电池服务。 */
+#define APP_SENSOR_SLEEP_POLL_MS            200  /* 与后台5Hz采样合并，保留sensor进度检查。 */
+#define APP_SENSOR_ENVIRONMENT_POLL_MS      100  /* AHT转换/恢复窗口仍在200ms读回期限内推进。 */
+#define APP_SENSOR_BARO_PERIOD_MS           300000
 #define APP_TOUCH_TASK_PRIO                 1    /* 触摸采集低于sensor；LVGL只消费缓存。 */
 #define APP_WATCHDOG_FEED_PERIOD_MS         100
 #define APP_WATCHDOG_SENSOR_STARTUP_MS      5000
@@ -66,7 +68,7 @@
 
 /* sensor 单写、LVGL 单读；Cortex-M4 对齐的 32 位访问不会撕裂，不共享复合快照。 */
 static volatile uint32_t app_sensor_watchdog_progress;
-/* UI单写；四个电源标志打包在对齐32位值中，由各任务一次读取。 */
+/* UI单写；电源标志打包在对齐32位值中，由各任务一次读取。 */
 static volatile uint32_t s_power_state;
 static TaskHandle_t s_touch_task_handle;
 static TaskHandle_t s_lvgl_task_handle;
@@ -226,8 +228,8 @@ static void app_lvgl_wait(uint32_t period_ms, uint8_t rtc_finished)
         }
         else
         {
-            /* PA4或UART水位通知可先于等待到达；无接收时保留100ms喂狗期限。 */
-            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_WATCHDOG_FEED_PERIOD_MS));
+            /* PA4/UART立即通知；稳定熄屏由sensor每200ms通知，同一拍检查进度和喂狗。 */
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_SENSOR_SLEEP_POLL_MS));
         }
     }
     else
@@ -296,6 +298,7 @@ static void app_lvgl_task(void *pvParameters)
             }
         }
         app_watchdog.render_started_ms = HAL_GetTick();
+        app_weather_store_sync();
         App_Display_Service(); /* 锁 → lv_timer_handler → 解锁 */
         app_diag_service();
         period_ms = APP_LVGL_TASK_PERIOD;
@@ -356,16 +359,19 @@ static void app_sensor_task(void *pvParameters)
     uint16_t cal_stable, cal_frames;
     uint8_t cal_finished = 0;
     uint8_t imu_saving = 0, mag_saving = 0;
-    uint8_t uptime_saving = 0;
-    uint32_t baro_ms, battery_ms, now_ms, power_state;
+    uint8_t uptime_saving = 0, weather_saving = 0;
+    uint32_t baro_ms, baro_window_ms, battery_ms, now_ms, power_state;
     uint32_t period_ms = APP_SENSOR_TASK_PERIOD;
     app_heart_struct heart;
     uint8_t sleeping = 0, bus_parked = 0, environment_active = 0;
     uint8_t sleep_requested, imu_active, bus_needed, imu_warming = 0;
-    uint8_t imu_sample_pending = 0, heart_pending, mpu_recovery;
+    uint8_t imu_sample_pending = 0, heart_pending, mpu_recovery, mpu_recovering = 0;
     uint8_t heart_bus_used;
     uint8_t imu_continuous, imu_background = 0, imu_mode_changed;
+    uint8_t imu_reference = 0, reference_requested;
     uint8_t sporting = 0, sport_requested, sport_ready, sport_changed;
+    uint8_t baro_active = 1, baro_read, baro_sleep_pending = 0, sleep_changed;
+    uint32_t aht_period_ms = APP_AHT21_PERIOD_MS, requested_aht_period_ms;
     uint32_t environment_ms = 0, window_ms = 0;
     uint32_t imu_cycle_ms = 0, imu_wake_ms = 0;
     uint32_t imu_warmup_ms, imu_period_ms;
@@ -384,6 +390,7 @@ static void app_sensor_task(void *pvParameters)
     App_IMU_Init();
     store_result = app_imu_store_load(&offset);
     app_uptime_init();
+    app_weather_store_init();
     app_battery_log_init();
     App_Baro_Init();
     app_heart_init();
@@ -409,7 +416,8 @@ static void app_sensor_task(void *pvParameters)
     }
     xLastWakeTime = xTaskGetTickCount();
     battery_ms = HAL_GetTick();
-    baro_ms = battery_ms - 500; /* 气压先在半秒点读取，电池在整秒点读取。 */
+    baro_ms = battery_ms;
+    baro_window_ms = battery_ms; /* 启动先取得一帧，此后保持5分钟相位，屏幕切换不重排。 */
     imu_cycle_ms = battery_ms;
     app_diag_boot_set(APP_BOOT_SAMPLING_BEGIN_MS, HAL_GetTick());
 
@@ -426,7 +434,7 @@ static void app_sensor_task(void *pvParameters)
             sporting = sport_ready;
             app_heart_set_sport_mode(sporting);
         }
-        if (sporting == 0 && imu_saving == 0 && uptime_saving == 0 && app_diag_take_imu_calibration() != 0)
+        if (sporting == 0 && imu_saving == 0 && uptime_saving == 0 && weather_saving == 0 && app_diag_take_imu_calibration() != 0)
         {
             cal_finished = 0;
             app_diag_imu_save_record(APP_IMU_SAVE_NONE, 0, UINT32_MAX, UINT32_MAX);
@@ -437,21 +445,13 @@ static void app_sensor_task(void *pvParameters)
         }
         sleep_requested = sporting == 0 && (power_state & APP_POWER_SCREEN_OFF) != 0 && cal_finished != 0 && imu_saving == 0 &&
                           mag_saving == 0 && app_imu_is_calibrating() == 0;
-        if (sleep_requested != sleeping)
+        sleep_changed = sleep_requested != sleeping;
+        if (sleep_changed != 0)
         {
             sleeping = sleep_requested;
-            environment_ms = now_ms;
             environment_active = 0;
             imu_cycle_ms = now_ms;
             imu_sample_pending = 0;
-            if (sleeping != 0)
-            {
-                app_aht21_set_period(APP_SENSOR_SLEEP_PERIOD_MS);
-            }
-            else
-            {
-                app_aht21_set_period(APP_AHT21_PERIOD_MS);
-            }
             app_heart_set_sleep_mode(sleeping);
             if (sleeping == 0)
             {
@@ -460,39 +460,33 @@ static void app_sensor_task(void *pvParameters)
                     my_i2c_init(MY_I2C_BUS_SENSOR);
                     bus_parked = 0;
                 }
-                if (sporting == 0)
-                {
-                    spl006_set_sleep(0);
-                }
-                baro_ms = now_ms; /* 亮屏后等一次新的1Hz转换，避免读取休眠前旧值。 */
-            }
-            else
-            {
-                spl006_set_sleep(1);
             }
         }
-        if (sport_changed != 0)
+        app_battery_set_sleep_mode((power_state & APP_POWER_SCREEN_OFF) != 0);
+        requested_aht_period_ms = APP_AHT21_PERIOD_MS;
+        if ((power_state & APP_POWER_SCREEN_OFF) != 0)
         {
-            if (bus_parked != 0)
-            {
-                my_i2c_init(MY_I2C_BUS_SENSOR);
-                bus_parked = 0;
-            }
-            if (sporting != 0)
-            {
-                spl006_set_sleep(1);
-            }
-            else if (sleeping == 0)
-            {
-                spl006_set_sleep(0);
-                baro_ms = now_ms;
-            }
+            requested_aht_period_ms = APP_AHT21_SLEEP_PERIOD_MS;
         }
-        if (sleeping != 0 && environment_active == 0 && (uint32_t)(now_ms - environment_ms) >= APP_SENSOR_SLEEP_PERIOD_MS)
+        if (requested_aht_period_ms != aht_period_ms)
         {
-            environment_ms += APP_SENSOR_SLEEP_PERIOD_MS;
-            window_ms = now_ms;
-            environment_active = 1;
+            app_aht21_set_period(requested_aht_period_ms);
+            aht_period_ms = requested_aht_period_ms;
+            environment_ms = HAL_GetTick();
+            environment_active = 0;
+        }
+        if (sport_changed != 0 && sporting != 0 && baro_active != 0)
+        {
+            baro_sleep_pending = 1;
+            baro_active = 0;
+        }
+        now_ms = HAL_GetTick(); /* 周期切换可能跨过毫秒，不能用更早的时间戳与新起点做无符号减法。 */
+        if (sporting == 0 && baro_active == 0 && (uint32_t)(now_ms - baro_ms) >= APP_SENSOR_BARO_PERIOD_MS)
+        {
+            baro_ms += (uint32_t)(now_ms - baro_ms) / APP_SENSOR_BARO_PERIOD_MS * APP_SENSOR_BARO_PERIOD_MS;
+            baro_window_ms = now_ms;
+            baro_active = 1;
+            baro_sleep_pending = 0;
             if (bus_parked != 0)
             {
                 my_i2c_init(MY_I2C_BUS_SENSOR);
@@ -500,8 +494,28 @@ static void app_sensor_task(void *pvParameters)
             }
             spl006_set_sleep(0);
         }
+        if (sleeping != 0 && environment_active == 0 && (uint32_t)(now_ms - environment_ms) >= APP_AHT21_SLEEP_PERIOD_MS)
+        {
+            environment_ms += (uint32_t)(now_ms - environment_ms) / APP_AHT21_SLEEP_PERIOD_MS * APP_AHT21_SLEEP_PERIOD_MS;
+            window_ms = now_ms;
+            environment_active = 1;
+            if (bus_parked != 0)
+            {
+                my_i2c_init(MY_I2C_BUS_SENSOR);
+                bus_parked = 0;
+            }
+        }
         app_heart_get_snapshot(&heart);
         heart_pending = app_heart_sleep_pending();
+        reference_requested = cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && app_imu_is_calibrating() == 0 &&
+                              (power_state & APP_POWER_MOTION) == 0 && (sporting != 0 || heart.enabled != 0 || heart_pending != 0);
+        if (reference_requested != imu_reference)
+        {
+            imu_reference = reference_requested;
+            imu_wake_ms = now_ms;
+            imu_warming = 1; /* 加速度参考切回完整姿态时，仍等待陀螺仪稳定100ms。 */
+        }
+        app_imu_set_accel_reference(imu_reference);
         imu_continuous = cal_finished == 0 || imu_saving != 0 || mag_saving != 0 || app_imu_is_calibrating() != 0 ||
                          sporting != 0 || heart.enabled != 0 || heart_pending != 0 || (power_state & APP_POWER_MOTION) != 0;
         imu_mode_changed = imu_background != (imu_continuous == 0);
@@ -521,7 +535,7 @@ static void app_sensor_task(void *pvParameters)
         }
         /* 心率服务只在sensor任务操作硬件；准备到期的自动测量前先恢复总线。 */
         imu_active = imu_continuous != 0 || imu_sample_pending != 0;
-        bus_needed = sleeping == 0 || environment_active != 0 || imu_active != 0;
+        bus_needed = sleeping == 0 || environment_active != 0 || baro_active != 0 || baro_sleep_pending != 0 || imu_active != 0;
         if (bus_needed != 0 && bus_parked != 0)
         {
             my_i2c_init(MY_I2C_BUS_SENSOR);
@@ -529,24 +543,39 @@ static void app_sensor_task(void *pvParameters)
         }
         if (bus_needed != 0)
         {
+            if (baro_sleep_pending != 0)
+            {
+                baro_sleep_pending = spl006_set_sleep(1); /* 待机写失败只重试关转换，不重复采样或重排5分钟周期。 */
+            }
             /* 非阻塞恢复：每个器件每拍至多推进一笔事务，失败冷却期间仍完成其他服务。 */
             if (imu_active != 0)
             {
                 mpu_recovery = my_mpu6050_recover_step(HAL_GetTick());
                 app_diag_sensor_recovery(APP_DIAG_MPU, mpu_recovery);
-                if (imu_background != 0 && mpu_recovery == 2)
+                if (mpu_recovery != 0)
                 {
-                    /* 恢复完成后重新配置5Hz循环，再等待一次新的加速度转换。 */
-                    imu_sample_pending = 1;
+                    mpu_recovering = 1;
+                }
+                if (mpu_recovery == 2 || (mpu_recovering != 0 && mpu_recovery == 0))
+                {
+                    /* 恢复推进及首次就绪时重计预热，完整姿态在恢复后仍等陀螺仪稳定100ms。 */
+                    if (imu_background != 0)
+                    {
+                        imu_sample_pending = 1;
+                    }
                     imu_wake_ms = now_ms;
                     imu_warming = 1;
                 }
-                if (imu_continuous != 0)
+                if (mpu_recovery == 0)
+                {
+                    mpu_recovering = 0;
+                }
+                if (imu_continuous != 0 && imu_reference == 0)
                 {
                     app_diag_sensor_recovery(APP_DIAG_MAG, lsm303dlhc_mag_recover_step(HAL_GetTick()));
                 }
             }
-            if (sporting == 0 && (sleeping == 0 || environment_active != 0))
+            if (baro_active != 0)
             {
                 app_diag_sensor_recovery(APP_DIAG_BARO, spl006_recover_step(HAL_GetTick()));
             }
@@ -556,6 +585,7 @@ static void app_sensor_task(void *pvParameters)
         if (bus_needed != 0)
         {
             heart_bus_used = app_heart_service();
+            app_heart_get_snapshot(&heart); /* 本拍可能启动/结束自动测量，调度使用服务后的状态。 */
         }
         period_ms = APP_SENSOR_IDLE_PERIOD_MS;
         if (cal_finished == 0 || heart.enabled != 0 || (power_state & APP_POWER_MOTION) != 0 || imu_saving != 0 || mag_saving != 0)
@@ -621,6 +651,14 @@ static void app_sensor_task(void *pvParameters)
             }
         }
         now_ms = HAL_GetTick();
+        baro_read = baro_active != 0 && (uint32_t)(now_ms - baro_window_ms) >= APP_SENSOR_SLEEP_WINDOW_MS;
+        if (baro_read != 0)
+        {
+            App_Baro_Service();
+            app_baro_record_history();
+            baro_sleep_pending = spl006_set_sleep(1);
+            baro_active = 0;
+        }
         if (sleeping != 0)
         {
             if (heart.enabled == 0)
@@ -629,21 +667,26 @@ static void app_sensor_task(void *pvParameters)
             }
             if (environment_active != 0)
             {
-                app_aht21_service();
+                if (heart.enabled == 0)
+                {
+                    period_ms = APP_SENSOR_ENVIRONMENT_POLL_MS;
+                }
+                app_aht21_service(); /* 窗口最后一拍也读回在途转换，不能因气压同拍结束而遗留旧结果。 */
                 if ((uint32_t)(now_ms - window_ms) >= APP_SENSOR_SLEEP_WINDOW_MS)
                 {
-                    App_Baro_Service();
-                    app_baro_record_history();
-                    spl006_set_sleep(1);
                     environment_active = 0;
                 }
+            }
+            if (baro_active != 0 && heart.enabled == 0)
+            {
+                period_ms = APP_SENSOR_ENVIRONMENT_POLL_MS;
             }
             if ((uint32_t)(now_ms - battery_ms) >= 1000)
             {
                 battery_ms = now_ms;
                 app_battery_service();
             }
-            if (imu_continuous == 0 && environment_active == 0 && imu_sample_pending == 0 &&
+            if (imu_continuous == 0 && environment_active == 0 && baro_active == 0 && baro_sleep_pending == 0 && imu_sample_pending == 0 &&
                 app_heart_sleep_pending() == 0 && bus_parked == 0)
             {
                 /* MPU继续自主5Hz采样，磁力计已休眠；仅释放软件I2C引脚。 */
@@ -651,22 +694,16 @@ static void app_sensor_task(void *pvParameters)
                 bus_parked = 1;
             }
         }
-        else if (sporting == 0 && (uint32_t)(now_ms - baro_ms) >= 1000)
-        {
-            baro_ms = now_ms;
-            App_Baro_Service();
-            app_baro_record_history();
-        }
-        else if ((uint32_t)(now_ms - battery_ms) >= 1000)
+        else if (baro_read == 0 && (uint32_t)(now_ms - battery_ms) >= 1000)
         {
             battery_ms = now_ms;
             app_battery_service();
         }
-        else
+        else if (baro_read == 0)
         {
             app_aht21_service(); /* 转换等待仍分步检查，避开气压/电池读取轮次。 */
         }
-        if (imu_saving == 1 && mag_saving == 0 && uptime_saving == 0)
+        if (imu_saving == 1 && mag_saving == 0 && uptime_saving == 0 && weather_saving == 0)
         {
             store_result = app_imu_store_save_begin(&offset);
             imu_saving = 2;
@@ -687,15 +724,22 @@ static void app_sensor_task(void *pvParameters)
                 }
             }
         }
-        else if (uptime_saving == 0 && (sporting == 0 || mag_saving != 0))
+        else if (uptime_saving == 0 && weather_saving == 0 && (sporting == 0 || mag_saving != 0))
         {
             mag_saving = App_IMU_SaveService();
         }
-        /* 开机时间记录是运动模式下唯一的定期EEPROM访问；其余时间仍释放GPIO。 */
-        uptime_saving = app_uptime_service(cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && app_imu_is_calibrating() == 0);
+        /* 校准、开机时间和天气共用EEPROM；在途事务必须完成后才允许下一方开始。 */
+        uptime_saving = app_uptime_service(cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && weather_saving == 0 &&
+                                          app_imu_is_calibrating() == 0);
+        weather_saving = app_weather_store_service(cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && uptime_saving == 0 &&
+                                                  app_imu_is_calibrating() == 0);
         app_battery_log_service(app_uptime_get_seconds());
         app_diag_task_end(APP_DIAG_SENSOR_TASK, period_ms);
         ++app_sensor_watchdog_progress;
+        if (sleeping != 0 && period_ms == APP_SENSOR_SLEEP_POLL_MS && s_lvgl_task_handle != NULL)
+        {
+            xTaskNotifyGive(s_lvgl_task_handle);
+        }
         now_tick = xTaskGetTickCount();
         /* 超期后只让出1拍，以实际唤醒时刻重排，不补跑旧轮询或再等完整周期。 */
         if ((TickType_t)(now_tick - xLastWakeTime) >= pdMS_TO_TICKS(period_ms))
