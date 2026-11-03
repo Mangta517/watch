@@ -3,6 +3,14 @@
 #define SENSOR_HOST_HAL_H
 #include <stdint.h>
 
+#define PWR_MAINREGULATOR_ON 0U
+#define PWR_SLEEPENTRY_WFI   1U
+void HAL_PWR_EnterSLEEPMode(uint32_t regulator, uint8_t entry);
+
+#ifndef WRITE_REG
+#define WRITE_REG(reg, value) ((reg) = (value))
+#endif
+
 typedef struct
 {
     uint32_t unused;
@@ -12,6 +20,7 @@ extern GPIO_TypeDef host_gpio_a, host_gpio_b;
 #define GPIOB                (&host_gpio_b)
 #define GPIO_PIN_0           (1U << 0)
 #define GPIO_PIN_1           (1U << 1)
+#define GPIO_PIN_2           (1U << 2)
 #define GPIO_PIN_3           (1U << 3)
 #define GPIO_PIN_4           (1U << 4)
 #define GPIO_PIN_5           (1U << 5)
@@ -26,7 +35,10 @@ extern GPIO_TypeDef host_gpio_a, host_gpio_b;
 #define GPIO_PIN_14          (1U << 14)
 #define GPIO_PIN_15          (1U << 15)
 #define GPIO_MODE_INPUT      0U
+#define GPIO_MODE_ANALOG     3U
 #define GPIO_MODE_OUTPUT_PP  1U
+#define GPIO_NOPULL          0U
+#define GPIO_SPEED_FREQ_LOW  0U
 #define GPIO_PULLUP          1U
 #define GPIO_SPEED_FREQ_HIGH 2U
 typedef enum
@@ -47,7 +59,7 @@ typedef struct
 } GPIO_InitTypeDef;
 typedef struct
 {
-    uint32_t SR, DR;
+    uint32_t SR, DR, CR1;
 } SPI_TypeDef;
 extern SPI_TypeDef host_spi;
 #define SPI1                (&host_spi)
@@ -55,14 +67,44 @@ extern SPI_TypeDef host_spi;
 #define READ_BIT(reg, bits) ((reg) & (bits))
 typedef struct
 {
+    uint32_t CR;
+} DMA_Stream_TypeDef;
+typedef struct
+{
+    DMA_Stream_TypeDef *Instance;
+} DMA_HandleTypeDef;
+typedef struct
+{
     SPI_TypeDef *Instance;
+    DMA_HandleTypeDef *hdmatx;
 } SPI_HandleTypeDef;
+#define DMA_SxCR_EN 1U
+#define __HAL_SPI_DISABLE(spi) ((spi)->Instance->CR1 = 0)
+typedef struct
+{
+    uint32_t CR1;
+} TIM_TypeDef;
+
 typedef struct
 {
     uint32_t arr, compare;
+    TIM_TypeDef *Instance;
 } TIM_HandleTypeDef;
+#define TIM_CR1_CEN 1U
+#define __HAL_TIM_ENABLE(timer) ((timer)->Instance->CR1 |= TIM_CR1_CEN)
+#define HOST_LCD_CLOCK_TIM 1U
+#define HOST_LCD_CLOCK_SPI 2U
+#define HOST_LCD_CLOCK_DMA 4U
+void host_lcd_clock_set(uint32_t clock, uint8_t enabled);
+#define __HAL_RCC_TIM3_CLK_ENABLE() host_lcd_clock_set(HOST_LCD_CLOCK_TIM, 1)
+#define __HAL_RCC_TIM3_CLK_DISABLE() host_lcd_clock_set(HOST_LCD_CLOCK_TIM, 0)
+#define __HAL_RCC_SPI1_CLK_ENABLE() host_lcd_clock_set(HOST_LCD_CLOCK_SPI, 1)
+#define __HAL_RCC_SPI1_CLK_DISABLE() host_lcd_clock_set(HOST_LCD_CLOCK_SPI, 0)
+#define __HAL_RCC_DMA2_CLK_ENABLE() host_lcd_clock_set(HOST_LCD_CLOCK_DMA, 1)
+#define __HAL_RCC_DMA2_CLK_DISABLE() host_lcd_clock_set(HOST_LCD_CLOCK_DMA, 0)
 #define TIM_CHANNEL_3                                3U
 #define DMA2_Stream2_IRQn                            2
+#define SPI1_IRQn                                    35
 #define __HAL_TIM_SET_AUTORELOAD(timer, value)       ((timer)->arr = (value))
 #define __HAL_TIM_SET_COMPARE(timer, channel, value) ((timer)->compare = (value))
 
@@ -80,11 +122,16 @@ void __disable_irq(void);
 void __set_PRIMASK(uint32_t mask);
 void HAL_Delay(uint32_t ms);
 uint32_t HAL_GetTick(void);
+void __DMB(void);
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config);
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
+void HAL_GPIO_TogglePin(GPIO_TypeDef *port, uint16_t pin);
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
 void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority);
+void HAL_NVIC_EnableIRQ(int irq);
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout);
 HAL_StatusTypeDef HAL_SPI_Transmit_DMA(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size);
+HAL_StatusTypeDef HAL_SPI_DMAStop(SPI_HandleTypeDef *spi);
+HAL_StatusTypeDef HAL_SPI_Abort(SPI_HandleTypeDef *spi);
 HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *timer, uint32_t channel);
 #endif

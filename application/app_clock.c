@@ -9,10 +9,18 @@ typedef struct
     uint8_t overflow;
     uint8_t has_colon;
     uint32_t last_byte_ms;
+    uint32_t received_count;
     app_clock_result result;
 } app_clock_parser_struct;
 
 static app_clock_parser_struct parser;
+
+void app_clock_reset_receive(void)
+{
+    parser.length = 0;
+    parser.overflow = 0;
+    parser.has_colon = 0;
+}
 
 static void app_clock_finish(void)
 {
@@ -44,7 +52,8 @@ static void app_clock_finish(void)
         }
         else
         {
-            if (watch_rtc_set_time(value[0], value[1], value[2]) == HAL_OK)
+            ++parser.received_count; /* 合法手机消息确认通信已建立，RTC写入失败也计入。 */
+            if (watch_rtc_set_time(value[0], value[1], value[2]) == 0)
             {
                 parser.result = APP_CLOCK_SYNCED;
             }
@@ -103,4 +112,9 @@ void app_clock_receive(const uint8_t *data, uint16_t size, uint32_t now_ms)
 app_clock_result app_clock_get_result(void)
 {
     return parser.result;
+}
+
+uint32_t app_clock_get_received_count(void)
+{
+    return parser.received_count;
 }

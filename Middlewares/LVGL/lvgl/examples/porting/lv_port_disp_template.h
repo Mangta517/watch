@@ -8,16 +8,16 @@
 
 #ifndef LV_PORT_DISP_TEMPL_H
 #define LV_PORT_DISP_TEMPL_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-/*********************
+    /*********************
  *      INCLUDES
  *********************/
-#include "lvgl/lvgl.h"
 
     /*********************
  *      DEFINES
@@ -31,6 +31,11 @@ extern "C"
  * GLOBAL PROTOTYPES
  **********************/
     void lv_port_disp_init(void);
+    void lv_port_disp_service(void);
+    /* 显示任务内调用：等待在途DMA安全完成后，切换LCD控制器休眠。 */
+    uint8_t lv_port_disp_set_sleep(uint8_t sleeping); /* 0成功，1失败，调用方保留目标状态重试。 */
+    /* 显示任务内每次提交新分块后调用；传NULL解除，等待同一笔DMA时不调用。 */
+    void lv_port_disp_set_progress_callback(void (*callback)(void));
 
     /**********************
  *      MACROS

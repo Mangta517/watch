@@ -1,27 +1,45 @@
 /**
  ******************************************************************************
  * @file    kt6368a.c
- * @brief   KT6368A驱动。USART1 ISR只入队/重启接收，不调用FreeRTOS API。
+ * @brief   KT6368A驱动。USART1 ISR入队/重启接收，达到水位后回调应用。
  ******************************************************************************
  */
 #include "kt6368a.h"
 #include "usart.h"
 #include <string.h>
+#if defined(F411_BOOTLOADER)
+#include "int_bootloader.h"
+#endif
+
+/* APP始终仅BLE；只有进入Bootloader升级分支才开启SPP。 */
+#if defined(F411_BOOTLOADER)
+#define KT6368A_SPP_VALUE   "01"
+#define KT6368A_SPP_COMMAND "AT+B501\r\n"
+#else
+#define KT6368A_SPP_VALUE   "00"
+#define KT6368A_SPP_COMMAND "AT+B500\r\n"
+#endif
 
 typedef struct
 {
     uint8_t rx_byte;
     uint8_t rx_buffer[KT6368A_RX_BUFFER_SIZE];
+    uint32_t rx_time_ms[KT6368A_RX_BUFFER_SIZE];
+    uint8_t rx_flags[(KT6368A_RX_BUFFER_SIZE + 3) / 4]; /* 每槽两位，仅ISR写。 */
     volatile uint16_t rx_head;
     volatile uint16_t rx_tail;
     volatile uint32_t rx_dropped;
     volatile uint32_t rx_errors;
+    volatile uint32_t rx_activity_ms;
+    volatile uint8_t rx_have_byte;
+    volatile uint8_t rx_loss_pending;
     volatile uint8_t powered;
     uint32_t power_on_tick;
 } kt6368a_t;
 
 static kt6368a_t ble;
 static HAL_StatusTypeDef init_status = HAL_ERROR;
+static void (*s_rx_callback)(void);
 
 enum
 {
@@ -30,7 +48,8 @@ enum
     KT_START_BOOT,
     KT_START_QUERY,
     KT_START_REPLY,
-    KT_START_SAVE
+    KT_START_SAVE,
+    KT_START_RETRY
 };
 
 typedef struct
@@ -45,14 +64,15 @@ typedef struct
     uint8_t query;
     uint8_t changed;
     uint8_t verifying;
+    uint8_t attempts;
 } kt6368a_start_struct;
 
 static kt6368a_start_struct s_start;
 /* 0空闲、1发送中、2结果待取；ISR只发布完成结果，不调用RTOS接口。 */
 static volatile uint8_t s_tx_state;
+static uint8_t s_uart_disabled;
 static volatile HAL_StatusTypeDef s_tx_result;
 static uint32_t s_tx_started_ms, s_tx_timeout_ms;
-
 
 uint16_t kt6368a_read(uint8_t *data, uint16_t size)
 {
@@ -66,7 +86,56 @@ uint16_t kt6368a_read(uint8_t *data, uint16_t size)
         __DMB();
         data[count++] = ble.rx_buffer[ble.rx_tail];
         __DMB();
-        ble.rx_tail = (uint16_t)((ble.rx_tail + 1U) % KT6368A_RX_BUFFER_SIZE);
+        ble.rx_tail = (uint16_t)((ble.rx_tail + 1) % KT6368A_RX_BUFFER_SIZE);
+    }
+    return count;
+}
+
+static uint8_t kt6368a_rx_flags(uint16_t slot)
+{
+    return (uint8_t)((ble.rx_flags[slot / 4] >> ((slot % 4) * 2)) & 3);
+}
+
+uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct *info)
+{
+    uint16_t count = 0;
+    uint16_t slot;
+    uint32_t mask;
+    if (data == NULL || info == NULL || size == 0)
+    {
+        return 0;
+    }
+    /* 空队列的活动时间和丢字节状态必须来自同一份ISR快照。 */
+    mask = __get_PRIMASK();
+    __disable_irq();
+    if (ble.rx_tail == ble.rx_head)
+    {
+        info->received_ms = ble.rx_activity_ms;
+        info->sampled_ms = HAL_GetTick();
+        info->flags = 0;
+        if (ble.rx_loss_pending != 0)
+        {
+            info->flags = KT6368A_RX_LOSS;
+        }
+        __set_PRIMASK(mask);
+        return 0;
+    }
+    __set_PRIMASK(mask);
+    slot = ble.rx_tail;
+    __DMB();
+    info->received_ms = ble.rx_time_ms[slot];
+    info->flags = kt6368a_rx_flags(slot);
+    while (count < size && slot != ble.rx_head)
+    {
+        __DMB();
+        if (count != 0 && (ble.rx_time_ms[slot] != info->received_ms || kt6368a_rx_flags(slot) != 0))
+        {
+            break;
+        }
+        data[count++] = ble.rx_buffer[slot];
+        slot = (uint16_t)((slot + 1) % KT6368A_RX_BUFFER_SIZE);
+        __DMB();
+        ble.rx_tail = slot;
     }
     return count;
 }
@@ -76,7 +145,19 @@ void kt6368a_flush_rx(void)
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
     ble.rx_tail = ble.rx_head;
+    ble.rx_have_byte = 0;
+    ble.rx_loss_pending = 0;
     __set_PRIMASK(mask);
+}
+
+uint8_t kt6368a_rx_pending(void)
+{
+    return ble.rx_head != ble.rx_tail;
+}
+
+void kt6368a_set_rx_callback(void (*callback)(void))
+{
+    s_rx_callback = callback;
 }
 
 uint32_t kt6368a_get_rx_dropped(void)
@@ -104,18 +185,24 @@ void kt6368a_power_off(void)
     uint32_t mask = __get_PRIMASK();
     ble.powered = 0;
     __disable_irq();
-    if (s_tx_state == 1U)
+    if (s_tx_state == 1)
     {
         (void)HAL_UART_AbortTransmit(&huart1);
         s_tx_result = HAL_ERROR;
-        s_tx_state = 2U;
+        s_tx_state = 2;
     }
     __set_PRIMASK(mask);
-    (void)HAL_UART_AbortReceive(&huart1);
+    if (s_uart_disabled == 0)
+    {
+        (void)HAL_UART_AbortReceive(&huart1);
+        /* MSP DeInit关闭USART1时钟和中断；PA3/PA4仍使用GPIOA，不能关闭整口时钟。 */
+        (void)HAL_UART_DeInit(&huart1);
+        s_uart_disabled = 1;
+    }
     /* BL1551B关断时将蓝牙电源接地；UART闲置高电平不能继续驱动模块。 */
     gpio.Pin = BLE_TX_Pin | BLE_RX_Pin;
-    gpio.Mode = GPIO_MODE_INPUT;
-    gpio.Pull = GPIO_PULLDOWN;
+    gpio.Mode = GPIO_MODE_ANALOG;
+    gpio.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &gpio);
     HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_RESET);
     kt6368a_flush_rx();
@@ -130,10 +217,27 @@ static HAL_StatusTypeDef kt6368a_power_enable(void)
         return HAL_OK;
     }
     /* init调用位置保证UART已初始化；保留CubeMX生成的115200/8N1配置。 */
-    if ((huart1.Instance != USART1) || (huart1.Init.BaudRate != 115200U))
+    if ((huart1.Instance != USART1) || (huart1.Init.BaudRate != 115200))
     {
         return HAL_ERROR;
     }
+    if (s_uart_disabled != 0)
+    {
+        status = HAL_UART_Init(&huart1);
+        if (status != HAL_OK)
+        {
+            (void)HAL_UART_DeInit(&huart1);
+            return status;
+        }
+        s_uart_disabled = 0;
+    }
+#if !defined(F411_BOOTLOADER)
+    if (s_rx_callback != NULL)
+    {
+        /* MSP初始化把USART1设为0；通知任务前改为12，满足FreeRTOS的ISR优先级约束。 */
+        HAL_NVIC_SetPriority(USART1_IRQn, 12, 0);
+    }
+#endif
     HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_SET);
     ble.power_on_tick = HAL_GetTick();
     gpio.Pin = BLE_TX_Pin | BLE_RX_Pin;
@@ -172,11 +276,11 @@ HAL_StatusTypeDef kt6368a_power_on(void)
 
 HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t timeout_ms)
 {
-    if ((data == NULL) || (size == 0U) || (size > KT6368A_TX_MAX_SIZE))
+    if ((data == NULL) || (size == 0) || (size > KT6368A_TX_MAX_SIZE))
     {
         return HAL_ERROR;
     }
-    if (s_tx_state == 1U || s_start.phase != KT_START_OFF || !ble.powered ||
+    if (s_tx_state == 1 || s_start.phase != KT_START_OFF || !ble.powered ||
         ((uint32_t)(HAL_GetTick() - ble.power_on_tick) < KT6368A_BOOT_DELAY_MS))
     {
         return HAL_BUSY;
@@ -187,29 +291,29 @@ HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t tim
 HAL_StatusTypeDef kt6368a_write_async(const uint8_t *data, uint16_t size, uint32_t timeout_ms)
 {
     HAL_StatusTypeDef status;
-    if (data == NULL || size == 0U || size > KT6368A_TX_MAX_SIZE || timeout_ms == 0U)
+    if (data == NULL || size == 0 || size > KT6368A_TX_MAX_SIZE || timeout_ms == 0)
     {
         return HAL_ERROR;
     }
-    if (s_tx_state != 0U || s_start.phase != KT_START_OFF || !ble.powered ||
+    if (s_tx_state != 0 || s_start.phase != KT_START_OFF || !ble.powered ||
         (uint32_t)(HAL_GetTick() - ble.power_on_tick) < KT6368A_BOOT_DELAY_MS)
     {
         return HAL_BUSY;
     }
     s_tx_started_ms = HAL_GetTick();
     s_tx_timeout_ms = timeout_ms;
-    s_tx_state = 1U;
+    s_tx_state = 1;
     status = HAL_UART_Transmit_IT(&huart1, (uint8_t *)data, size);
     if (status != HAL_OK)
     {
-        s_tx_state = 0U;
+        s_tx_state = 0;
     }
     return status;
 }
 
 uint8_t kt6368a_tx_is_busy(void)
 {
-    return s_tx_state != 0U; /* 完成结果仍由发起者收取，其他异步写入继续等待。 */
+    return s_tx_state != 0; /* 完成结果仍由发起者收取，其他异步写入继续等待。 */
 }
 
 uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result)
@@ -219,16 +323,16 @@ uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result)
     uint8_t ready = 0;
     __disable_irq();
     /* 只中止TX，保持原RX接收；保护完成中断与超时判定的交接。 */
-    if (s_tx_state == 1U && (uint32_t)(now - s_tx_started_ms) >= s_tx_timeout_ms)
+    if (s_tx_state == 1 && (uint32_t)(now - s_tx_started_ms) >= s_tx_timeout_ms)
     {
         (void)HAL_UART_AbortTransmit(&huart1);
         s_tx_result = HAL_TIMEOUT;
-        s_tx_state = 2U;
+        s_tx_state = 2;
     }
-    if (s_tx_state == 2U)
+    if (s_tx_state == 2)
     {
         *result = s_tx_result;
-        s_tx_state = 0U;
+        s_tx_state = 0;
         ready = 1;
     }
     __set_PRIMASK(mask);
@@ -237,10 +341,10 @@ uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result)
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *uart)
 {
-    if (uart->Instance == USART1 && s_tx_state == 1U)
+    if (uart->Instance == USART1 && s_tx_state == 1)
     {
         s_tx_result = HAL_OK;
-        s_tx_state = 2U;
+        s_tx_state = 2;
     }
 }
 
@@ -254,24 +358,24 @@ HAL_StatusTypeDef kt6368a_at_command(const char *command, const char *expected_p
     size_t command_size, prefix_size;
     HAL_StatusTypeDef status;
 
-    if ((command == NULL) || (expected_prefix == NULL) || (response == NULL) || (response_size == 0U) || (timeout_ms == 0U))
+    if ((command == NULL) || (expected_prefix == NULL) || (response == NULL) || (response_size == 0) || (timeout_ms == 0))
     {
         return HAL_ERROR;
     }
     response[0] = '\0';
     command_size = strlen(command);
     prefix_size = strlen(expected_prefix);
-    if ((command_size < 7U) || (command_size > 63U) || (prefix_size == 0U) || (strncmp(command, "AT+", 3) != 0) ||
-        (strcmp(command + command_size - 2U, "\r\n") != 0))
+    if ((command_size < 7) || (command_size > 63) || (prefix_size == 0) || (strncmp(command, "AT+", 3) != 0) ||
+        (strcmp(command + command_size - 2, "\r\n") != 0))
     {
         return HAL_ERROR;
     }
     /* 防止一次调用注入多条AT命令。 */
-    if ((memchr(command, '\r', command_size - 2U) != NULL) || (memchr(command, '\n', command_size - 2U) != NULL))
+    if ((memchr(command, '\r', command_size - 2) != NULL) || (memchr(command, '\n', command_size - 2) != NULL))
     {
         return HAL_ERROR;
     }
-    if (!ble.powered || s_tx_state == 1U)
+    if (!ble.powered || s_tx_state == 1)
     {
         return HAL_BUSY;
     }
@@ -291,7 +395,7 @@ HAL_StatusTypeDef kt6368a_at_command(const char *command, const char *expected_p
         {
             return HAL_ERROR;
         }
-        if (kt6368a_read(&byte, 1) == 0U)
+        if (kt6368a_read(&byte, 1) == 0)
         {
             continue;
         }
@@ -312,14 +416,14 @@ HAL_StatusTypeDef kt6368a_at_command(const char *command, const char *expected_p
                 {
                     return HAL_ERROR;
                 }
-                memcpy(response, line, length + 1U);
+                memcpy(response, line, length + 1);
                 return HAL_OK;
             }
             length = 0;
         }
         else if (byte != '\r')
         {
-            if (length < sizeof(line) - 1U)
+            if (length < sizeof(line) - 1)
             {
                 line[length++] = (char)byte;
             }
@@ -368,7 +472,7 @@ HAL_StatusTypeDef kt6368a_configure(const char *name)
         return HAL_ERROR;
     }
     name_size = strlen(name);
-    if ((name_size == 0U) || (name_size > 30U) || (strchr(name, '\r') != NULL) || (strchr(name, '\n') != NULL))
+    if ((name_size == 0) || (name_size > 30) || (strchr(name, '\r') != NULL) || (strchr(name, '\n') != NULL))
     {
         return HAL_ERROR;
     }
@@ -391,7 +495,7 @@ HAL_StatusTypeDef kt6368a_configure(const char *name)
     {
         return status;
     }
-    status = kt6368a_set_if_needed("AT+T5\r\n", "T5+", "01", "AT+B501\r\n", &changed);
+    status = kt6368a_set_if_needed("AT+T5\r\n", "T5+", KT6368A_SPP_VALUE, KT6368A_SPP_COMMAND, &changed);
     if (status != HAL_OK)
     {
         return status;
@@ -429,7 +533,7 @@ HAL_StatusTypeDef kt6368a_configure(const char *name)
     {
         return status;
     }
-    if (strcmp(response, "T5+01") == 0)
+    if (strcmp(response, "T5+" KT6368A_SPP_VALUE) == 0)
     {
         return HAL_OK;
     }
@@ -448,6 +552,21 @@ void kt6368a_init_begin(void)
     init_status = HAL_BUSY;
 }
 
+void kt6368a_set_enabled(uint8_t enabled)
+{
+    if (enabled != 0)
+    {
+        kt6368a_init_begin();
+    }
+    else
+    {
+        /* 显式关闭时取消未完成的启动，后续service不得重新上电。 */
+        s_start.phase = KT_START_OFF;
+        init_status = HAL_ERROR;
+        kt6368a_power_off();
+    }
+}
+
 uint8_t kt6368a_init_is_pending(void)
 {
     return s_start.phase != KT_START_OFF;
@@ -463,8 +582,9 @@ static HAL_StatusTypeDef kt6368a_start_finish(HAL_StatusTypeDef status)
 
 static void kt6368a_start_next(void)
 {
+    s_start.attempts = 0;
     ++s_start.query;
-    if (s_start.query < 3U)
+    if (s_start.query < 3)
     {
         s_start.phase = KT_START_QUERY;
     }
@@ -483,6 +603,19 @@ static void kt6368a_start_next(void)
     }
 }
 
+/* 瞬态错误仅重查当前参数；明确拒绝/验证不匹配仍直接结束。 */
+static HAL_StatusTypeDef kt6368a_start_retry(HAL_StatusTypeDef status)
+{
+    if (s_start.attempts >= 3)
+    {
+        return kt6368a_start_finish(status);
+    }
+    s_start.phase = KT_START_RETRY;
+    s_start.phase_ms = HAL_GetTick();
+    kt6368a_flush_rx();
+    return HAL_BUSY;
+}
+
 HAL_StatusTypeDef kt6368a_init_service(void)
 {
     static const char *const queries[] = {"AT+TM\r\n", "AT+T4\r\n", "AT+T5\r\n"};
@@ -499,7 +632,7 @@ HAL_StatusTypeDef kt6368a_init_service(void)
     }
     if (s_start.phase == KT_START_DISCHARGE)
     {
-        if ((uint32_t)(now - s_start.phase_ms) >= 20U)
+        if ((uint32_t)(now - s_start.phase_ms) >= 20)
         {
             status = kt6368a_power_enable();
             if (status != HAL_OK)
@@ -520,11 +653,19 @@ HAL_StatusTypeDef kt6368a_init_service(void)
     }
     if (s_start.phase == KT_START_SAVE)
     {
-        if ((uint32_t)(now - s_start.phase_ms) >= 100U)
+        if ((uint32_t)(now - s_start.phase_ms) >= 100)
         {
             kt6368a_start_next();
         }
         return init_status;
+    }
+    if (s_start.phase == KT_START_RETRY)
+    {
+        if ((uint32_t)(now - s_start.phase_ms) >= 100)
+        {
+            s_start.phase = KT_START_QUERY;
+        }
+        return HAL_BUSY;
     }
     if (s_start.phase == KT_START_QUERY)
     {
@@ -533,21 +674,22 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         s_start.rx_errors = ble.rx_errors;
         s_start.rx_dropped = ble.rx_dropped;
         s_start.phase_ms = now;
-        status = HAL_UART_Transmit(&huart1, (uint8_t *)queries[s_start.query], (uint16_t)strlen(queries[s_start.query]), 10U);
+        ++s_start.attempts;
+        status = HAL_UART_Transmit(&huart1, (uint8_t *)queries[s_start.query], (uint16_t)strlen(queries[s_start.query]), 10);
         if (status != HAL_OK)
         {
-            return kt6368a_start_finish(status);
+            return kt6368a_start_retry(status);
         }
         s_start.phase = KT_START_REPLY;
         return HAL_BUSY;
     }
     if (ble.rx_errors != s_start.rx_errors || ble.rx_dropped != s_start.rx_dropped)
     {
-        return kt6368a_start_finish(HAL_ERROR);
+        return kt6368a_start_retry(HAL_ERROR);
     }
     if ((uint32_t)(now - s_start.phase_ms) >= KT6368A_AT_TIMEOUT_MS)
     {
-        return kt6368a_start_finish(HAL_TIMEOUT);
+        return kt6368a_start_retry(HAL_TIMEOUT);
     }
     while (budget-- != 0 && kt6368a_read(&byte, 1) != 0)
     {
@@ -557,7 +699,7 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         }
         if (byte != '\n')
         {
-            if (s_start.length < sizeof(s_start.line) - 1U)
+            if (s_start.length < sizeof(s_start.line) - 1)
             {
                 s_start.line[s_start.length++] = (char)byte;
             }
@@ -569,7 +711,7 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         }
         if (s_start.overflow != 0)
         {
-            return kt6368a_start_finish(HAL_ERROR);
+            return kt6368a_start_retry(HAL_ERROR);
         }
         s_start.line[s_start.length] = '\0';
         s_start.length = 0;
@@ -585,6 +727,10 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         if (s_start.query == 0)
         {
             target = KT6368A_BLE_NAME;
+        }
+        else if (s_start.query == 2)
+        {
+            target = KT6368A_SPP_VALUE;
         }
         if (strcmp(s_start.line + 3, target) == 0)
         {
@@ -607,12 +753,12 @@ HAL_StatusTypeDef kt6368a_init_service(void)
         }
         else
         {
-            strcpy(setting, "AT+B501\r\n");
+            strcpy(setting, KT6368A_SPP_COMMAND);
         }
-        status = HAL_UART_Transmit(&huart1, (uint8_t *)setting, (uint16_t)strlen(setting), 10U);
+        status = HAL_UART_Transmit(&huart1, (uint8_t *)setting, (uint16_t)strlen(setting), 10);
         if (status != HAL_OK)
         {
-            return kt6368a_start_finish(status);
+            return kt6368a_start_retry(status);
         }
         s_start.changed = 1;
         s_start.phase = KT_START_SAVE;
@@ -637,27 +783,90 @@ HAL_StatusTypeDef kt6368a_init(void)
     return init_status;
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+static void kt6368a_rx_push(uint8_t byte, uint8_t notify)
 {
     uint16_t next;
+    uint32_t now_ms;
+    uint8_t flags = 0, shift;
+    now_ms = HAL_GetTick();
+    if (ble.rx_have_byte == 0 || (uint32_t)(now_ms - ble.rx_activity_ms) >= KT6368A_RX_IDLE_MS)
+    {
+        flags = KT6368A_RX_GAP;
+    }
+    if (ble.rx_loss_pending != 0)
+    {
+        flags |= KT6368A_RX_LOSS;
+    }
+    ble.rx_activity_ms = now_ms;
+    ble.rx_have_byte = 1;
+    next = (uint16_t)((ble.rx_head + 1) % KT6368A_RX_BUFFER_SIZE);
+    if (next == ble.rx_tail)
+    {
+        ble.rx_dropped++;
+        ble.rx_loss_pending = 1;
+    }
+    else
+    {
+        ble.rx_buffer[ble.rx_head] = byte;
+        ble.rx_time_ms[ble.rx_head] = now_ms;
+        shift = (uint8_t)((ble.rx_head % 4) * 2);
+        ble.rx_flags[ble.rx_head / 4] = (uint8_t)((ble.rx_flags[ble.rx_head / 4] & ~(3 << shift)) | (flags << shift));
+        ble.rx_loss_pending = 0;
+        __DMB();
+        ble.rx_head = next;
+        /* 按水位唤醒，避免115200串口逐字节触发业务任务；余量保留给调度延迟。 */
+        if ((uint16_t)((next + KT6368A_RX_BUFFER_SIZE - ble.rx_tail) % KT6368A_RX_BUFFER_SIZE) == 128 && notify != 0 && s_rx_callback != NULL)
+        {
+            s_rx_callback();
+        }
+    }
+}
+
+uint8_t kt6368a_rx_is_enabled(void)
+{
+    return ble.powered;
+}
+
+void kt6368a_receive_polled(uint8_t byte, uint8_t errors)
+{
+    /* Flash写入期间由sensor屏蔽中断后调用；HAL的一字节接收仍保持在途。 */
+    if (ble.powered == 0)
+    {
+        return;
+    }
+    if (errors != 0)
+    {
+        ++ble.rx_errors;
+        ble.rx_loss_pending = 1;
+        ble.rx_activity_ms = HAL_GetTick();
+        ble.rx_have_byte = 1;
+        return;
+    }
+    kt6368a_rx_push(byte, 0); /* 任务上下文不调用FromISR通知；sensor轮末通知LVGL。 */
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
     if ((huart != &huart1) || !ble.powered)
     {
         return;
     }
-    next = (uint16_t)((ble.rx_head + 1U) % KT6368A_RX_BUFFER_SIZE);
-    if (next == ble.rx_tail)
+#if defined(F411_BOOTLOADER)
+    if (int_bootloader_rx_dma_active() != 0)
     {
-        ble.rx_dropped++;
+        int_bootloader_rx_complete();
+        return;
     }
-    else
+#endif
+    if (huart->ErrorCode != HAL_UART_ERROR_NONE)
     {
-        ble.rx_buffer[ble.rx_head] = ble.rx_byte;
-        __DMB();
-        ble.rx_head = next;
+        return;
     }
+    kt6368a_rx_push(ble.rx_byte, 1);
     if (HAL_UART_Receive_IT(huart, &ble.rx_byte, 1) != HAL_OK)
     {
         ble.rx_errors++;
+        ble.rx_loss_pending = 1;
     }
 }
 
@@ -667,7 +876,17 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     {
         return;
     }
+#if defined(F411_BOOTLOADER)
+    if (int_bootloader_rx_dma_active() != 0)
+    {
+        int_bootloader_rx_error();
+        return;
+    }
+#endif
     ble.rx_errors++;
+    ble.rx_activity_ms = HAL_GetTick();
+    ble.rx_have_byte = 1;
+    ble.rx_loss_pending = 1;
     /* 本工程没有UART RX DMA；AbortReceive仅关闭接收中断，不在ISR等待DMA。 */
     (void)HAL_UART_AbortReceive(huart);
     __HAL_UART_CLEAR_OREFLAG(huart);

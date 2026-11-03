@@ -37,6 +37,11 @@ void app_diag_heart_tx(uint16_t count, uint8_t success)
     (void)count;
     (void)success;
 }
+uint32_t host_heart_fault_diag;
+void app_diag_heart_fault(uint8_t kind, uint8_t reg, uint8_t value)
+{
+    host_heart_fault_diag = 2 | ((uint32_t)kind << 8) | ((uint32_t)reg << 16) | ((uint32_t)value << 24);
+}
 uint8_t app_diag_take_imu_calibration(void)
 {
     return 0;
@@ -45,6 +50,11 @@ void app_diag_receive(const uint8_t *data, uint16_t size)
 {
     (void)data;
     (void)size;
+}
+unsigned host_diag_rx_resets;
+void app_diag_reset_receive(void)
+{
+    ++host_diag_rx_resets;
 }
 void app_diag_boot_set(uint8_t field, uint32_t value)
 {
@@ -71,4 +81,10 @@ void app_diag_imu_save_record(uint32_t stage, uint32_t error, uint32_t address, 
     host_imu_save_diag[1] = error;
     host_imu_save_diag[2] = address;
     host_imu_save_diag[3] = elapsed_ms;
+}
+
+void app_diag_sensor_recovery(uint8_t id, uint8_t state)
+{
+    (void)id;
+    (void)state;
 }

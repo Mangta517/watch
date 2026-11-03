@@ -1,6 +1,6 @@
 /**
  * @file app_battery.c
- * @brief 每秒进行一次 PA1/ADC1_IN1 单次转换，不在 UI 中等待 ADC。
+ * @brief PA1/ADC1_IN1 单次转换：启动/亮屏1s，启动稳定后熄屏10s，不在UI中等待ADC。
  */
 #include "app_battery.h"
 #include "app_diag.h"
@@ -9,11 +9,42 @@
 #include "semphr.h"
 #include <string.h>
 
-#define APP_BATTERY_ADC_TIMEOUT_MS 2U
+#define APP_BATTERY_ADC_TIMEOUT_MS          2
+#define APP_BATTERY_STARTUP_SAMPLES         8
+#define APP_BATTERY_STARTUP_AVERAGE_SAMPLES 4
 
 static SemaphoreHandle_t s_battery_mux;
 static app_battery_struct s_battery_data;
 static uint32_t s_attempt_ms;
+static uint32_t s_filter_ms;
+static int32_t s_filtered_mv_q8;
+static uint32_t s_startup_sum_mv;
+static uint8_t s_startup_samples;
+static uint8_t s_last_percent;
+static uint8_t s_sleep_mode;
+
+static uint8_t battery_percent(uint32_t voltage_mv)
+{
+    /* 2026-10-31按同电池未充电日志归一化：3.5V为0%，4.0V为100%，节点间线性插值。 */
+    /* 仅定义显示电量下限，不触发关机；31点中位数及计算依据见docs/battery-log.md。 */
+    static const uint16_t voltage_points_mv[] = {3500, 3550, 3600, 3650, 3700, 3750, 3800, 3850, 3900, 3950, 4000};
+    static const uint8_t percent_points[] = {0, 14, 24, 36, 51, 62, 69, 79, 88, 94, 100};
+    uint32_t i;
+    if (voltage_mv <= voltage_points_mv[0])
+    {
+        return 0;
+    }
+    for (i = 1; i < sizeof(voltage_points_mv) / sizeof(voltage_points_mv[0]); ++i)
+    {
+        if (voltage_mv < voltage_points_mv[i])
+        {
+            uint32_t span_mv = voltage_points_mv[i] - voltage_points_mv[i - 1];
+            uint32_t rise = (voltage_mv - voltage_points_mv[i - 1]) * (percent_points[i] - percent_points[i - 1]);
+            return (uint8_t)(percent_points[i - 1] + (rise + span_mv / 2) / span_mv);
+        }
+    }
+    return 100;
+}
 
 void app_battery_init(void)
 {
@@ -27,7 +58,16 @@ void app_battery_init(void)
     memset(&s_battery_data, 0, sizeof(s_battery_data));
     xSemaphoreGive(s_battery_mux);
     s_attempt_ms = HAL_GetTick() - APP_BATTERY_PERIOD_MS;
+    s_startup_samples = 0;
+    s_startup_sum_mv = 0;
+    s_last_percent = 0;
+    s_sleep_mode = 0;
     app_diag_sensor_init(APP_DIAG_BATTERY, 0);
+}
+
+void app_battery_set_sleep_mode(uint8_t sleeping)
+{
+    s_sleep_mode = sleeping != 0;
 }
 
 void app_battery_service(void)
@@ -37,7 +77,13 @@ void app_battery_service(void)
     uint32_t now = HAL_GetTick();
     uint32_t raw = 0;
     uint32_t read_started;
-    if (s_battery_mux == NULL || now - s_attempt_ms < APP_BATTERY_PERIOD_MS)
+    uint32_t period_ms = APP_BATTERY_PERIOD_MS;
+    uint32_t filter_steps;
+    if (s_sleep_mode != 0 && s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
+    {
+        period_ms = APP_BATTERY_SLEEP_PERIOD_MS;
+    }
+    if (s_battery_mux == NULL || now - s_attempt_ms < period_ms)
     {
         return;
     }
@@ -46,7 +92,7 @@ void app_battery_service(void)
     sample.result = HAL_ADC_Start(&hadc1);
     if (sample.result == HAL_OK)
     {
-        /* 480周期/12.5MHz 的采样约38.4us；超时有限，不让故障卡住sensor任务。 */
+        /* 64MHz PCLK2/8=8MHz，480周期采样约60us；超时有限，不让故障卡住sensor任务。 */
         sample.result = HAL_ADC_PollForConversion(&hadc1, APP_BATTERY_ADC_TIMEOUT_MS);
         if (sample.result == HAL_OK)
         {
@@ -61,8 +107,53 @@ void app_battery_service(void)
     if (sample.result == HAL_OK)
     {
         sample.adc_raw = (uint16_t)raw;
-        sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2U + 2047U) / 4095U;
-        sample.valid = 1;
+        sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2 + 2047) / 4095;
+        /* 启动前4次不入均值，后4次均值作为初值；沿用每秒调度，不阻塞sensor任务。 */
+        if (s_startup_samples < APP_BATTERY_STARTUP_SAMPLES)
+        {
+            ++s_startup_samples;
+            if (s_startup_samples > APP_BATTERY_STARTUP_SAMPLES - APP_BATTERY_STARTUP_AVERAGE_SAMPLES)
+            {
+                s_startup_sum_mv += sample.voltage_mv;
+            }
+            if (s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
+            {
+                s_filtered_mv_q8 = (int32_t)(s_startup_sum_mv * 256 / APP_BATTERY_STARTUP_AVERAGE_SAMPLES);
+                s_filter_ms = now;
+                s_last_percent = battery_percent((uint32_t)(s_filtered_mv_q8 + 128) / 256);
+            }
+        }
+        else
+        {
+            /* 按经过秒数推进1/8低通，熄屏10s采样不把响应拖慢十倍；长故障后最多补10步。 */
+            filter_steps = (uint32_t)(now - s_filter_ms) / APP_BATTERY_PERIOD_MS;
+            if (filter_steps > APP_BATTERY_SLEEP_PERIOD_MS / APP_BATTERY_PERIOD_MS)
+            {
+                filter_steps = APP_BATTERY_SLEEP_PERIOD_MS / APP_BATTERY_PERIOD_MS;
+            }
+            while (filter_steps != 0)
+            {
+                s_filtered_mv_q8 += ((int32_t)sample.voltage_mv * 256 - s_filtered_mv_q8) / 8;
+                --filter_steps;
+            }
+            s_filter_ms = now;
+        }
+        if (s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
+        {
+            sample.voltage_mv = (uint32_t)(s_filtered_mv_q8 + 128) / 256;
+            sample.percent = battery_percent(sample.voltage_mv);
+            /* 尚无充电状态输入：本次开机电量只降不升，电压回弹不代表补充了电荷。 */
+            if (sample.percent < s_last_percent)
+            {
+                s_last_percent = sample.percent;
+            }
+            sample.percent = s_last_percent;
+            sample.valid = 1;
+        }
+        else
+        {
+            sample.voltage_mv = 0;
+        }
     }
     if (sample.result == HAL_OK)
     {

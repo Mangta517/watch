@@ -15,7 +15,7 @@
  *       与 touch.c 的方向切换互斥；EXTI ISR 不操作 I2C。
  *
  * SENSOR 总线在调度器启动后仅由 sensor 任务串行访问；UI 只读快照。
- * 高优先级触摸任务使用独立 TP 总线，可暂停 SENSOR 时钟但不能访问其引脚。
+ * 触摸任务使用独立 TP 总线，优先级低于 sensor；不访问 SENSOR 引脚。
  * 若新增同总线使用者，须先改所有调用方的任务级互斥约定，禁止 ISR 直接访问。
  ******************************************************************************
  */
@@ -40,7 +40,13 @@ extern "C"
     } my_i2c_bus_t;
 
     /* ---------------------------------------------------------------- 底层时序 */
-    void my_i2c_init(my_i2c_bus_t bus);                      /* 初始化该总线 GPIO 并释放总线 */
+    void my_i2c_init(my_i2c_bus_t bus); /* 初始化该总线 GPIO 并释放总线 */
+    /* owner完成器件休眠后调用：释放SCL/SDA并设为模拟无上下拉；使用前重新init。 */
+    void my_i2c_suspend(my_i2c_bus_t bus);
+    /* 仅一笔事务首次START前调用：线路非空闲时最多恢复一次；0=可开始，1=总线仍故障。 */
+    uint8_t my_i2c_prepare(my_i2c_bus_t bus);
+    /* 释放SDA，最多9个时钟+STOP；每次等待SCL拉高均有界。TP调用前后失效方向缓存。 */
+    uint8_t my_i2c_recover(my_i2c_bus_t bus);
     void my_i2c_start(my_i2c_bus_t bus);                     /* 起始信号：SCL 高期间 SDA 下降沿 */
     void my_i2c_stop(my_i2c_bus_t bus);                      /* 停止信号：SCL 高期间 SDA 上升沿 */
     uint8_t my_i2c_wait_ack(my_i2c_bus_t bus);               /* 等 slave ACK：0=ACK, 1=NACK；返回时 SDA 保持输入释放 */

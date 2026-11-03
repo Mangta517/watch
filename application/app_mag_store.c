@@ -6,14 +6,17 @@
  */
 #include "app_mag_store.h"
 #include "bl24c02.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "main.h"
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
 
-#define MAG_STORE_MAGIC        0x3147414DU /* 小端字符MAG1 */
-#define MAG_STORE_RECORD_BYTES 36U
-#define MAG_STORE_CRC_OFFSET   32U
-#define MAG_STORE_SLOT_BYTES   48U
+#define MAG_STORE_MAGIC        0x3147414D /* 小端字符MAG1 */
+#define MAG_STORE_RECORD_BYTES 36
+#define MAG_STORE_CRC_OFFSET   32
+#define MAG_STORE_SLOT_BYTES   48
 
 typedef char mag_store_float_must_be_32_bits[(sizeof(float) == 4) ? 1 : -1];
 
@@ -41,13 +44,13 @@ static uint32_t mag_store_crc(const uint8_t *data, uint16_t length)
         crc ^= data[i];
         for (bit = 0; bit < 8; ++bit)
         {
-            if (crc & 1U)
+            if (crc & 1)
             {
                 crc = (crc >> 1) ^ 0xEDB88320U;
             }
             else
             {
-                crc = (crc >> 1) ^ 0U;
+                crc = (crc >> 1) ^ 0;
             }
         }
     }
@@ -91,7 +94,7 @@ static uint8_t mag_store_decode(const uint8_t *record, app_mag_calibration_struc
     if (mag_store_get_u32(record) != MAG_STORE_MAGIC ||
         mag_store_get_u32(record + MAG_STORE_CRC_OFFSET) != mag_store_crc(record, MAG_STORE_CRC_OFFSET))
     {
-        return 0;
+        return 1;
     }
     for (i = 0; i < 3; ++i)
     {
@@ -102,10 +105,10 @@ static uint8_t mag_store_decode(const uint8_t *record, app_mag_calibration_struc
     }
     if (!mag_store_values_valid(&candidate))
     {
-        return 0;
+        return 1;
     }
     *calibration = candidate;
-    return 1;
+    return 0;
 }
 
 /* 两份都有效时按无符号序号差选择较新记录，兼容32位序号回绕。 */
@@ -137,7 +140,7 @@ app_mag_store_result app_mag_store_load(app_mag_calibration_struct *calibration)
     {
         if (bl24c02_read(i * MAG_STORE_SLOT_BYTES, record[i], MAG_STORE_RECORD_BYTES) == 0)
         {
-            valid[i] = mag_store_decode(record[i], &candidate);
+            valid[i] = mag_store_decode(record[i], &candidate) == 0;
         }
         else
         {
@@ -159,38 +162,105 @@ app_mag_store_result app_mag_store_load(app_mag_calibration_struct *calibration)
     return APP_MAG_STORE_OK;
 }
 
-app_mag_store_result app_mag_store_save(const app_mag_calibration_struct *calibration)
+/* sensor串行推进；两份旧记录读完后才选择写入另一槽位。 */
+static struct
 {
+    bl24c02_transfer_struct io;
+    app_mag_calibration_struct value;
     uint8_t record[2][MAG_STORE_RECORD_BYTES], verify[MAG_STORE_RECORD_BYTES], valid[2];
-    uint8_t i, latest, target;
-    uint32_t sequence = 1;
-    app_mag_calibration_struct candidate;
+    uint32_t started_ms;
+    uint16_t address;
+    uint8_t phase, target;
+    app_mag_store_result result;
+} s_save;
+
+app_mag_store_result app_mag_store_save_begin(const app_mag_calibration_struct *calibration)
+{
+    if (s_save.result == APP_MAG_STORE_BUSY)
+    {
+        return APP_MAG_STORE_BUSY;
+    }
     if (calibration == NULL || !mag_store_values_valid(calibration))
     {
         return APP_MAG_STORE_ERROR;
     }
-    for (i = 0; i < 2; ++i)
+    s_save.value = *calibration;
+    s_save.started_ms = HAL_GetTick();
+    s_save.phase = 0;
+    s_save.result = APP_MAG_STORE_BUSY;
+    bl24c02_transfer_begin(&s_save.io, 0, s_save.record[0], MAG_STORE_RECORD_BYTES, 0);
+    return s_save.result;
+}
+
+app_mag_store_result app_mag_store_save_step(void)
+{
+    app_mag_calibration_struct candidate;
+    uint32_t sequence = 1;
+    uint8_t latest, result;
+    if (s_save.result != APP_MAG_STORE_BUSY)
     {
-        /* 保存前必须读到两个槽位，不能把通信失败误当作空槽而覆盖旧记录。 */
-        if (bl24c02_read(i * MAG_STORE_SLOT_BYTES, record[i], MAG_STORE_RECORD_BYTES) != 0)
+        return s_save.result;
+    }
+    result = bl24c02_transfer_step(&s_save.io);
+    if (result == 2)
+    {
+        return APP_MAG_STORE_BUSY;
+    }
+    if (result != 0)
+    {
+        s_save.result = APP_MAG_STORE_ERROR;
+        return s_save.result;
+    }
+    if (s_save.phase < 2)
+    {
+        s_save.valid[s_save.phase] = mag_store_decode(s_save.record[s_save.phase], &candidate) == 0;
+        if (s_save.phase++ == 0)
         {
-            return APP_MAG_STORE_ERROR;
+            bl24c02_transfer_begin(&s_save.io, MAG_STORE_SLOT_BYTES, s_save.record[1], MAG_STORE_RECORD_BYTES, 0);
+            return APP_MAG_STORE_BUSY;
         }
-        valid[i] = mag_store_decode(record[i], &candidate);
+        s_save.target = 0;
+        if (s_save.valid[0] || s_save.valid[1])
+        {
+            latest = mag_store_latest(s_save.record[0], s_save.record[1], s_save.valid);
+            sequence = mag_store_get_u32(s_save.record[latest] + 4) + 1;
+            s_save.target = latest ^ 1;
+        }
+        mag_store_encode(s_save.record[s_save.target], sequence, &s_save.value);
+        s_save.address = s_save.target * MAG_STORE_SLOT_BYTES;
+        bl24c02_transfer_begin(&s_save.io, s_save.address, s_save.record[s_save.target], MAG_STORE_RECORD_BYTES, 1);
     }
-    target = 0;
-    if (valid[0] || valid[1])
+    else if (s_save.phase == 2)
     {
-        latest = mag_store_latest(record[0], record[1], valid);
-        sequence = mag_store_get_u32(record[latest] + 4) + 1U;
-        target = latest ^ 1U;
+        s_save.phase = 3;
+        bl24c02_transfer_begin(&s_save.io, s_save.address, s_save.verify, MAG_STORE_RECORD_BYTES, 0);
     }
-    mag_store_encode(record[target], sequence, calibration);
-    if (bl24c02_write(target * MAG_STORE_SLOT_BYTES, record[target], MAG_STORE_RECORD_BYTES) != 0 ||
-        bl24c02_read(target * MAG_STORE_SLOT_BYTES, verify, MAG_STORE_RECORD_BYTES) != 0 ||
-        memcmp(verify, record[target], MAG_STORE_RECORD_BYTES) != 0 || !mag_store_decode(verify, &candidate))
+    else
     {
-        return APP_MAG_STORE_ERROR;
+        if (memcmp(s_save.verify, s_save.record[s_save.target], MAG_STORE_RECORD_BYTES) != 0 ||
+            mag_store_decode(s_save.verify, &candidate) != 0)
+        {
+            s_save.result = APP_MAG_STORE_ERROR;
+        }
+        else
+        {
+            s_save.result = APP_MAG_STORE_OK;
+        }
     }
-    return APP_MAG_STORE_OK;
+    return s_save.result;
+}
+
+/* 旧调用方兼容入口；运行期保存只使用begin/step。 */
+app_mag_store_result app_mag_store_save(const app_mag_calibration_struct *calibration)
+{
+    app_mag_store_result result = app_mag_store_save_begin(calibration);
+    while (result == APP_MAG_STORE_BUSY)
+    {
+        result = app_mag_store_save_step();
+        if (result == APP_MAG_STORE_BUSY)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+    return result;
 }

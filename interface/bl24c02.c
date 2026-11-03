@@ -5,14 +5,120 @@
  */
 #include "bl24c02.h"
 #include "my_i2c.h"
+#ifndef F411_BOOTLOADER
 #include "FreeRTOS.h"
 #include "task.h"
+#endif
+#include "main.h"
 #include <stddef.h>
 
-#define BL24C02_READY_TIMEOUT_MS 10U
+#define BL24C02_READY_TIMEOUT_MS 10
 
 static bl24c02_error s_error;
 static uint16_t s_address;
+
+void bl24c02_transfer_begin(bl24c02_transfer_struct *transfer, uint16_t address, uint8_t *data, uint16_t length, uint8_t write)
+{
+    transfer->data = data;
+    transfer->address = address;
+    transfer->page_address = address;
+    transfer->remaining = length;
+    transfer->write = write;
+    transfer->started_ms = HAL_GetTick();
+    transfer->phase = 0; /* 0等就绪、1传输、2完成、3失败。 */
+    s_error = BL24C02_ERROR_NONE;
+    s_address = address;
+    if (address > BL24C02_CAPACITY_BYTES || length > BL24C02_CAPACITY_BYTES - address || (data == NULL && length != 0))
+    {
+        s_error = BL24C02_ERROR_ARGUMENT;
+        transfer->phase = 3;
+    }
+}
+
+static uint8_t bl24c02_transfer_step_active(bl24c02_transfer_struct *transfer)
+{
+    uint16_t chunk;
+    uint8_t result;
+    s_address = transfer->address;
+    if (transfer->phase == 0 && transfer->write != 0)
+    {
+        s_address = transfer->page_address;
+    }
+    if (transfer->phase == 3)
+    {
+        return 1;
+    }
+    if (transfer->phase == 2)
+    {
+        return 0;
+    }
+    if (transfer->phase == 0)
+    {
+        /* 先探测再判超时，正常页写在下一拍(10ms)已完成，不因调度间隔误报。 */
+        if (my_i2c_probe(MY_I2C_BUS_EEPROM, BL24C02_ADDR) != 0)
+        {
+            if ((uint32_t)(HAL_GetTick() - transfer->started_ms) >= BL24C02_READY_TIMEOUT_MS)
+            {
+                s_error = BL24C02_ERROR_READY_TIMEOUT;
+                transfer->phase = 3;
+                return 1;
+            }
+            return 2;
+        }
+        if (transfer->remaining == 0)
+        {
+            transfer->phase = 2;
+            return 0;
+        }
+        transfer->phase = 1;
+        return 2;
+    }
+    chunk = BL24C02_PAGE_BYTES - transfer->address % BL24C02_PAGE_BYTES;
+    if (chunk > transfer->remaining)
+    {
+        chunk = transfer->remaining;
+    }
+    if (transfer->write != 0)
+    {
+        transfer->page_address = transfer->address;
+        result = my_i2c_write_bytes(MY_I2C_BUS_EEPROM, BL24C02_ADDR, (uint8_t)transfer->address, transfer->data, chunk);
+        s_error = BL24C02_ERROR_WRITE_NACK;
+    }
+    else
+    {
+        result = my_i2c_read_bytes(MY_I2C_BUS_EEPROM, BL24C02_ADDR, (uint8_t)transfer->address, transfer->data, chunk);
+        s_error = BL24C02_ERROR_READ_NACK;
+    }
+    if (result != 0)
+    {
+        transfer->phase = 3;
+        return 1;
+    }
+    s_error = BL24C02_ERROR_NONE;
+    transfer->address += chunk;
+    transfer->data += chunk;
+    transfer->remaining -= chunk;
+    if (transfer->write != 0)
+    {
+        transfer->phase = 0;
+        transfer->started_ms = HAL_GetTick();
+    }
+    else if (transfer->remaining == 0)
+    {
+        transfer->phase = 2;
+        return 0;
+    }
+    return 2;
+}
+
+uint8_t bl24c02_transfer_step(bl24c02_transfer_struct *transfer)
+{
+    uint8_t result;
+    my_i2c_init(MY_I2C_BUS_EEPROM);
+    result = bl24c02_transfer_step_active(transfer);
+    my_i2c_suspend(MY_I2C_BUS_EEPROM);
+    return result;
+}
 
 bl24c02_error bl24c02_get_error(uint16_t *address)
 {
@@ -25,6 +131,17 @@ bl24c02_error bl24c02_get_error(uint16_t *address)
 
 static uint8_t bl24c02_wait_ready(void)
 {
+#ifdef F411_BOOTLOADER
+    uint32_t start = HAL_GetTick();
+    while (my_i2c_probe(MY_I2C_BUS_EEPROM, BL24C02_ADDR) != 0)
+    {
+        if ((uint32_t)(HAL_GetTick() - start) >= BL24C02_READY_TIMEOUT_MS)
+        {
+            return 1;
+        }
+        HAL_Delay(1);
+    }
+#else
     TickType_t start = xTaskGetTickCount();
     while (my_i2c_probe(MY_I2C_BUS_EEPROM, BL24C02_ADDR) != 0)
     {
@@ -34,15 +151,17 @@ static uint8_t bl24c02_wait_ready(void)
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
+#endif
     return 0;
 }
 
 void bl24c02_init(void)
 {
     my_i2c_init(MY_I2C_BUS_EEPROM);
+    my_i2c_suspend(MY_I2C_BUS_EEPROM);
 }
 
-uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
+static uint8_t bl24c02_read_active(uint16_t address, uint8_t *data, uint16_t length)
 {
     s_error = BL24C02_ERROR_NONE;
     s_address = address;
@@ -68,7 +187,7 @@ uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
     return 0;
 }
 
-uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length)
+static uint8_t bl24c02_write_active(uint16_t address, const uint8_t *data, uint16_t length)
 {
     uint16_t chunk;
     s_error = BL24C02_ERROR_NONE;
@@ -110,4 +229,22 @@ uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length)
         }
     }
     return 0;
+}
+
+uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
+{
+    uint8_t result;
+    my_i2c_init(MY_I2C_BUS_EEPROM);
+    result = bl24c02_read_active(address, data, length);
+    my_i2c_suspend(MY_I2C_BUS_EEPROM);
+    return result;
+}
+
+uint8_t bl24c02_write(uint16_t address, const uint8_t *data, uint16_t length)
+{
+    uint8_t result;
+    my_i2c_init(MY_I2C_BUS_EEPROM);
+    result = bl24c02_write_active(address, data, length);
+    my_i2c_suspend(MY_I2C_BUS_EEPROM);
+    return result;
 }

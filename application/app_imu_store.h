@@ -7,7 +7,8 @@ typedef enum
 {
     APP_IMU_STORE_OK,
     APP_IMU_STORE_EMPTY,
-    APP_IMU_STORE_ERROR
+    APP_IMU_STORE_ERROR,
+    APP_IMU_STORE_BUSY
 } app_imu_store_result;
 
 /* EEPROM诊断type=5的阶段码；原保存返回值和记录格式保持不变。 */
@@ -25,5 +26,8 @@ typedef enum
 
 /* 仅sensor任务调用；load检查格式、量程和CRC，不进行上电静止校准。 */
 app_imu_store_result app_imu_store_load(mpu6050_offset_struct *offset);
+/* begin仅复制数据，step每轮至多一笔短事务；BUSY时继续采样。 */
+app_imu_store_result app_imu_store_save_begin(const mpu6050_offset_struct *offset);
+app_imu_store_result app_imu_store_save_step(void);
 app_imu_store_result app_imu_store_save(const mpu6050_offset_struct *offset);
 #endif

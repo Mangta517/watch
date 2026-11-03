@@ -47,7 +47,6 @@ void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
@@ -55,19 +54,19 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, POWER_EN_Pin|EEPROM_SDA_Pin|EEPROM_SCL_Pin|TP_RST_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, SENSOR_SDA_Pin|SENSOR_SCL_Pin|HEART_LED_Pin|TP_SDA_Pin
-                          |TP_SCL_Pin|LCD_CS_Pin|LCD_DC_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, WDG_EN_Pin|LCD_RST_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, SENSOR_SDA_Pin|SENSOR_SCL_Pin|HEART_LED_Pin
+                          |TP_SDA_Pin|TP_SCL_Pin|LCD_CS_Pin|LCD_DC_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_SET);
-
   /*Configure GPIO pin : POWER_EN_Pin */
   GPIO_InitStruct.Pin = POWER_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(POWER_EN_GPIO_Port, &GPIO_InitStruct);
 
@@ -83,23 +82,31 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(KEY_1_GPIO_Port, &GPIO_InitStruct);
 
+  /* WDI在正式启用前保持高阻，避免非A版TPS3823在上电复位期间收到跳变而锁存。 */
+  GPIO_InitStruct.Pin = WDI_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(WDI_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : WDG_EN_Pin SENSOR_SDA_Pin SENSOR_SCL_Pin
+                           TP_SDA_Pin TP_SCL_Pin */
+  GPIO_InitStruct.Pin = WDG_EN_Pin|SENSOR_SDA_Pin|SENSOR_SCL_Pin
+                          |TP_SDA_Pin|TP_SCL_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
   /*Configure GPIO pin : MPU6050_INT_Pin */
   GPIO_InitStruct.Pin = MPU6050_INT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(MPU6050_INT_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SENSOR_SDA_Pin SENSOR_SCL_Pin TP_SDA_Pin TP_SCL_Pin */
-  GPIO_InitStruct.Pin = SENSOR_SDA_Pin|SENSOR_SCL_Pin|TP_SDA_Pin|TP_SCL_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
   /*Configure GPIO pins : HEART_LED_Pin LCD_CS_Pin LCD_DC_Pin */
   GPIO_InitStruct.Pin = HEART_LED_Pin|LCD_CS_Pin|LCD_DC_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
@@ -130,6 +137,16 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LCD_RST_GPIO_Port, &GPIO_InitStruct);
+
+  /* 未使用引脚关闭数字输入；保留SWD、晶振、按键及所有外设引脚。 */
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_6|GPIO_PIN_7;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = GPIO_PIN_10;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI4_IRQn, 13, 0);

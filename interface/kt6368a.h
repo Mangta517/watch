@@ -17,26 +17,40 @@ extern "C"
 #endif
 
 #define KT6368A_BLE_NAME       "F411-Watch"
-#define KT6368A_RX_BUFFER_SIZE 1024U /* 环形缓冲有效容量1023字节 */
-#define KT6368A_TX_MAX_SIZE    512U
-#define KT6368A_BOOT_DELAY_MS  1200U /* 蓝牙模块上电等待时间 */
-#define KT6368A_AT_TIMEOUT_MS  500U
+#define KT6368A_RX_BUFFER_SIZE 1024 /* 环形缓冲有效容量1023字节 */
+#define KT6368A_TX_MAX_SIZE    512
+#define KT6368A_BOOT_DELAY_MS  1200 /* 蓝牙模块上电等待时间 */
+#define KT6368A_AT_TIMEOUT_MS  500
+#define KT6368A_RX_IDLE_MS     200
+#define KT6368A_RX_GAP         1
+#define KT6368A_RX_LOSS        2
+
+    typedef struct
+    {
+        uint32_t received_ms; /* UART实际到达的HAL tick；空队列时为最近活动时刻。 */
+        uint32_t sampled_ms;  /* 空队列的原子检查时刻，不用检查后推进的时间结算残帧。 */
+        uint8_t flags;        /* 本块之前的真实空闲/丢字节边界。 */
+    } kt6368a_rx_info_struct;
 
     /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。
- * 兼容旧调用方的阻塞入口；手表启动使用下方begin/service。上电、启动接收、配置BLE名称/BLE开/SPP开并查询验证。
+ * 兼容旧调用方的阻塞入口；手表启动使用下方begin/service。配置BLE名称、开启BLE并查询验证。
+ * 普通/升级APP关闭SPP；仅F411_BOOTLOADER升级模式开启SPP，返回APP后重新关闭。
  * 参数已匹配时不写配置；修改后重新上电。失败不阻止其他手表功能启动。
  * 本型号不配置CL/UT低功耗功能。返回HAL_OK/ERROR/TIMEOUT/BUSY。 */
     HAL_StatusTypeDef kt6368a_init(void);
     /* LVGL循环分步启动：20ms放电/1200ms上电/AT查询/参数保存均不长时间等待。
      * pending期间由本状态机独占UART RX，业务write返回BUSY。 */
     void kt6368a_init_begin(void);
+    /* LVGL任务的SPORT/ECO电源策略：0断电/停UART/释放PA9/PA10，1重新分步启动。 */
+    void kt6368a_set_enabled(uint8_t enabled);
     HAL_StatusTypeDef kt6368a_init_service(void);
     uint8_t kt6368a_init_is_pending(void);
     HAL_StatusTypeDef kt6368a_get_init_status(void);
 
     /* 电源切换/配置/收发接口须由同一个调用上下文串行使用，禁止在ISR调用。
- * power_on含HAL_Delay；power_off先将UART引脚置下拉输入，避免断电反向供电。
- * 上电不改参数；configure开启BLE和SPP并设置BLE名称，仅在手机未连接时调用；本板无法读取连接状态。
+ * power_on含HAL_Delay；power_off关闭USART1时钟/中断，UART引脚设为模拟无上下拉，避免反向供电。
+ * 上电不改参数；configure开启BLE并设置BLE名称，按APP/Bootloader选择关闭/开启SPP。
+ * 仅在手机未连接时调用；本板无法读取连接状态。
  * name为1~30字节且不含CR/LF。 */
     HAL_StatusTypeDef kt6368a_power_on(void);
     void kt6368a_power_off(void);
@@ -56,6 +70,14 @@ extern "C"
     uint8_t kt6368a_tx_is_busy(void);
     uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result);
     uint16_t kt6368a_read(uint8_t *data, uint16_t size);
+    /* 同一到达tick分块；遇空闲/错误边界另起一块，显示任务延迟不能切断消息。 */
+    uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct *info);
+    uint8_t kt6368a_rx_pending(void);
+    /* sensor写Flash时屏蔽中断轮询USART；errors为SR低4位，接收数据沿用原队列。 */
+    uint8_t kt6368a_rx_is_enabled(void);
+    void kt6368a_receive_polled(uint8_t byte, uint8_t errors);
+    /* 接收启动前注册；积累128字节时在UART ISR调用一次，Bootloader可不注册。 */
+    void kt6368a_set_rx_callback(void (*callback)(void));
     void kt6368a_flush_rx(void);
     uint32_t kt6368a_get_rx_dropped(void);
     uint32_t kt6368a_get_rx_errors(void);

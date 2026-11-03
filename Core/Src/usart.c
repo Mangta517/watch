@@ -84,13 +84,13 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
   /* USER CODE BEGIN USART1_MspInit 1 */
-    /* 蓝牙默认断电且电源被BL1551B接地，驱动上电前避免TX高电平反向供电。 */
-    if (HAL_GPIO_ReadPin(BLE_EN_GPIO_Port, BLE_EN_Pin) == GPIO_PIN_RESET)
-    {
-      GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-      GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-      HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-    }
+        /* 蓝牙默认断电且电源被BL1551B接地，驱动上电前避免TX高电平反向供电。 */
+        if (HAL_GPIO_ReadPin(BLE_EN_GPIO_Port, BLE_EN_Pin) == GPIO_PIN_RESET)
+        {
+            GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+            GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+            HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+        }
   /* USER CODE END USART1_MspInit 1 */
   }
 }

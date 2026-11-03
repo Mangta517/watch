@@ -1,5 +1,8 @@
 # ---- Keil MDK 构建产物 ----
 MDK-ARM/f411ceu6/
+MDK-ARM/f411ceu6_upgrade_app/
+MDK-ARM/bootloader/
+MDK-ARM/recovery/
 MDK-ARM/Objects/
 MDK-ARM/Listings/
 MDK-ARM/_f411ceu6/
@@ -37,3 +40,13 @@ MDK-ARM/.vscode/
 
 # 保留项目级 Claude 配置 (团队共享规则)
 !MDK-ARM/.claude/settings.json
+
+# ---- 本地临时文件与工具产物 (不入库) ----
+/work/
+/.tmp*.py
+/workbuddy-daily-credits/
+/qin-shi-huang-polar-bear.svg
+__pycache__/
+*.pyc
+/MDK-ARM/JLinkLog.txt
+/MDK-ARM/JLinkSettings.ini

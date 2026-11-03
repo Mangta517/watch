@@ -6,16 +6,16 @@
 #include "my_i2c.h"
 #include <stddef.h>
 
-#define EM7028_REG_PID       0x00U
-#define EM7028_REG_CONFIG    0x01U
-#define EM7028_REG_HRS1_CTRL 0x0DU
-#define EM7028_REG_INT_CTRL  0x0EU
-#define EM7028_REG_DATA_LOW  0x28U
-#define EM7028_REG_DATA_HIGH 0x29U
-#define EM7028_HRS1_EN       0x08U
-#define EM7028_MODE_MASK     0x88U /* HRS2_EN(bit7) + HRS1_EN(bit3)，不能同时开启 */
-#define EM7028_INT_EN        0x80U
-#define EM7028_HRS1_CTRL     0x47U /* 同款 OV-Watch 配置：gain=1，range=8，freq=000，res=11，IR_MODE=1 */
+#define EM7028_REG_PID       0x00
+#define EM7028_REG_CONFIG    0x01
+#define EM7028_REG_HRS1_CTRL 0x0D
+#define EM7028_REG_INT_CTRL  0x0E
+#define EM7028_REG_DATA_LOW  0x28
+#define EM7028_REG_DATA_HIGH 0x29
+#define EM7028_HRS1_EN       0x08
+#define EM7028_MODE_MASK     0x88 /* HRS2_EN(bit7) + HRS1_EN(bit3)，不能同时开启 */
+#define EM7028_INT_EN        0x80
+#define EM7028_HRS1_CTRL     0x47 /* 同款 OV-Watch 配置：gain=1，range=8，freq=000，res=11，IR_MODE=1 */
 
 static uint8_t em7028_ready;
 static uint8_t em7028_running;
@@ -38,6 +38,11 @@ static uint8_t em7028_write_reg(uint8_t reg, uint8_t value)
 static uint8_t em7028_read_reg(uint8_t reg, uint8_t *value)
 {
     em7028_last_fault.reg = reg;
+    if (my_i2c_prepare(MY_I2C_BUS_SENSOR) != 0)
+    {
+        em7028_last_fault.kind = EM7028_FAULT_READ;
+        return 1;
+    }
     my_i2c_start(MY_I2C_BUS_SENSOR);
     my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)(EM7028_ADDR << 1));
     if (my_i2c_wait_ack(MY_I2C_BUS_SENSOR) != 0)
@@ -55,8 +60,13 @@ static uint8_t em7028_read_reg(uint8_t reg, uint8_t *value)
     }
     my_i2c_stop(MY_I2C_BUS_SENSOR);
 
+    if (my_i2c_prepare(MY_I2C_BUS_SENSOR) != 0)
+    {
+        em7028_last_fault.kind = EM7028_FAULT_READ;
+        return 1;
+    }
     my_i2c_start(MY_I2C_BUS_SENSOR);
-    my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)((EM7028_ADDR << 1) | 1U));
+    my_i2c_write_byte(MY_I2C_BUS_SENSOR, (uint8_t)((EM7028_ADDR << 1) | 1));
     if (my_i2c_wait_ack(MY_I2C_BUS_SENSOR) != 0)
     {
         em7028_last_fault.kind = EM7028_FAULT_READ;
@@ -101,7 +111,7 @@ em7028_result em7028_init(void)
     HAL_GPIO_WritePin(HEART_LED_GPIO_Port, HEART_LED_Pin, GPIO_PIN_RESET);
 
     /* 偶发错误PID可重新读；三次仍不匹配才失败，识别成功前不写配置。 */
-    for (attempt = 0; attempt < 3U; ++attempt)
+    for (attempt = 0; attempt < 3; ++attempt)
     {
         if (em7028_read_reg(EM7028_REG_PID, &value) != 0)
         {
@@ -164,11 +174,22 @@ em7028_result em7028_start(void)
 
 em7028_result em7028_stop(void)
 {
+    uint8_t pid;
     HAL_GPIO_WritePin(HEART_LED_GPIO_Port, HEART_LED_Pin, GPIO_PIN_RESET);
     em7028_running = 0;
     if (em7028_ready == 0)
     {
-        return EM7028_NOT_READY;
+        /* 部分启动失败也可能留下HRS使能；确认器件身份后仍尝试关闭。 */
+        if (em7028_read_reg(EM7028_REG_PID, &pid) != 0)
+        {
+            return EM7028_ERROR;
+        }
+        if (pid != EM7028_PRODUCT_ID)
+        {
+            em7028_last_fault.kind = EM7028_FAULT_PID;
+            em7028_last_fault.value = pid;
+            return EM7028_ERROR;
+        }
     }
     if (em7028_set_mode(0) != 0)
     {

@@ -18,9 +18,10 @@ typedef struct
     uint8_t nack;
 } expected_transfer;
 
-static expected_transfer transfers[64];
+static expected_transfer transfers[256];
 static unsigned transfer_count, transfer_pos, read_pos, phase, delay_calls;
 static uint32_t now_ms;
+static uint32_t transfer_ms;
 static uint8_t locked;
 static int scheduler_state = taskSCHEDULER_NOT_STARTED;
 static unsigned task_delay_calls;
@@ -49,7 +50,7 @@ static void expect_status(uint8_t status, uint8_t nack)
 
 static uint8_t frame_crc(const uint8_t *data)
 {
-    uint16_t remainder = 0xFFU;
+    uint16_t remainder = 0xFF;
     unsigned i, bit;
     for (i = 0; i < 6; ++i)
     {
@@ -137,7 +138,7 @@ void my_i2c_start(my_i2c_bus_t bus)
 
 void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t data)
 {
-    assert(bus == MY_I2C_BUS_SENSOR && phase == 1 && data == 0x71U);
+    assert(bus == MY_I2C_BUS_SENSOR && phase == 1 && data == 0x71);
     phase = 2;
 }
 
@@ -152,7 +153,14 @@ uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
 {
     expected_transfer *transfer = &transfers[transfer_pos];
     assert(bus == MY_I2C_BUS_SENSOR && phase == 3 && transfer->nack == 0 && read_pos < transfer->size);
-    assert(ack == (read_pos == transfer->size - 1U ? 1U : 0U));
+    if (read_pos == transfer->size - 1U)
+    {
+        assert(ack == 1);
+    }
+    else
+    {
+        assert(ack == 0);
+    }
     return transfer->data[read_pos++];
 }
 
@@ -162,14 +170,16 @@ void my_i2c_stop(my_i2c_bus_t bus)
     assert(transfers[transfer_pos].nack != 0 || read_pos == transfers[transfer_pos].size);
     ++transfer_pos;
     phase = 0;
+    now_ms += transfer_ms;
 }
 
 uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t address, uint8_t command, const uint8_t *data, uint16_t size)
 {
     expected_transfer *transfer;
-    assert(bus == MY_I2C_BUS_SENSOR && address == 0x38U && phase == 0 && locked == 0 && transfer_pos < transfer_count);
+    assert(bus == MY_I2C_BUS_SENSOR && address == 0x38 && phase == 0 && locked == 0 && transfer_pos < transfer_count);
     transfer = &transfers[transfer_pos++];
     assert(command == transfer->command && size == transfer->size && memcmp(data, transfer->data, size) == 0);
+    now_ms += transfer_ms;
     return transfer->nack;
 }
 
@@ -210,14 +220,14 @@ static void check_init_delays(void)
         expect_status(0x00, 0);
         expect_command(0xBE, 0x08, 0);
         expect_status(0x08, 0);
-        assert(aht21_init() == AHT21_OK && now_ms - started >= 50U);
+        assert(aht21_init() == AHT21_OK && now_ms - started >= 50);
         if (scheduler_state == taskSCHEDULER_RUNNING)
         {
-            assert(task_delay_calls - task_before == 2U && delay_calls == hal_before);
+            assert(task_delay_calls - task_before == 2 && delay_calls == hal_before);
         }
         else
         {
-            assert(delay_calls - hal_before == 2U && task_delay_calls == task_before);
+            assert(delay_calls - hal_before == 2 && task_delay_calls == task_before);
         }
     }
     scheduler_state = taskSCHEDULER_NOT_STARTED;
@@ -277,38 +287,38 @@ static void check_service(void)
     app_aht21_service();
     app_aht21_get_snapshot(&snapshot);
     assert(snapshot.valid != 0 && snapshot.measuring == 0 && snapshot.sample_count == 1 && snapshot.sample_ms == 120);
-    now_ms = 2039;
+    now_ms = APP_AHT21_PERIOD_MS + 39;
     app_aht21_service();
-    now_ms = 2040;
+    now_ms = APP_AHT21_PERIOD_MS + 40;
     expect_command(0xAC, 0x33, 0);
     app_aht21_service();
-    now_ms = 2120;
+    now_ms = APP_AHT21_PERIOD_MS + 120;
     expect_frame(0x88, 0, 0, 0);
     app_aht21_service();
     app_aht21_get_snapshot(&snapshot);
     assert(snapshot.measuring != 0 && snapshot.valid != 0 && snapshot.sample_count == 1);
-    now_ms = 2240;
+    now_ms = APP_AHT21_PERIOD_MS + 240;
     expect_frame(0x88, 0, 0, 0);
     app_aht21_service();
     app_aht21_get_snapshot(&snapshot);
     assert(snapshot.result == AHT21_TIMEOUT && snapshot.valid == 0 && snapshot.measuring == 0);
-    now_ms = 4040;
+    now_ms = APP_AHT21_PERIOD_MS * 2 + 40;
     expect_command(0xAC, 0x33, 0);
     app_aht21_service();
-    now_ms = 4120;
+    now_ms = APP_AHT21_PERIOD_MS * 2 + 120;
     expect_frame(0x08, 0x80000, 0x60000, 1);
     app_aht21_service();
     app_aht21_get_snapshot(&snapshot);
     assert(snapshot.result == AHT21_CRC_ERROR && snapshot.valid == 0 && snapshot.sample_count == 1);
-    now_ms = 6040;
+    now_ms = APP_AHT21_PERIOD_MS * 3 + 40;
     expect_command(0xAC, 0x33, 1);
     app_aht21_service();
     app_aht21_get_snapshot(&snapshot);
     assert(snapshot.result == AHT21_I2C_ERROR && snapshot.valid == 0 && snapshot.measuring == 0);
-    now_ms = 8040;
+    now_ms = APP_AHT21_PERIOD_MS * 4 + 40;
     expect_command(0xAC, 0x33, 0);
     app_aht21_service();
-    now_ms = 8120;
+    now_ms = APP_AHT21_PERIOD_MS * 4 + 120;
     expect_frame(0x08, 0x40000, 0x20000, 0);
     app_aht21_service();
     app_aht21_get_snapshot(&snapshot);
@@ -321,12 +331,12 @@ static void check_service(void)
 static void check_tick_wrap(void)
 {
     app_aht21_struct snapshot;
-    now_ms = UINT32_MAX - 60U;
+    now_ms = UINT32_MAX - 60;
     expect_status(0x08, 0);
     app_aht21_init();
     expect_command(0xAC, 0x33, 0);
     app_aht21_service();
-    now_ms += 79U;
+    now_ms += 79;
     app_aht21_service();
     ++now_ms;
     expect_frame(0x08, 0x80000, 0x60000, 0);
@@ -335,15 +345,374 @@ static void check_tick_wrap(void)
     assert(snapshot.valid != 0 && snapshot.sample_count == 1);
 }
 
+static aht21_result checked_recover_step(void)
+{
+    unsigned before = transfer_pos, hal_waits = delay_calls, task_waits = task_delay_calls;
+    uint32_t before_ms = now_ms;
+    aht21_result result = aht21_recover_step(now_ms);
+    assert(transfer_pos - before <= 1 && now_ms == before_ms);
+    assert(delay_calls == hal_waits && task_delay_calls == task_waits);
+    return result;
+}
+
+static void check_recovery(void)
+{
+    now_ms = UINT32_MAX - 20;
+    aht21_recover_begin(now_ms);
+    now_ms += 39;
+    assert(checked_recover_step() == AHT21_BUSY);
+    ++now_ms;
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_status(0, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_command(0xBE, 0x08, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    now_ms += 9;
+    assert(checked_recover_step() == AHT21_BUSY);
+    ++now_ms;
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_status(0x08, 0);
+    assert(checked_recover_step() == AHT21_OK);
+    aht21_recover_begin(now_ms);
+    now_ms += 40;
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_status(0x88, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    now_ms += 959;
+    expect_status(0x88, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    ++now_ms;
+    assert(checked_recover_step() == AHT21_TIMEOUT);
+    aht21_recover_begin(now_ms);
+    now_ms += 40;
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_status(0, 0);
+    assert(checked_recover_step() == AHT21_BUSY);
+    expect_command(0xBE, 0x08, 1);
+    assert(checked_recover_step() == AHT21_I2C_ERROR);
+    puts("PASS: AHT21 recovery has minimum waits, one transaction per step, bounded BUSY and tick-wrap handling.");
+}
+
+static void check_service_recovery(void)
+{
+    app_aht21_struct snapshot;
+    unsigned waits;
+    now_ms = 0;
+    expect_status(0x88, 0);
+    app_aht21_init();
+    waits = delay_calls;
+    now_ms = APP_AHT21_PERIOD_MS + 39;
+    app_aht21_service();
+    now_ms = APP_AHT21_PERIOD_MS + 40;
+    app_aht21_service();
+    now_ms = APP_AHT21_PERIOD_MS + 80;
+    app_aht21_service();
+    expect_status(0, 0);
+    app_aht21_service();
+    expect_command(0xBE, 0x08, 0);
+    app_aht21_service();
+    now_ms = APP_AHT21_PERIOD_MS + 90;
+    app_aht21_service();
+    expect_status(0x08, 0);
+    app_aht21_service();
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms = APP_AHT21_PERIOD_MS + 170;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 1);
+    now_ms = APP_AHT21_PERIOD_MS * 2 + 90;
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms = APP_AHT21_PERIOD_MS * 2 + 170;
+    expect_frame(0, 0, 0, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(!snapshot.valid && snapshot.result == AHT21_CALIBRATION_ERROR);
+    now_ms = APP_AHT21_PERIOD_MS * 3 + 169;
+    app_aht21_service();
+    now_ms = APP_AHT21_PERIOD_MS * 3 + 170;
+    app_aht21_service();
+    now_ms = APP_AHT21_PERIOD_MS * 3 + 210;
+    app_aht21_service();
+    expect_status(0x08, 0);
+    app_aht21_service();
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms = APP_AHT21_PERIOD_MS * 3 + 290;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 2 && delay_calls == waits);
+    puts("PASS: failed boot and lost calibration recover through the service after cooldown without blocking other sensors.");
+    app_aht21_set_period(APP_AHT21_SLEEP_PERIOD_MS);
+    now_ms += APP_AHT21_SLEEP_PERIOD_MS - 1;
+    app_aht21_service();
+    ++now_ms;
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms += 80;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 3);
+    app_aht21_set_period(APP_AHT21_PERIOD_MS);
+    now_ms += APP_AHT21_PERIOD_MS;
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms += 80;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 4);
+    puts("PASS: AHT21 switches to 10min sleep sampling and resumes the normal 1s trigger/read cycle.");
+}
+
+static void check_slow_service_recovery(void)
+{
+    static const uint32_t periods[] = {20, 40, 100};
+    app_aht21_struct snapshot;
+    uint32_t i, wrap, started, before_ms;
+    unsigned before, waits;
+    for (wrap = 0; wrap < 2; ++wrap)
+    {
+        for (i = 0; i < sizeof(periods) / sizeof(periods[0]); ++i)
+        {
+            now_ms = 0;
+            if (wrap != 0)
+            {
+                now_ms = UINT32_MAX - APP_AHT21_SLEEP_PERIOD_MS - 100;
+            }
+            expect_status(0x88, 0);
+            app_aht21_init();
+            app_aht21_set_period(APP_AHT21_SLEEP_PERIOD_MS);
+            now_ms += APP_AHT21_SLEEP_PERIOD_MS;
+            started = now_ms;
+            waits = delay_calls + task_delay_calls;
+            expect_status(0, 0);
+            expect_command(0xBE, 0x08, 0);
+            expect_status(0x08, 0);
+            expect_command(0xAC, 0x33, 0);
+            expect_frame(0x08, 0x80000, 0x60000, 0);
+            do
+            {
+                before = transfer_pos;
+                before_ms = now_ms;
+                app_aht21_service();
+                assert(transfer_pos - before <= 1 && now_ms == before_ms);
+                app_aht21_get_snapshot(&snapshot);
+                assert(snapshot.result != AHT21_TIMEOUT);
+                now_ms += periods[i];
+            } while (snapshot.valid == 0 && (uint32_t)(now_ms - started) < 1600);
+            assert(snapshot.valid != 0 && snapshot.sample_count == 1);
+            assert(transfer_pos == transfer_count && delay_calls + task_delay_calls == waits);
+        }
+    }
+    puts("PASS: 20/40/100ms recovery cadence completes calibration and one sample inside the sleep window without blocking.");
+}
+
+static void check_sleep_windows(void)
+{
+    app_aht21_struct snapshot;
+    uint32_t wrap, cycle, offset, started, window;
+    unsigned before;
+    for (wrap = 0; wrap < 2; ++wrap)
+    {
+        assert(transfer_pos == transfer_count);
+        transfer_count = transfer_pos = 0;
+        now_ms = 0;
+        if (wrap != 0)
+        {
+            now_ms = UINT32_MAX - APP_AHT21_SLEEP_PERIOD_MS - 100;
+        }
+        expect_status(0x08, 0);
+        app_aht21_init();
+        app_aht21_set_period(APP_AHT21_SLEEP_PERIOD_MS);
+        started = now_ms;
+        transfer_ms = 1;
+        for (cycle = 1; cycle <= 24; ++cycle)
+        {
+            window = started + cycle * APP_AHT21_SLEEP_PERIOD_MS;
+            expect_command(0xAC, 0x33, 0);
+            expect_frame(0x08, 0x80000 + cycle, 0x60000 + cycle, 0);
+            before = transfer_pos;
+            for (offset = 0; offset <= 1600; offset += 100)
+            {
+                now_ms = window + offset;
+                app_aht21_service();
+            }
+            app_aht21_get_snapshot(&snapshot);
+            assert(snapshot.valid != 0 && snapshot.measuring == 0);
+            assert(snapshot.sample_count == cycle && snapshot.sample.humidity_raw == 0x80000 + cycle);
+            assert(snapshot.sample_ms - window <= 200);
+            assert(transfer_pos - before == 2 && transfer_pos == transfer_count);
+        }
+        transfer_ms = 0;
+    }
+    puts("PASS: 24 fixed 10min sleep windows each publish a fresh sample despite I2C tick cost, including tick wrap.");
+}
+
+static void check_expired_conversion(void)
+{
+    app_aht21_struct snapshot;
+    uint32_t wrap, started;
+    unsigned before;
+    for (wrap = 0; wrap < 2; ++wrap)
+    {
+        now_ms = 0;
+        if (wrap != 0)
+        {
+            now_ms = UINT32_MAX - 100;
+        }
+        expect_status(0x08, 0);
+        app_aht21_init();
+        expect_command(0xAC, 0x33, 0);
+        app_aht21_service();
+        started = now_ms;
+        before = transfer_pos;
+        now_ms += 201;
+        app_aht21_service();
+        app_aht21_get_snapshot(&snapshot);
+        assert(transfer_pos == before && snapshot.result == AHT21_TIMEOUT);
+        assert(snapshot.valid == 0 && snapshot.measuring == 0 && snapshot.sample_count == 0);
+        now_ms = started + APP_AHT21_PERIOD_MS;
+        expect_command(0xAC, 0x33, 0);
+        app_aht21_service();
+        now_ms += 80;
+        expect_frame(0x08, 0x80000, 0x60000, 0);
+        app_aht21_service();
+        app_aht21_get_snapshot(&snapshot);
+        assert(snapshot.valid != 0 && snapshot.sample_count == 1);
+        now_ms = started + APP_AHT21_PERIOD_MS * 2;
+        expect_command(0xAC, 0x33, 0);
+        app_aht21_service();
+        before = transfer_pos;
+        now_ms += APP_AHT21_SLEEP_PERIOD_MS;
+        app_aht21_service();
+        app_aht21_get_snapshot(&snapshot);
+        assert(transfer_pos == before && snapshot.result == AHT21_TIMEOUT);
+        assert(snapshot.valid == 0 && snapshot.sample_count == 1 && snapshot.sample_ms == started + APP_AHT21_PERIOD_MS + 80);
+        ++now_ms;
+        expect_command(0xAC, 0x33, 0);
+        app_aht21_service();
+        now_ms += 80;
+        expect_frame(0x08, 0x40000, 0x20000, 0);
+        app_aht21_service();
+        app_aht21_get_snapshot(&snapshot);
+        assert(snapshot.valid != 0 && snapshot.sample_count == 2);
+        before = transfer_pos;
+        app_aht21_service();
+        assert(transfer_pos == before); /* 跳过多个周期后不连续补跑旧测量。 */
+    }
+    puts("PASS: expired conversions are rejected without reading or refreshing sample time; the next period recovers across tick wrap.");
+}
+
+static void check_sleep_recovery_phase(void)
+{
+    app_aht21_struct snapshot;
+    uint32_t started, cycle, window, offset;
+    expect_status(0x88, 0);
+    app_aht21_init();
+    app_aht21_set_period(APP_AHT21_SLEEP_PERIOD_MS);
+    started = now_ms;
+    transfer_ms = 1;
+    for (cycle = 1; cycle <= 3; ++cycle)
+    {
+        window = started + cycle * APP_AHT21_SLEEP_PERIOD_MS;
+        if (cycle == 1)
+        {
+            expect_status(0x08, 0);
+        }
+        expect_command(0xAC, 0x33, 0);
+        expect_frame(0x08, 0x80000, 0x60000, 0);
+        for (offset = 0; offset <= 1600; offset += 100)
+        {
+            now_ms = window + offset;
+            app_aht21_service();
+        }
+        app_aht21_get_snapshot(&snapshot);
+        assert(snapshot.valid != 0 && snapshot.sample_count == cycle);
+        assert(snapshot.sample_ms - window <= 500);
+        if (cycle > 1)
+        {
+            assert(snapshot.sample_ms - window <= 200);
+        }
+        assert(transfer_pos == transfer_count);
+    }
+    transfer_ms = 0;
+    puts("PASS: recovery finishes inside one sleep window and preserves the following fixed 10min deadlines.");
+}
+
+static void check_mode_period(void)
+{
+    app_aht21_struct snapshot;
+    unsigned before;
+    expect_status(0x08, 0);
+    app_aht21_init();
+    app_aht21_set_period(APP_AHT21_SLEEP_PERIOD_MS);
+    before = transfer_pos;
+    now_ms += APP_AHT21_SLEEP_PERIOD_MS - 1;
+    app_aht21_service();
+    assert(transfer_pos == before);
+    ++now_ms;
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms += 80;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_set_period(APP_AHT21_PERIOD_MS);
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms += 80;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 2);
+    app_aht21_set_period(APP_AHT21_SLEEP_PERIOD_MS);
+    before = transfer_pos;
+    now_ms += APP_AHT21_PERIOD_MS;
+    app_aht21_service();
+    assert(transfer_pos == before);
+    now_ms += APP_AHT21_SLEEP_PERIOD_MS - APP_AHT21_PERIOD_MS;
+    expect_command(0xAC, 0x33, 0);
+    app_aht21_service();
+    now_ms += 20;
+    app_aht21_set_period(APP_AHT21_PERIOD_MS);
+    before = transfer_pos;
+    app_aht21_service();
+    assert(transfer_pos == before);
+    now_ms += 60;
+    expect_frame(0x08, 0x80000, 0x60000, 0);
+    app_aht21_service();
+    app_aht21_get_snapshot(&snapshot);
+    assert(snapshot.valid && snapshot.sample_count == 3);
+    puts("PASS: 10min sleep cadence requests a fresh conversion immediately on 1s awake entry and preserves an in-flight conversion.");
+}
+
 int main(void)
 {
+    assert(APP_AHT21_PERIOD_MS == 1000 && APP_AHT21_SLEEP_PERIOD_MS == 600000);
     check_init();
     check_init_delays();
     check_frames();
     check_service();
     check_tick_wrap();
+    check_recovery();
+    check_service_recovery();
+    check_slow_service_recovery();
+    check_sleep_windows();
+    check_expired_conversion();
+    check_sleep_recovery_phase();
+    check_mode_period();
     assert(transfer_pos == transfer_count && phase == 0 && locked == 0);
-    puts("PASS: AHT21 direct reads/ACK/STOP, initialization, CRC, 20-bit conversion, 80ms wait, 2s sampling, timeout/recovery and tick "
+    puts("PASS: AHT21 direct reads/ACK/STOP, initialization, CRC, 20-bit conversion, 80ms wait, 1s sampling, timeout/recovery and tick "
          "wrap.");
+    return 0;
+}
+
+uint8_t my_i2c_prepare(my_i2c_bus_t bus)
+{
+    assert(bus == MY_I2C_BUS_SENSOR && phase == 0);
     return 0;
 }

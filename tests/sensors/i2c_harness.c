@@ -13,6 +13,7 @@ static unsigned input_pos, read_edges, response_edges;
 static uint8_t read_data, slave_low, check_stop, nack_pending;
 static uint8_t expected_ack;
 static unsigned sda_init_calls, redundant_sda_inits;
+static unsigned analog_pins;
 
 void host_i2c_nop(void)
 {
@@ -42,6 +43,17 @@ void __set_PRIMASK(uint32_t mask)
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
     assert(port == GPIOB && primask == 1);
+    if (config->Mode == GPIO_MODE_ANALOG)
+    {
+        assert(config->Pull == GPIO_NOPULL);
+        assert(config->Pin == SENSOR_SCL_Pin || config->Pin == SENSOR_SDA_Pin);
+        if (config->Pin == SENSOR_SDA_Pin)
+        {
+            sda_mode = config->Mode;
+        }
+        ++analog_pins;
+        return;
+    }
     if (config->Pin == SENSOR_SDA_Pin)
     {
         assert(config->Mode == GPIO_MODE_INPUT || config->Mode == GPIO_MODE_OUTPUT_OD);
@@ -70,7 +82,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
         {
             if (check_stop != 0)
             {
-                assert(nop_count - sda_low_tick >= 80U);
+                assert(nop_count - sda_low_tick >= 80);
             }
             scl_high_tick = nop_count;
             if (read_data != 0)
@@ -92,7 +104,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
                 nack_pending = 0;
             }
         }
-        if (scl == GPIO_PIN_SET && state == GPIO_PIN_RESET && input_pos >= 3U)
+        if (scl == GPIO_PIN_SET && state == GPIO_PIN_RESET && input_pos >= 3)
         {
             uint8_t was_reading = read_data;
             read_data = input_pos < sizeof(input_bits);
@@ -100,7 +112,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
             {
                 /* 最后一位为0时，从机可以在下降沿后继续短暂保持低电平。 */
                 slave_low = 1;
-                slave_release_tick = nop_count + 8U;
+                slave_release_tick = nop_count + 8;
             }
             else
             {
@@ -119,7 +131,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
         }
         if (check_stop != 0 && sda_latch == GPIO_PIN_RESET && state == GPIO_PIN_SET && scl == GPIO_PIN_SET)
         {
-            assert(nop_count - scl_high_tick >= 80U);
+            assert(nop_count - scl_high_tick >= 80);
         }
         sda_latch = state;
     }
@@ -134,7 +146,14 @@ GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
     {
         nack_pending = 1;
     }
-    return input_bits[input_pos - 1] != 0 ? GPIO_PIN_SET : GPIO_PIN_RESET;
+    if (input_bits[input_pos - 1] != 0)
+    {
+        return GPIO_PIN_SET;
+    }
+    else
+    {
+        return GPIO_PIN_RESET;
+    }
 }
 
 static void read_pid(uint8_t pid, uint8_t ack)
@@ -167,6 +186,16 @@ static void read_pid(uint8_t pid, uint8_t ack)
 int main(int argc, char **argv)
 {
     my_i2c_init(MY_I2C_BUS_SENSOR);
+    if (argc > 1 && strcmp(argv[1], "suspend") == 0)
+    {
+        my_i2c_suspend(MY_I2C_BUS_SENSOR);
+        assert(analog_pins == 2 && primask == 0 && scl == GPIO_PIN_SET && sda_latch == GPIO_PIN_SET);
+        my_i2c_init(MY_I2C_BUS_SENSOR);
+        assert(sda_mode == GPIO_MODE_OUTPUT_OD);
+        read_pid(0x36, 1);
+        puts("PASS: only SENSOR SCL/SDA enter analog/no-pull, direction cache restores and real transaction resumes.");
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "stop") == 0)
     {
         my_i2c_start(MY_I2C_BUS_SENSOR);

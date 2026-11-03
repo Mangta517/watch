@@ -86,7 +86,7 @@ extern "C"
 #define MPU6050_ACCEL_RANGE      MPU6050_ACCEL_RANGE_4G
 #define MPU6050_GYRO_LSB_PER_DPS 32.8f
 #define MPU6050_ACCEL_LSB_PER_G  8192
-#define MPU6050_SAMPLE_PERIOD_MS 10U  /* DLPF启用时1kHz/(9+1)=100Hz */
+#define MPU6050_SAMPLE_PERIOD_MS 10   /* DLPF启用时1kHz/(9+1)=100Hz */
 #define MPU6050_DLPF_CFG         0x03 /* 陀螺仪42Hz、加速度44Hz */
 
     /* ------------------------------------------------------------ 数据结构 */
@@ -115,6 +115,14 @@ extern "C"
 
     /* 初始化 MPU6050 (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR)) */
     uint8_t my_mpu6050_init(void);
+    /* 仅sensor任务：10/20/40ms为六轴100/50/25Hz，200ms为加速度5Hz低功耗循环。 */
+    uint8_t my_mpu6050_set_sample_period(uint32_t period_ms);
+    /* accel_reference=1连续采加速度，陀螺仪/温度待机；200ms仍使用原5Hz循环。 */
+    uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference);
+    uint8_t my_mpu6050_set_sleep(uint8_t sleeping);
+    /* 仅sensor任务：begin使数据无效，step每拍至多一笔事务；0=就绪，1=失败冷却，2=推进中。 */
+    void my_mpu6050_recover_begin(void);
+    uint8_t my_mpu6050_recover_step(uint32_t now_ms);
 
     typedef enum
     {
@@ -144,20 +152,35 @@ extern "C"
     void my_mpu6050_zero_offset_progress(uint16_t *stable, uint16_t *average);
     enum
     {
-        MPU_CAL_DIAG_AX, MPU_CAL_DIAG_AY, MPU_CAL_DIAG_AZ,
-        MPU_CAL_DIAG_DX, MPU_CAL_DIAG_DY, MPU_CAL_DIAG_DZ,
-        MPU_CAL_DIAG_LEVEL_LIMIT, MPU_CAL_DIAG_STILL_LIMIT,
-        MPU_CAL_DIAG_REJECT, MPU_CAL_DIAG_REJECT_SEEN,
-        MPU_CAL_DIAG_ACCEPTED, MPU_CAL_DIAG_REJECTED,
-        MPU_CAL_DIAG_STABLE_PEAK, MPU_CAL_DIAG_INTERVAL_MS,
-        MPU_CAL_DIAG_CHECKED, MPU_CAL_DIAG_STATE,
+        MPU_CAL_DIAG_AX,
+        MPU_CAL_DIAG_AY,
+        MPU_CAL_DIAG_AZ,
+        MPU_CAL_DIAG_DX,
+        MPU_CAL_DIAG_DY,
+        MPU_CAL_DIAG_DZ,
+        MPU_CAL_DIAG_LEVEL_LIMIT,
+        MPU_CAL_DIAG_STILL_LIMIT,
+        MPU_CAL_DIAG_REJECT,
+        MPU_CAL_DIAG_REJECT_SEEN,
+        MPU_CAL_DIAG_ACCEPTED,
+        MPU_CAL_DIAG_REJECTED,
+        MPU_CAL_DIAG_STABLE_PEAK,
+        MPU_CAL_DIAG_INTERVAL_MS,
+        MPU_CAL_DIAG_CHECKED,
+        MPU_CAL_DIAG_STATE,
         MPU_CAL_DIAG_FIELD_COUNT
     };
     enum
     {
-        MPU_CAL_REJECT_DX = 1U, MPU_CAL_REJECT_DY = 2U, MPU_CAL_REJECT_DZ = 4U,
-        MPU_CAL_REJECT_AX = 8U, MPU_CAL_REJECT_AY = 16U, MPU_CAL_REJECT_AZ = 32U,
-        MPU_CAL_REJECT_READ = 64U, MPU_CAL_REJECT_WAIT_TIMEOUT = 128U, MPU_CAL_REJECT_AVERAGE_TIMEOUT = 256U
+        MPU_CAL_REJECT_DX = 1,
+        MPU_CAL_REJECT_DY = 2,
+        MPU_CAL_REJECT_DZ = 4,
+        MPU_CAL_REJECT_AX = 8,
+        MPU_CAL_REJECT_AY = 16,
+        MPU_CAL_REJECT_AZ = 32,
+        MPU_CAL_REJECT_READ = 64,
+        MPU_CAL_REJECT_WAIT_TIMEOUT = 128,
+        MPU_CAL_REJECT_AVERAGE_TIMEOUT = 256
     };
     /* 仅sensor任务读取；固定16字段用于诊断type=6，不增加采样或改变校准判定。 */
     const uint32_t *my_mpu6050_zero_offset_diag(void);
@@ -176,8 +199,11 @@ extern "C"
     uint8_t my_mpu6050_get_gyro(Gyro_struct *gyro);
     /* 读取三轴加速度(已减零偏，抖动较大，必要时上层再滤波) */
     uint8_t my_mpu6050_get_accel(Accel_struct *accel);
-    /* 一次突发读取 INT_STATUS+加速度+温度+陀螺仪共 15 字节；仅 sensor 任务调用 */
+/* 0=新帧，1=通信/配置失败，2=未就绪；失败或无新帧不覆盖输出。 */
+#define MPU6050_DATA_NOT_READY 2
+    /* 常规轮询状态+六轴，低功耗只读加速度并将角速度置零；DATA_RDY有效才发布。 */
     uint8_t my_mpu6050_get_data(Accel_Gyro_struct *accel_gyro);
+    uint32_t my_mpu6050_sample_ms(void); /* 最近有效帧的HAL读取开始时刻，非硬件时间戳。 */
     /* 读片内温度传感器, 输出 0.01℃ 定点 (T = raw/340 + 36.53) */
     uint8_t my_mpu6050_get_temp(int16_t *temp_01c);
 

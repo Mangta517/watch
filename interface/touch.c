@@ -18,6 +18,7 @@
   ******************************************************************************
 ***/
 #include "touch.h"
+#include "my_i2c.h"
 #include "stm32f4xx_hal.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -58,7 +59,7 @@ static void tp_delay_ms(uint32_t ms)
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
         /* 多等一拍，避免调用落在tick末尾时缩短复位/引导等待时间。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1U);
+        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
     }
     else
     {
@@ -67,11 +68,11 @@ static void tp_delay_ms(uint32_t ms)
 }
 
 /******************************************************************************
- * 位周期延时 (~3µs/半周期 @100MHz, volatile 防 -O3 吞掉)
+ * APP使用64MHz的51次位延时；volatile防止优化掉，实际总线频率需实测。
  *****************************************************************************/
 static void tp_delay(void)
 {
-    volatile uint32_t n = 80;
+    volatile uint32_t n = 51;
     while (n--)
     {
     }
@@ -113,8 +114,8 @@ static void tp_sda_in(void)
  *****************************************************************************/
 static void iic_start(void)
 {
-    tp_sda_out();
     TP_SDA_1();
+    tp_sda_out();
     TP_SCL_1();
     tp_delay();
     TP_SDA_0(); /* SCL 高电平期间 SDA 下降沿 = START */
@@ -125,8 +126,8 @@ static void iic_start(void)
 
 static void iic_stop(void)
 {
-    tp_sda_out();
     TP_SDA_0();
+    tp_sda_out();
     tp_delay();
     TP_SCL_1();
     tp_delay();
@@ -170,7 +171,7 @@ static uint8_t iic_write_byte(uint8_t dat)
     }
     TP_SCL_0();
     tp_delay();
-    tp_sda_out();
+    /* ACK 后保持释放；读地址后的下一位已由从机发送。 */
     return nack;
 }
 
@@ -195,26 +196,26 @@ static uint8_t iic_read_byte(uint8_t ack)
         TP_SCL_0();
         tp_delay();
     }
-    tp_sda_out();
     if (ack)
     {
-        TP_SDA_0();
+        TP_SDA_0(); /* 先预置低电平，再接管 SDA 发 ACK。 */
+        tp_sda_out();
     }
     else
     {
-        TP_SDA_1();
+        tp_sda_in(); /* 最后一字节的 NACK 由释放 SDA 形成。 */
     }
     tp_delay();
     TP_SCL_1();
     tp_delay();
     TP_SCL_0();
+    tp_sda_in(); /* 第九拍结束即交还 SDA，允许从机准备下一字节。 */
     tp_delay();
-    TP_SDA_1();
     return dat;
 }
 
 /******************************************************************************
- * I2C 读写原语 (语义与 Watch 版 HAL_I2C_Mem_Read/Write 对齐, 地址用运行时值)
+ * I2C 读写原语 (0=成功、1=失败，地址用运行时值)
  *****************************************************************************/
 static uint8_t tp_read_regs_at(uint8_t addr8, uint8_t reg, uint8_t *buf, uint16_t len)
 {
@@ -224,18 +225,18 @@ static uint8_t tp_read_regs_at(uint8_t addr8, uint8_t reg, uint8_t *buf, uint16_
     if (iic_write_byte(addr8))
     {
         iic_stop();
-        return 0;
-    } /* 从机地址 NACK */
+        return 1;
+    }
     if (iic_write_byte(reg))
     {
         iic_stop();
-        return 0;
-    } /* 寄存器地址 NACK */
+        return 1;
+    }
     iic_start(); /* 重复起始, 转读 */
     if (iic_write_byte((uint8_t)(addr8 | 1)))
     {
         iic_stop();
-        return 0;
+        return 1;
     }
     for (i = 0; i < len; i++)
     {
@@ -249,7 +250,7 @@ static uint8_t tp_read_regs_at(uint8_t addr8, uint8_t reg, uint8_t *buf, uint16_
         }
     }
     iic_stop();
-    return 1;
+    return 0;
 }
 
 static uint8_t tp_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
@@ -263,36 +264,20 @@ static uint8_t tp_write_reg(uint8_t reg, uint8_t val)
     if (iic_write_byte(s_tp_addr8))
     {
         iic_stop();
-        return 0;
+        return 1;
     }
     if (iic_write_byte(reg))
     {
         iic_stop();
-        return 0;
+        return 1;
     }
     if (iic_write_byte(val))
     {
         iic_stop();
-        return 0;
+        return 1;
     }
     iic_stop();
-    return 1;
-}
-
-/* 总线看门狗恢复: 从机卡在应答中间把 SDA 拉死时, 补 9 个 SCL + STOP 释放 */
-static void iic_bus_recover(void)
-{
-    uint8_t i;
-
-    tp_sda_in(); /* 释放SDA，避免与卡在低电平的从机争用 */
-    for (i = 0; i < 9; i++)
-    {
-        TP_SCL_0();
-        tp_delay();
-        TP_SCL_1();
-        tp_delay();
-    }
-    iic_stop();
+    return 0;
 }
 
 /******************************************************************************
@@ -325,7 +310,7 @@ static uint8_t tp_probe(uint8_t retries_per_addr)
     {
         for (try_n = 0; try_n < retries_per_addr; try_n++)
         {
-            if (tp_read_regs_at(addrs[a], REG_ChipID, &id, 1) && id != 0x00 && id != 0xFF)
+            if (tp_read_regs_at(addrs[a], REG_ChipID, &id, 1) == 0 && id != 0x00 && id != 0xFF)
             {
                 s_tp_addr8 = addrs[a];
                 g_tp_chip_id = id;
@@ -337,6 +322,8 @@ static uint8_t tp_probe(uint8_t retries_per_addr)
     g_tp_chip_id = 0;
     return 0;
 }
+
+static uint8_t tp_configure(void);
 
 uint8_t Touch_Init(void)
 {
@@ -351,57 +338,167 @@ uint8_t Touch_Init(void)
     Touch_Reset();
     id = tp_probe(5);
 
-    /* 本板无 INT 引脚: 关自动休眠, 芯片保持正常扫描态 → 轮询永不失联。
-     * 探测失败也照写 (地址可能尚未定, 写失败无害, GetPoint 兜底自愈再关) */
-    (void)tp_write_reg(REG_AutoSleepTime, 0x00);
+    /* 本板无 INT 引脚；关闭自动休眠失败时，由后续轮询继续配置和恢复。 */
+    if (tp_configure() != 0)
+    {
+        id = 0;
+    }
 
     if (id == 0)
     {
-        iic_bus_recover(); /* 未见器件: 先清一次可能的总线卡死再进运行时自愈 */
+        (void)my_i2c_recover(MY_I2C_BUS_TP); /* 未见器件: 先清一次可能的总线卡死再进运行时自愈 */
     }
     return id;
 }
 
 /******************************************************************************
- * 读一个触点坐标 (纯轮询 + 1s 节奏自愈)
- * 返回: 手指数量(0=无触摸/总线失败, 一般 1); x/y 出参为 LCD 对齐坐标
- *
- * 休眠已关闭, 正常态轮询必然得到应答; 若连续失败约 1s (总线卡死/芯片异常),
- * 做一次 "复位+重新探测地址+重关休眠" 自愈; 没有永久放弃的死角 ——
- * 触摸后来才接好/换料也能自动恢复。
+ * 读一个触点坐标，纯轮询；连续失败200次后由后续轮询逐拍推进恢复。
+ * 返回: 0=手指已松开，TOUCH_READ_ERROR=读取不可用，其余为手指数量。
+ * 有触点时才更新x/y屏幕坐标，读取失败或恢复中不能据此确认松手。
+ * 恢复流程包括复位、地址探测和关闭自动休眠，实际耗时随任务调度变化。
  *****************************************************************************/
-#define TP_FAIL_STREAK_RECOVER 200 /* 5ms/次 约1s，与LVGL输入周期一致 */
+#define TP_FAIL_STREAK_RECOVER 200 /* touch任务目标5ms/次；实际恢复时间随抢占延长。 */
 static uint32_t s_tp_fail_streak = 0;
+
+enum
+{
+    TP_RECOVER_IDLE,
+    TP_RECOVER_RESET_WAIT,
+    TP_RECOVER_BOOT_WAIT,
+    TP_RECOVER_PROBE,
+    TP_RECOVER_PROBE_WAIT,
+    TP_RECOVER_CONFIG
+};
+static struct
+{
+    uint32_t phase_ms;
+    uint8_t phase, address_index;
+} tp_recovery;
+
+static void tp_recover_begin(void)
+{
+    (void)my_i2c_recover(MY_I2C_BUS_TP);
+    TP_RST_0();
+    tp_recovery.phase_ms = HAL_GetTick();
+    tp_recovery.phase = TP_RECOVER_RESET_WAIT;
+    tp_recovery.address_index = 0;
+    g_tp_chip_id = 0;
+}
+
+/* 手指数和坐标共享连续失败计数，复位后的等待由后续输入轮询推进。 */
+static void tp_read_failed(void)
+{
+    if (++s_tp_fail_streak >= TP_FAIL_STREAK_RECOVER)
+    {
+        s_tp_fail_streak = 0;
+        tp_recover_begin();
+    }
+}
+
+/* 初始化、唤醒和运行时恢复共用配置结果，成功前不发布触摸采样。 */
+static uint8_t tp_configure(void)
+{
+    if (tp_write_reg(REG_AutoSleepTime, 0x00) != 0)
+    {
+        tp_recovery.phase = TP_RECOVER_CONFIG;
+        tp_read_failed();
+        return 1;
+    }
+    s_tp_fail_streak = 0;
+    tp_recovery.phase = TP_RECOVER_IDLE;
+    return 0;
+}
+
+/* 与输入读取同属touch任务；每次至多一笔事务，毫秒等待只检查墙钟。 */
+static void tp_recover_step(void)
+{
+    static const uint8_t addrs[2] = {CST816_ADDR_1, CST816_ADDR_2};
+    uint32_t now_ms = HAL_GetTick();
+    uint8_t id;
+    switch (tp_recovery.phase)
+    {
+    case TP_RECOVER_RESET_WAIT:
+        if ((uint32_t)(now_ms - tp_recovery.phase_ms) >= 10)
+        {
+            TP_RST_1();
+            tp_recovery.phase_ms = HAL_GetTick();
+            tp_recovery.phase = TP_RECOVER_BOOT_WAIT;
+        }
+        break;
+    case TP_RECOVER_BOOT_WAIT:
+        if ((uint32_t)(now_ms - tp_recovery.phase_ms) >= 300)
+        {
+            tp_recovery.phase = TP_RECOVER_PROBE;
+        }
+        break;
+    case TP_RECOVER_PROBE:
+        if (tp_read_regs_at(addrs[tp_recovery.address_index], REG_ChipID, &id, 1) == 0 && id != 0 && id != 0xFF)
+        {
+            s_tp_addr8 = addrs[tp_recovery.address_index];
+            g_tp_chip_id = id;
+            tp_recovery.phase = TP_RECOVER_CONFIG;
+        }
+        else
+        {
+            tp_recovery.phase_ms = HAL_GetTick();
+            tp_recovery.phase = TP_RECOVER_PROBE_WAIT;
+        }
+        break;
+    case TP_RECOVER_PROBE_WAIT:
+        if ((uint32_t)(now_ms - tp_recovery.phase_ms) >= 100)
+        {
+            ++tp_recovery.address_index;
+            if (tp_recovery.address_index < 2)
+            {
+                tp_recovery.phase = TP_RECOVER_PROBE;
+            }
+            else
+            {
+                tp_recovery.phase = TP_RECOVER_CONFIG;
+            }
+        }
+        break;
+    case TP_RECOVER_CONFIG:
+        (void)tp_configure();
+        break;
+    default:
+        break;
+    }
+}
 
 uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
 {
     uint8_t num, d[4];
     uint16_t px, py;
 
-    if (!tp_read_regs(REG_FingerNum, &num, 1))
+    if (tp_recovery.phase != TP_RECOVER_IDLE)
     {
-        if (++s_tp_fail_streak >= TP_FAIL_STREAK_RECOVER)
-        {
-            s_tp_fail_streak = 0;
-            Touch_Wakeup(); /* 恢复+复位+重探测，约310~510ms；等待时让出CPU */
-        }
-        return 0;
+        tp_recover_step();
+        return TOUCH_READ_ERROR;
     }
-    s_tp_fail_streak = 0;
+    if (tp_read_regs(REG_FingerNum, &num, 1) != 0)
+    {
+        tp_read_failed();
+        return TOUCH_READ_ERROR;
+    }
 
     if (num == 0xFF)
     {
-        return 0; /* 芯片在休眠扫描(理论已关) */
+        tp_read_failed();
+        return TOUCH_READ_ERROR; /* 持续无效扫描同样触发恢复，不能据此确认松手。 */
     }
     if (num == 0x00)
     {
+        s_tp_fail_streak = 0;
         return 0; /* 无手指 */
     }
 
-    if (!tp_read_regs(REG_XposH, d, 4))
+    if (tp_read_regs(REG_XposH, d, 4) != 0)
     {
-        return 0; /* XposH..YposL 连读 */
+        tp_read_failed(); /* 坐标失败同样累计；后续轮询推进复位，不阻塞LVGL。 */
+        return TOUCH_READ_ERROR; /* XposH..YposL 连读 */
     }
+    s_tp_fail_streak = 0;
     px = (uint16_t)(((uint16_t)(d[0] & 0x0F) << 8) | d[1]);
     py = (uint16_t)(((uint16_t)(d[2] & 0x0F) << 8) | d[3]);
 
@@ -414,16 +511,16 @@ uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
     return num;
 }
 
-void Touch_Sleep(void)
+uint8_t Touch_Sleep(void)
 {
-    /* 手动进睡眠 (本工程默认不用; 无 INT 时唤醒只能靠复位) */
-    (void)tp_write_reg(REG_SLEEP_CTRL, 0x03);
+    /* 熄屏后由touch任务进入睡眠；无INT时唤醒只能靠复位 */
+    return tp_write_reg(REG_SLEEP_CTRL, 0x03);
 }
 
 void Touch_Wakeup(void)
 {
-    iic_bus_recover();
+    (void)my_i2c_recover(MY_I2C_BUS_TP);
     Touch_Reset();
-    (void)tp_probe(1);                         /* 两个候选地址各探测一次 */
-    (void)tp_write_reg(REG_AutoSleepTime, 0x00); /* 复位后配置丢失, 重关休眠 */
+    (void)tp_probe(1);                           /* 两个候选地址各探测一次 */
+    (void)tp_configure(); /* 复位后配置丢失；写失败时继续异步恢复。 */
 }

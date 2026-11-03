@@ -27,25 +27,30 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
     assert(step++ == 2 && port == POWER_EN_GPIO_Port && config->Pin == POWER_EN_Pin);
     assert(output_high && config->Mode == GPIO_MODE_OUTPUT_PP);
-    assert(config->Pull == GPIO_PULLDOWN && config->Speed == GPIO_SPEED_FREQ_LOW);
+    assert(config->Pull == GPIO_NOPULL && config->Speed == GPIO_SPEED_FREQ_LOW);
     output_enabled = 1;
+}
+
+static void app_reset_init(void)
+{
+    assert(step++ == 3 && output_enabled && output_high);
 }
 
 static void HAL_Init(void)
 {
-    assert(step++ == 3);
+    assert(step++ == 4);
     button_pressed = 0;
     assert(output_enabled && output_high); /* 松手后供电保持不依赖按钮。 */
 }
 
 static void watch_system_clock_config(void)
 {
-    assert(step++ == 4 && !button_pressed && output_enabled && output_high);
+    assert(step++ == 5 && !button_pressed && output_enabled && output_high);
 }
 
 static void MX_GPIO_Init(void)
 {
-    assert(step++ == 5 && output_enabled && output_high);
+    assert(step++ == 6 && output_enabled && output_high);
 }
 
 #include "main_prefix.inc"
@@ -53,7 +58,7 @@ static void MX_GPIO_Init(void)
 int main(void)
 {
     boot_entry();
-    assert(step == 6 && !button_pressed && output_high && output_enabled);
-    puts("PASS: PA3 output preset before HAL/clock initialization, short-press power hold.");
+    assert(step == 7 && !button_pressed && output_high && output_enabled);
+    puts("PASS: PA3 power hold and reset capture precede HAL/clock initialization.");
     return 0;
 }

@@ -28,7 +28,7 @@ extern "C"
 #define LCD_HEIGHT   280
 #define LCD_OFFSET_Y 20
 
-/* 背光: TIM3_CH3 @100MHz/100(PSC+1) = 1MHz 计数, ARR=300 -> 约3.33kHz。
+/* 背光: TIM3_CH3 @64MHz/64(PSC+1) = 1MHz 计数, ARR=300 -> 约3.32kHz。
  * OCPolarity=HIGH 高电平点亮, 占空比 = CCR/ARR, 无需反转映射。 */
 #define LCD_BL_CCR_INVERT 0
 #define LCD_BL_ARR        300
@@ -42,8 +42,8 @@ extern "C"
 
     /*--- 初始化 / 电源 ---*/
     void LCD_Init(void);            /* 复位+ST7789初始化序列, 结束后CS常拉低 */
-    void LCD_ST7789_SleepIn(void);  /* 0x10 省电 */
-    void LCD_ST7789_SleepOut(void); /* 0x11 唤醒 */
+    uint8_t LCD_ST7789_SleepIn(void);  /* 0x10省电；0成功，1失败，由UI重试。 */
+    uint8_t LCD_ST7789_SleepOut(void); /* 0x11唤醒；0成功，1失败，背光保持关闭。 */
 
     /*--- 基础写 ---*/
     void LCD_WR_REG(uint8_t reg);                                             /* DC=0 写命令 */
@@ -55,9 +55,11 @@ extern "C"
     void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p); /* RGB565块传输(阻塞) */
 
     /* DMA 异步刷屏 (SPI1_TX DMA @DMA2_Stream2, OV_Watch/Watch 同款): 发起即返回,
- * 传输完成经 HAL_SPI_TxCpltCallback → LCD_Set_Flush_Complete_Callback 注册的回调通知 */
+ * 正常完成从ISR通知，异常收尾及阻塞回退从显示任务通知，回调需区分上下文。 */
     typedef void (*LCD_CallbackFunc_t)(void);
     void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb);
+    /* 显示任务调用；错误或DMA回调超时后先停止DMA再释放缓冲，返回1要求重绘。 */
+    uint8_t LCD_Flush_Service(void);
     void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p);
 
     void LCD_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, uint16_t color); /* 单色填充 */

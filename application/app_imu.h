@@ -54,13 +54,16 @@ extern "C"
     /* IMU 快照: 原始 LSB + 融合姿态角 + 同一轮服务的磁参考状态 */
     typedef struct
     {
+        uint32_t steps;                /* 本次开机累计步数；不写EEPROM。 */
+        uint32_t wrist_raise_sequence; /* 仅在放下后抬起时递增，供UI消费。 */
+        uint32_t wrist_raise_ms;       /* 最近抬腕事件的HAL时间，避免陈旧事件亮屏。 */
         Accel_Gyro_struct raw;     /* 原始读数 (已减零偏; 加速度 ±4g, 陀螺仪 ±1000°/s) */
         float pitch_deg;           /* 俯仰角 (°), 四元数融合 */
         float roll_deg;            /* 横滚角 (°), 四元数融合 */
         float yaw_deg;             /* 偏航角 (-180..180°)，磁北参考；失效时六轴相对递推 */
         lsm303dlhc_mag_struct mag; /* 芯片坐标下磁场，未做安装校准 */
         float mag_body_uT[3];      /* 校准并映射到 MPU6050 机体坐标后的磁场 */
-        uint8_t mag_online;        /* 有不超过50ms的有效磁场帧 */
+        uint8_t mag_online;        /* 有当前档位新鲜度窗口内的有效磁场帧。 */
         uint8_t mag_fused;         /* 本轮磁场参与航向修正 */
         uint8_t mag_calibrated;    /* 已校准，或已从EEPROM恢复有效校准 */
         app_mag_cal_state mag_cal_state;
@@ -77,9 +80,22 @@ extern "C"
 
     /**
  * @brief 周期服务一轮: 磁场轮询 + MPU突发读 → 姿态融合 → 一致快照
- *        仅由 app_task 的 sensor 任务体按周期调用, 其他上下文勿调
+ *        仅sensor调用；read_mag=0时只延后本轮磁事务，命令和新鲜度检查仍执行。
  */
-    void App_IMU_Service(void);
+    void App_IMU_Service(uint8_t read_mag);
+    /* 仅sensor任务：后台200ms为加速度低功耗，运动10ms，姿态/校准20ms。 */
+    uint32_t app_imu_set_sample_period(uint32_t period_ms);
+    /* 仅sensor任务：先设置请求，再调用set_sample_period；心率参考不启动姿态/磁融合。 */
+    void app_imu_set_accel_reference(uint8_t enabled);
+    /* 兼容器件完全休眠接口；唤醒只丢弃旧时间/磁参考，保留四元数。 */
+    void app_imu_set_sleep(uint8_t sleeping);
+    /* 校准命令、采集或校准记录保存尚未完成时返回1。 */
+    uint8_t app_imu_is_calibrating(void);
+    /* 仅sensor任务：后台新鲜加速度连续约10秒稳定时返回1，供放宽读取节拍；
+     * 无有效帧、样本过期(超过活动最大间隔)或读失败后未重新稳定均返回0。 */
+    uint8_t app_imu_is_stationary(void);
+    /* 仅sensor任务调用；与MPU零偏保存串行，返回1表示磁记录仍在保存。 */
+    uint8_t App_IMU_SaveService(void);
 
     /**
  * @brief 取最新数据的一致快照 (加锁, 防多字段撕裂)

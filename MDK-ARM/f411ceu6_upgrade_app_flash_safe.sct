@@ -1,0 +1,14 @@
+LR_IROM1 0x08010000 0x00050000
+{
+    ER_IROM1 0x08010000 0x00050000
+    {
+        *.o (RESET, +First)
+        *(InRoot$$Sections)
+        .ANY (+RO)
+    }
+    RW_IRAM1 0x20000000 0x00020000
+    {
+        int_battery_log.o (battery_log_ram)
+        .ANY (+RW +ZI)
+    }
+}

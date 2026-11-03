@@ -8,6 +8,12 @@ static uint8_t s_length;
 static uint8_t s_overflow;
 static uint32_t s_last_byte_ms;
 
+void app_weather_reset_receive(void)
+{
+    s_length = 0;
+    s_overflow = 0;
+}
+
 static uint8_t parse_number(const char **cursor, int32_t *value)
 {
     int32_t magnitude = 0;
@@ -21,7 +27,7 @@ static uint8_t parse_number(const char **cursor, int32_t *value)
     {
         if (++digits > 4)
         {
-            return 0;
+            return 1;
         }
         magnitude = magnitude * 10 + **cursor - '0';
         ++*cursor;
@@ -34,7 +40,7 @@ static uint8_t parse_number(const char **cursor, int32_t *value)
     {
         *value = magnitude;
     }
-    return digits != 0;
+    return digits == 0;
 }
 
 static void finish_frame(void)
@@ -42,8 +48,8 @@ static void finish_frame(void)
     const char *cursor = s_frame + 8;
     int32_t code, temperature, humidity;
     s_frame[s_length] = '\0';
-    if (!s_overflow && s_length >= 8 && memcmp(s_frame, "WEATHER,", 8) == 0 && parse_number(&cursor, &code) && *cursor++ == ',' &&
-        parse_number(&cursor, &temperature) && *cursor++ == ',' && parse_number(&cursor, &humidity) && cursor == s_frame + s_length &&
+    if (!s_overflow && s_length >= 8 && memcmp(s_frame, "WEATHER,", 8) == 0 && parse_number(&cursor, &code) == 0 && *cursor++ == ',' &&
+        parse_number(&cursor, &temperature) == 0 && *cursor++ == ',' && parse_number(&cursor, &humidity) == 0 && cursor == s_frame + s_length &&
         *cursor == '\0' && code >= 0 && code <= 99 && temperature >= -1000 && temperature <= 1000 && humidity >= 0 && humidity <= 100)
     {
         s_weather.code = (uint8_t)code;
@@ -51,6 +57,7 @@ static void finish_frame(void)
         s_weather.humidity_rh = (uint8_t)humidity;
         s_weather.received_ms = s_last_byte_ms;
         s_weather.valid = 1;
+        s_weather.cached = 0;
     }
     s_length = 0;
     s_overflow = 0;
@@ -58,7 +65,7 @@ static void finish_frame(void)
 
 void app_weather_service(uint32_t now_ms)
 {
-    if ((s_length || s_overflow) && (uint32_t)(now_ms - s_last_byte_ms) >= 200U)
+    if ((s_length || s_overflow) && (uint32_t)(now_ms - s_last_byte_ms) >= 200)
     {
         finish_frame();
     }
@@ -98,6 +105,16 @@ void app_weather_get_snapshot(app_weather_struct *snapshot)
     if (snapshot != NULL)
     {
         *snapshot = s_weather;
+    }
+}
+
+void app_weather_restore(const app_weather_struct *snapshot)
+{
+    if (s_weather.valid == 0 && snapshot->valid != 0)
+    {
+        s_weather = *snapshot;
+        s_weather.cached = 1;
+        s_weather.received_ms = 0;
     }
 }
 
