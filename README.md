@@ -81,6 +81,13 @@ python -X utf8 tests/battery_log/run.py
 
 ## 更新记录
 
+### 2026-11-03 · [47790a7](https://github.com/Mangta517/watch/commit/47790a76d4641694bebb2a5604bdf6bca50aeea7) · 三程序OTA与ECO低功耗整合发布
+
+- **问题**：OTA、低功耗、传感器调度与维护日志的累计改动尚未统一发布；现有说明仍含旧分区容量及采样周期，weather_store主机测试遗漏公共头文件路径。
+- **改动**：该提交位于`codex/release-20261103`，相对`main`汇总197个文件。三程序布局为主引导0x08000000、独立保底0x08008000、320KiB升级APP 0x08010000；正常启动运行有效APP，PA5复位连续按2秒进保底，BLE`OTA,START`进保底，SPP支持查询布局/长度/CRC/回读及中断完整重传，sector7日志保留。默认64MHz/Scale3与ECO，后台采样200/400ms；所有实际STOP屏蔽MPU EXTI并精确恢复，以减少不必要唤醒。AHT亮屏1秒、熄屏10分钟，心率独立`AUTO`10分钟默认OFF，电量3.50V=0%、4.00V=100%，并整合电压/复位BLE日志、天气持久化、看门狗与触摸恢复。本次发布整理仅为测试脚本补`weather_store`的`-Icommon`，保留累计固件行为。
+- **验证结果**：battery_log、ble、bootloader、clock、diagnostics、ota、reset、reset_ble、sensors、startup、tickless、touch、ui、watchdog、weather_store共15套主机回归最终通过（weather_store首次漏路径失败、补后重跑通过；UI/diagnostics开关及tickless STOP开关均覆盖；clock可选外部手机帧夹具缺失未运行）。4个Keil目标f411_bootloader/f411_recovery/f411ceu6/f411ceu6_upgrade_app ARMCC5.06增量构建均0错误0警告；Android OtaProtocolTest通过，javac有3条Java8选项过时警告。
+- **剩余问题**：未烧录，未测实际功耗收益、传感器精度、真实SPP与掉电恢复；完整APK未重新构建，重建仍需外部base.apk、本地工具链与扩充版签名。
+
 ### 2026-11-02 · 当前工作区 · 低功耗默认ECO、心率自动定时与慢待机
 
 - **改动**：蓝牙默认改为ECO省电，重启恢复ECO且模式仅存RAM、不写EEPROM；心率页新增独立`AUTO / 10 MIN`开关（默认OFF、仅RAM），启用后熄屏每10分钟测最多10秒、有效BPM即停，从启用/熄屏起算而非立即触发，与手动START/STOP及SPORT强制连续各自独立，关闭AUTO时sensor停止在途测量并拉低PB15；稳定熄屏无其它业务且加速度约10秒稳定后进入慢待机，CPU采样/基础服务由200ms放宽至400ms（RTC STOP最长400ms，慢STOP临时屏蔽MPU DATA_RDY EXTI并保留PA4/RTC，双任务进度与100ms最小喂狗及0.9s硬件超时不变）；AHT测量窗口改为采样/恢复完成即收尾；触摸仅在休眠成功后阻塞等待PA4、失败首次立即其后500ms退避、亮屏通知可打断。
