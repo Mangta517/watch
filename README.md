@@ -1,8 +1,8 @@
-﻿# STM32F411 智能手表
+# STM32F411 智能手表
 
 基于 STM32F411CEU6、FreeRTOS 和 LVGL 的手表工程，包含 RTC 表盘、蓝牙校时与天气同步、运动与环境传感器、心率采集（手动START/STOP与AUTO每10分钟定时）和电池显示。
 
-本页为 2026-11-03 累计发布版本，当前分支 `codex/release-20261103`，汇总三程序 OTA（主引导、独立保底与升级 APP）、默认 ECO 低功耗、电量与复位日志及运行诊断等已完成改动。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、计步与辅助抬腕、日常 BLE 通信、复位和电压日志，以及 Bootloader SPP 升级。本次涉及的文件、具体改动、优化效果及验证结果见[更新记录](#更新记录)。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；2026-11-02的蓝牙默认ECO、心率AUTO每10分钟定时、稳定熄屏400ms慢待机、AHT采样窗口收尾及触摸休眠成功后才等待通知，以及2026-11-03所有实际STOP均临时屏蔽MPU DATA_RDY/PB12 EXTI并原样恢复、保留PA4/RTC及pending为最新当前行为，实际电流与佩戴效果仍待实测，当前行为以本页首节及当前源码为准。
+本页为 2026-11-03 累计发布版本，当前分支 `codex/release-20261103`，汇总三程序 OTA（主引导、独立保底与升级 APP）、默认 ECO 低功耗、电量与复位日志及运行诊断等已完成改动。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、计步与辅助抬腕、日常 BLE 通信、复位和电压日志，以及主引导／保底的 BLE OTA 升级。2026-11-04 起 OTA 传输由 SPP 改为 BLE（保底同步改造，只认 SPP 的旧保底须先用 SWD 更新），本页的当前协议与部署描述已按 BLE 更新，实板烧录与手机实测仍待完成。本次涉及的文件、具体改动、优化效果及验证结果见[更新记录](#更新记录)。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；2026-11-02的蓝牙默认ECO、心率AUTO每10分钟定时、稳定熄屏400ms慢待机、AHT采样窗口收尾及触摸休眠成功后才等待通知，以及2026-11-03所有实际STOP均临时屏蔽MPU DATA_RDY/PB12 EXTI并原样恢复、保留PA4/RTC及pending为最新当前行为，实际电流与佩戴效果仍待实测，当前行为以本页首节及当前源码为准。
 
 ## 当前低功耗策略
 
@@ -27,11 +27,11 @@ Tickless保留1ms逻辑节拍，单次最长400ms，使用RTC测量并补齐HAL 
 
 ## 蓝牙与 OTA
 
-普通 APP 和升级 APP 日常始终仅开启 BLE（`T4+01`、`T5+00`），用于校时、天气及现有接收协议。只有进入 Bootloader 升级模式时才开启 SPP（`T5+01`，BLE 仍保留）；正常启动直接跳转 APP，升级成功回到 APP 后重新关闭 SPP，需要手机重新连接 BLE。
+普通 APP、升级 APP 和独立保底始终仅开启 BLE（`T4+01`、`T5+00`，用 `AT+B500` 关闭 SPP），用于校时、天气、现有接收协议以及 OTA 升级；全程不启用 SPP，也不需要经典蓝牙配对。正常启动直接跳转 APP，升级成功回到 APP 后 BLE 连接随复位断开，需要手机重新连接。
 
-复位期间连续按住KEY_1（PA5，低电平）满2000ms即进入独立保底；APP向量无效、EEPROM读取失败，或EEPROM记录以BL前缀标记升级中/畸形时，主引导也进入保底。记录为空白或非BL遗留标志且APP向量有效时，主引导正常启动APP。保底接收手机SPP固件，按`start:长度:CRC32`升级，ready后才接收正文，30秒无进展则复位后重新等待。手机先查询并确认APP布局，再发送start；OTA只擦写sector 4..6，主引导、保底和日志保留。完整部署见[Bootloader说明](docs/bootloader.md)。
+复位期间连续按住KEY_1（PA5，低电平）满2000ms即进入独立保底；APP向量无效、EEPROM读取失败，或EEPROM记录以BL前缀标记升级中/畸形时，主引导也进入保底。记录为空白或非BL遗留标志且APP向量有效时，主引导正常启动APP。保底经 BLE 的 `FFF1` 接收手机发来的升级 APP BIN，按`start:长度:CRC32`升级，ready 后才接收正文，连续 30 秒无进展才复位后重新等待（不是整轮限时 30 秒）。手机先查询并确认 APP 布局，再发送 start；每次 BLE 写不超过 20 字节并等写回调返回后再续，片间不小于 20ms，BIN 仍按 256 字节外层块组织，块间保留 40ms 暂停，最后一块之后不再补暂停。命令不带换行时按 1000ms 空闲判结束，因此 22 字节的 start 命令拆成 20＋2 两片仍是一条完整命令；Write Without Response 的回调只代表 Android 已接受该次写，只有设备回传匹配长度的 `ok,len:N` 才算固件校验通过。断连或整机复位后一律完整重传，不续传、不回滚。OTA 只擦写 sector 4..6，主引导、保底和日志保留。完整部署见[Bootloader说明](docs/bootloader.md)。
 
-2026-11-02启用主引导＋独立保底＋手表APP三程序结构。升级APP的日常BLE入口为`OTA,START`加实际换行，sensor保存并读回EEPROM标志后复位进入保底。手机APK基于旧波形App扩充，当前为`1.95-wave.16-recovery`，输出`E:\Downloads\Bluetooth-Wave-OTA.apk`；源码和重建脚本见[tools/android-ota](tools/android-ota/README.md)。原签名密钥缺失，扩充版与旧波形版并存，可覆盖上一版OTA扩充版。首次使用需通过SWD部署主引导和独立保底，旧`0x08008000`的APP BIN不可沿用。
+2026-11-02启用主引导＋独立保底＋手表APP三程序结构。升级APP的日常BLE入口为`OTA,START`加实际换行，sensor保存并读回EEPROM标志后复位进入保底，回执为`OTA,REBOOTING,BLE`。手机APK基于旧波形App扩充，BLE OTA版为`1.95-wave.17-ble-ota` / code22，目标产物`work/ble-ota-20261104/delivery/Bluetooth-Wave-BLE-OTA.apk`；源码和重建脚本见[tools/android-ota](tools/android-ota/README.md)。原签名密钥缺失，扩充版与旧波形版并存。首次使用需通过SWD部署主引导和独立保底，旧`0x08008000`的APP BIN不可沿用；只支持SPP接收的旧保底也不能被手机OTA更新，迁移到BLE OTA前必须先SWD写入`F411-OTA-Recovery.bin`。
 
 ## 工程与文档
 
@@ -44,9 +44,9 @@ Tickless保留1ms逻辑节拍，单次最长400ms，使用RTC测量并补齐HAL 
 | [f411_recovery](MDK-ARM/f411_recovery.uvprojx) | `0x08008000` | 32KiB | 独立保底程序，负责蓝牙接收和APP擦写，向量偏移`0x8000` |
 | [f411ceu6_upgrade_app](MDK-ARM/f411ceu6_upgrade_app.uvprojx) | `0x08010000` | 320KiB | 三程序结构的手表APP，向量表偏移`0x10000` |
 
-最后128KiB（sector 7）保留给电压历史；普通APP/升级APP及Bootloader均已限制边界，旧Bootloader须通过SWD同步更新。下载时使用按扇区擦除，整片擦除会清掉日志。
+最后128KiB（sector 7）保留给电压历史；普通APP/升级APP及Bootloader均已限制边界，旧Bootloader和只支持SPP接收的旧保底均须通过SWD同步更新，手机OTA不能替换这两个程序。下载时使用按扇区擦除，整片擦除会清掉日志。
 
-直接运行手表可选择独立 APP。部署 OTA 时，通过 SWD 依次下载主引导、独立保底和升级 APP 三个程序，普通复位即运行 SWD 安装的升级 APP，首次部署不要求先完成一次手机升级；下载升级 APP 时保留主引导和保底所在扇区，并使用按扇区擦除。独立 APP 与主引导都占用 `0x08000000`，两者不能共存，应按上表选择部署组合。
+直接运行手表可选择独立 APP。部署 OTA 时，通过 SWD 分别下载 `F411-OTA-Bootloader.bin` 到 `0x08000000`、`F411-OTA-Recovery.bin` 到 `0x08008000`、`F411-OTA-Upgrade-App.bin` 到 `0x08010000` 三个 BIN，普通复位即运行 SWD 安装的升级 APP，首次部署不要求先完成一次手机升级；之后手机只经 BLE 下发升级 APP 的 BIN，不下发主引导与保底。下载升级 APP 时保留主引导和保底所在扇区，并使用按扇区擦除。独立 APP 与主引导都占用 `0x08000000`，两者不能共存，应按上表选择部署组合。
 
 主引导按 EEPROM 中的升级记录决定去向：记录为主引导写入且标志有效时启动 APP；标志为升级中或记录损坏时进入独立保底；记录缺失或为旧版、空白时，只有在 APP 向量表有效且 EEPROM 读取成功的情况下才启动 APP，APP 向量无效或 EEPROM 读取失败则进入保底。手动进入保底需按住返回键 KEY_1（PA5，低电平）并持续 2000ms 跨过复位，短按或空闲都正常启动，KEY_1 为高电平时不设无条件延时。升级 APP 的手机入口 `OTA,START` 仍先写入并读回持久的升级中标志再复位，因此升级中断后复位会回到保底等待完整重传，不会凭看似有效的向量表启动未完成镜像。分区保持主引导 `0x08000000`、独立保底 `0x08008000`、升级 APP `0x08010000` 不变。
 
@@ -60,7 +60,7 @@ Tickless保留1ms逻辑节拍，单次最长400ms，使用RTC测量并补齐HAL 
 | 启动流程与等待优化 | [docs/startup-optimization.md](docs/startup-optimization.md) |
 | 运行诊断 | [docs/diagnostics.md](docs/diagnostics.md) |
 | 复位现场与 RTC / 天气状态查询 | [docs/reset-diagnostics.md](docs/reset-diagnostics.md) |
-| BLE / SPP 升级与部署 | [docs/bootloader.md](docs/bootloader.md) |
+| BLE OTA 升级与部署 | [docs/bootloader.md](docs/bootloader.md) |
 | 看门狗与任务进度检查 | [docs/watchdog.md](docs/watchdog.md) |
 | MPU 零偏及 EEPROM 保存 | [docs/imu-eeprom.md](docs/imu-eeprom.md) |
 | 磁航向与校准 | [docs/magnetometer.md](docs/magnetometer.md) |

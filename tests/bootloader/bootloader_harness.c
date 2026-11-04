@@ -524,7 +524,12 @@ static void state_machine_tests(void)
     assert(boot_state == BOOTLOADER_STATE_INIT);
     command_feed("sta");
     command_feed("rt:101");
-    tick += BOOTLOADER_RX_IDLE_MS;
+    /* 分片间隔在命令静默阈值之内：半条命令不能被提前结算，更不能提前擦除。 */
+    tick += BOOTLOADER_COMMAND_IDLE_MS - 1;
+    app_bootloader_work();
+    assert(boot_state == BOOTLOADER_STATE_INIT && flash_erases == erase_before_info);
+    /* 满 BOOTLOADER_COMMAND_IDLE_MS 后按完整一行解析，保留旧主机不带换行的兼容路径。 */
+    ++tick;
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_RUN);
     app_bootloader_work();
@@ -590,7 +595,7 @@ static void state_machine_tests(void)
     }
     reset_expected = 0;
     assert(!int_bootloader_app_is_valid());
-    puts("PASS: legacy command, malformed length, erase-before-DMA, length completion, tick wrap, SPP reply window and partial transfer timeout");
+    puts("PASS: legacy command, malformed length, erase-before-DMA, length completion, tick wrap, BLE reply window and partial transfer timeout");
 }
 
 static void crc_error_tests(void)
@@ -614,7 +619,8 @@ static void crc_error_tests(void)
     puts("PASS: zlib CRC detects equal-length vector/body/odd-tail corruption before vector commit");
 }
 
-static void start_command(const char *text)
+/* 回到干净的命令上下文：停旧流程、重启蓝牙模拟、发欢迎提示并进入INIT。 */
+static void command_start_fresh(void)
 {
     int_bootloader_stop();
     connected = 0;
@@ -623,6 +629,11 @@ static void start_command(const char *text)
     fixed_tick = 1;
     connected = 1;
     app_bootloader_init();
+}
+
+static void start_command(const char *text)
+{
+    command_start_fresh();
     command_feed(text);
     assert(boot_state == BOOTLOADER_STATE_RUN);
     app_bootloader_work();
@@ -684,6 +695,44 @@ static void crc_command_tests(void)
     puts("PASS: strict CRC command parsing, upper/lower hex, 100ms completion guard and zero CRC rejection");
 }
 
+/* 默认MTU 23下手机单次BLE写入的有效载荷为20字节，本例22字节的CRC start命令拆成20+2到达，
+ * 本用例在片间模拟50ms间隔：命令在LF之前必须保持INIT且不擦除，
+ * 无换行兜底只能按 BOOTLOADER_COMMAND_IDLE_MS(1000ms) 结算，不能被数据的10ms空闲阈值截断。
+ * 文本按'start:000101:...'补齐到22字节，长度与前20字节的分片位置均由断言固定。 */
+static void fragmented_command_tests(void)
+{
+    char text[32];
+    uint32_t erase_before;
+    uint32_t i;
+
+    snprintf(text, sizeof(text), "start:000101:%08lx\n", (unsigned long)TEST_CRC_101);
+    assert(strlen(text) == 22);
+    command_start_fresh();
+    erase_before = flash_erases;
+    /* 先落地前20字节，模拟默认20字节的手机单次写入。 */
+    for (i = 0; i < 20; ++i)
+    {
+        inject((uint8_t)text[i]);
+    }
+    /* 按模拟的片间50ms轮询两轮：远超数据的10ms空闲阈值，仍在命令阈值之内。 */
+    for (i = 0; i < 2; ++i)
+    {
+        tick += 50;
+        app_bootloader_work();
+        assert(boot_state == BOOTLOADER_STATE_INIT && flash_erases == erase_before);
+    }
+    /* 第21字节与LF到达：LF立即结算整条命令，不必等静默阈值。 */
+    inject((uint8_t)text[20]);
+    inject((uint8_t)text[21]);
+    app_bootloader_work();
+    assert(boot_state == BOOTLOADER_STATE_RUN && flash_erases == erase_before);
+    app_bootloader_work();
+    assert(boot_state == BOOTLOADER_STATE_REC_DATA && flash_erases == erase_before + 1);
+    assert(int_bootloader_rx_dma_active());
+    int_bootloader_stop();
+    puts("PASS: 22-byte CRC command split 20+2 with 50ms gaps stays INIT, erase deferred to LF");
+}
+
 static void timeout_and_pause_tests(void)
 {
     uint8_t image[101];
@@ -743,7 +792,7 @@ int main(void)
     void *mapped = VirtualAlloc((void *)(uintptr_t)FLASH_BASE, BATTERY_LOG_END_ADDR - FLASH_BASE,
                                 MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     assert(mapped == (void *)(uintptr_t)FLASH_BASE);
-    assert(ble_transport_regression_main() == 0); /* 同一套AT模拟验证升级模式开启SPP。 */
+    assert(ble_transport_regression_main() == 0); /* 同一套AT模拟验证升级模式开启SPP并保持BLE开启。 */
     assert(kt6368a_init() == HAL_OK);
     fixed_tick = 1;
     connected = 1;
@@ -755,6 +804,10 @@ int main(void)
     transfer_test(512, 127, TEST_CRC_512);
     transfer_test(10001, 4096, TEST_CRC_10001);
     transfer_test(APP_MAX_SIZE, 4001, TEST_CRC_327680);
+    /* 默认20字节写入与主机模拟的244字节大块：分片粒度不得影响字节一致性、CRC和向量提交。
+     * 真实Android BLE传输固定按20字节写入，244字节仅为主机侧加大分片以覆盖更大块长。 */
+    transfer_test(101, 20, TEST_CRC_101);
+    transfer_test(512, 244, TEST_CRC_512);
     for (uint32_t address = FLASH_BASE; address < APP_START_ADDR; ++address)
     {
         assert(*(const uint8_t *)(uintptr_t)address == 0x5A);
@@ -763,12 +816,13 @@ int main(void)
     {
         assert(*(const uint8_t *)(uintptr_t)address == 0xA6);
     }
-    puts("PASS: byte-exact odd/even, fragmented, multiple DMA wraps, full 320 KiB image, deferred vectors and odd tail");
+    puts("PASS: byte-exact odd/even, fragmented, multiple DMA wraps, full 320 KiB image, 20/244-byte BLE chunks, deferred vectors and odd tail");
     eeprom_flag_tests();
     receive_error_tests();
     crc_error_tests();
     state_machine_tests();
     crc_command_tests();
+    fragmented_command_tests();
     timeout_and_pause_tests();
     for (uint32_t address = 0; address < sizeof(eeprom); ++address)
     {

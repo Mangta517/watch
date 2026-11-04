@@ -1,4 +1,4 @@
-/** MPU六轴零偏掉电保存；EEPROM 0x60..0x9F，与原磁校准记录分开。 */
+/** MPU六轴零偏掉电保存；EEPROM 0x60/0x80两槽各32字节，与原磁校准记录分开。 */
 #ifndef APP_IMU_STORE_H
 #define APP_IMU_STORE_H
 #include "mpu6050.h"
@@ -26,7 +26,8 @@ typedef enum
 
 /* 仅sensor任务调用；load检查格式、量程和CRC，不进行上电静止校准。 */
 app_imu_store_result app_imu_store_load(mpu6050_offset_struct *offset);
-/* begin仅复制数据，step每轮至多一笔短事务；BUSY时继续采样。 */
+/* begin仅复制数据，step每轮至多一笔短事务；BUSY时继续采样。
+ * 旧同步入口save仅供兼容调用方，内部循环begin/step并延时等待。 */
 app_imu_store_result app_imu_store_save_begin(const mpu6050_offset_struct *offset);
 app_imu_store_result app_imu_store_save_step(void);
 app_imu_store_result app_imu_store_save(const mpu6050_offset_struct *offset);

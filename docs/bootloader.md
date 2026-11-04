@@ -1,6 +1,12 @@
 # F411 主引导、独立保底与手机蓝牙 OTA
 
-2026-11-02启用三个独立程序：主Bootloader读取EEPROM和按键后选择跳转目标；保底程序独立驻留，负责KT6368A、SPP接收、CRC和Flash更新；手表APP运行FreeRTOS/LVGL及传感器业务。沿用F407的分层职责，F411直接写内部Flash。
+2026-11-02启用三个独立程序：主Bootloader读取EEPROM和按键后选择跳转目标；保底程序独立驻留，负责KT6368A、BLE/SPP接收、CRC和Flash更新；手表APP运行FreeRTOS/LVGL及传感器业务。沿用F407的分层职责，F411直接写内部Flash。
+
+2026-11-04的SPP一键版本起，手机OTA采用“BLE控制＋SPP传输”：日常APP保持`T4+01`/`T5+00`，保底保持`T4+01`/`T5+01`。手机先在原主界面连接APP的BLE，打开OTA页选择APP BIN并点一次“开始升级”；APK经BLE探测或发送`OTA,START`，随后关闭BLE，按同一模块的SPP地址完成布局查询、整包发送和`ok,len:N`确认，再关闭SPP、等待APP启动并自动恢复原BLE。三程序分区、320KiB上限、CRC32、回读、向量和EEPROM提交规则不变。更早的BLE OTA与一键BLE版本说明保留为历史记录。
+
+KT6368A手册V2.0第9-10页说明：SPP地址是BLE地址最高字节加1，AT串字节序与Android显示相反。手册的“最高字节”指AT串中的最高字节；Android显示顺序相反，所以换算落在Android首字节。例：Android BLE `2C:A2:C8:B1:0C:22` 对应SPP `2D:A2:C8:B1:0C:22`。APK把Android地址首字节加1、其余五字节不变，用户不需要另选SPP名称或地址。BLE与SPP不是同一个地址，文档和界面不能把同一串同时写成两种地址。
+
+一键APK为`work/spp-oneclick-20261104/delivery/Bluetooth-Wave-SPP-OTA-OneClick.apk`，版本`1.95-wave.19-spp-oneclick` / code24，包名与签名沿用上一版`1.95-wave.18-oneclick` / code23，可直接覆盖安装。本版重建保底BIN（`0x08008000`）和升级APP BIN（`0x08010000`）；主引导`0x08000000`未要求变化，可继续使用现有BIN。交付只有三个BIN，不含HEX。
 
 ## 当前分区与工程
 
@@ -31,7 +37,7 @@ flowchart TD
     Q -->|否：升级中/畸形/撕裂| P
     P -->|是| E[跳转0x08008000运行保底]
     P -->|否| F[保持供电并停留，等待SWD维护]
-    E --> K[开启SPP并等待手机完整BIN]
+    E --> K[保底开启BLE与SPP，等待手机]
     K --> H[仅擦写sector 4..6中本镜像覆盖的范围]
     H -->|长度 CRC 回读 向量及EEPROM提交成功| R
     H -->|接收或写入失败| A
@@ -57,31 +63,64 @@ flowchart TD
 
 校准`0x00..0x9F`、运行时间`0xA0..0xBF`、新天气记录`0xD0..0xEF`维持现有布局。旧`0xC0`天气记录只读兼容，不再写入。
 
-升级APP从唯一BLE业务入口接收`OTA,START`加实际LF/CRLF。sensor任务等其他EEPROM保存结束后写入并读回升级中标志，LVGL回传`OTA,REBOOTING,SPP`，UART完成后留500ms发送窗口再软件复位。蓝牙断开不撤销已接受的完整请求；回执未完成时最多等2秒后仍复位。EEPROM失败返回`OTA,EEPROM_ERROR`，不执行软件复位。普通独立APP返回`OTA,UNAVAILABLE,INSTALL_BOOTLOADER_AND_UPGRADE_APP`。
+升级APP从唯一BLE业务入口接收`OTA,START`加实际LF/CRLF。sensor任务等其他EEPROM保存结束后写入并读回升级中标志，LVGL回传`OTA,REBOOTING,SPP`；更早的APP回传`OTA,REBOOTING,BLE`，APK两种都接受，因此已部署的旧APP无需为这次改版更新也能被一键流程接手。回执只表示请求已受理，是否进入保底仍以随后SPP的严格布局为准。UART完成后留500ms发送窗口再软件复位；蓝牙断开不撤销已接受的完整请求；回执未完成时最多等2秒后仍复位。EEPROM失败返回`OTA,EEPROM_ERROR`，不执行软件复位。普通独立APP返回`OTA,UNAVAILABLE,INSTALL_BOOTLOADER_AND_UPGRADE_APP`。
 
 保底在合法start命令后，先持久化升级中标志，成功才擦除APP；完整镜像、CRC和向量提交成功后，再写入并读回APP有效标志。升级中断后重新发送完整镜像，不续传、不回滚。首次通过SWD部署主引导、保底和APP后，EEPROM空白或遗留非BL记录即可直接启动有效APP，无需先完成一次手机升级；手机升级只用于后续更新及在EEPROM建立标准有效标志。
 
 ## 手机操作与首次部署
 
-新版APK为`E:\Downloads\Bluetooth-Wave-OTA.apk`，版本`1.95-wave.16-recovery` / code21。基于用户提供的`base.apk`扩充旧波形App，保留波形、诊断、收发和导出入口。原签名密钥未提供，扩充版包名为`xnj.lazydog.btcontroller.wave.ota`，与原波形版并存；与上一版OTA扩充版使用同一签名，可覆盖上一版OTA扩充版。原App设置不会自动迁移。
+一键APK包名为`xnj.lazydog.btcontroller.wave.ota`，签名与code23相同，可直接覆盖安装并保留原波形、诊断、收发和导出入口。日常业务仍走BLE；只有OTA在保底阶段改用SPP。原来的主连接路由把双模设备固定按BLE处理，纯经典设备仍按经典处理；OTA页显式建立RFCOMM，不受这条日常路由影响。
 
-1. 首次通过SWD部署`F411-OTA-Bootloader.hex`和`F411-OTA-Recovery.hex`；也可使用包含这两个程序的`F411-OTA-Factory.hex`一次下载。**必须部署主引导与独立保底两部分**，只更新主引导不足以启用本结构。若同时SWD下载链接到`0x08010000`的升级APP，EEPROM空白或遗留非BL记录时主引导可直接启动该APP，不必先做一次手机升级。
-2. 下载选择覆盖扇区擦除，避免整片擦除日志。要进入保底：在复位期间持续按住KEY_1（PA5）满2秒，保持按住直到保底启动，过早松开将正常启动APP。手机OTA页的`OTA,START`同样显式进入保底。
-3. 安装本版APK并允许附近设备权限，将本版`F411-OTA-Upgrade-App.bin`复制到手机。在原主界面打开“手表固件升级 · OTA”，选择BIN，页面会核对320KiB上限、MSP/Reset并计算CRC。
-4. 在安卓系统蓝牙设置中配对手表模块的经典蓝牙SPP设备；SPP名称沿用模块原设置，不一定与`F411-Watch`的BLE名称相同。回到OTA页，选择对应已配对设备并确认发送。
-5. 手机先查询设备布局，确认APP起点`0x08010000`和容量`0x50000`后才发送start。等待ready后，以每256字节间隔40ms发送BIN。进度100%仍需等待设备回执；只有收到匹配长度的`ok,len:N`才显示升级成功。
-6. 手表启动后关闭SPP，回原主界面重新连接BLE（FFF0服务、FFF1收发，订阅Notify）。后续可以通过页面“让手表进入升级模式”发送BLE命令进入独立保底，也保留KEY_1入口。
+### 日常一键升级（已完成部署）
 
-进入升级按钮只报告命令已提交，不冒充设备确认。若没有重启，查看原接收窗口中的OTA错误，或使用按键。首次只有主引导和保底时直接使用按键入口。
+1. 在原主界面按平时方式连接手表BLE（`F411-Watch`，FFF0/FFF1）。不需要先在安卓系统蓝牙设置里配对手表，也不需要手动让手表进入升级模式。
+2. 打开“手表固件升级 · OTA”，选择升级APP BIN（链接到`0x08010000`，不超过320KiB）。APK核对MSP/Reset并计算CRC；日常只需选这一次。
+3. 点一次“开始升级”，然后等待。APK自动经BLE探测手表是否已在保底；若仍在普通APP，则发送一次`OTA,START`并接受受理回执。随后APK关闭BLE，按同一模块的SPP地址建立RFCOMM，严格核对`OTA,LAYOUT,08010000,00050000`，发送`start:长度:CRC32`，收到ready后单次发送完整BIN，收到精确`ok,len:N`，关闭SPP，等待APP启动并恢复原BLE。
+4. 首次安全RFCOMM连接可能由Android弹出系统配对确认或PIN，允许一次即可。后续日常升级不需要每次重新配对、手动进入升级模式、重新扫描或修改设置。
+5. 进度100%只表示字节已交给协议栈；只有设备回传匹配长度的`ok,len:N`才算CRC、长度、回读、向量和EEPROM提交全部通过。收到确认后恢复原BLE失败只报告连接问题，不回滚、不重发固件，固件仍算成功。
+6. 打开OTA页时若没有当前主连接，或手表已在保底（例如KEY_1进入），允许在OTA页选择目标一次；之后仍走同一自动流程。
 
-传输期间保持页面前台、手机蓝牙及手表供电；停止、切后台、断连或阶段超时会关闭本次SPP连接，不自动重试。未完成接收时保底在30秒无进展后复位，再次进入保底等待完整重传。
+### 首次部署与迁移（按需）
+
+- **首次工厂部署**：用SWD写入三个BIN。手机只发送APP BIN，不能写主引导或保底。
+
+| BIN | SWD起始地址 | 容量 | 说明 |
+| --- | --- | --- | --- |
+| `F411-OTA-Bootloader.bin` | `0x08000000` | 32KiB | 主引导，仅SWD可写入；本版未要求变化，可复用现有BIN |
+| `F411-OTA-Recovery.bin` | `0x08008000` | 32KiB | 本版保底，BLE＋SPP OTA接收端 |
+| `F411-OTA-Upgrade-App.bin` | `0x08010000` | 320KiB | 升级APP，手机OTA唯一可下发的镜像 |
+
+- **已刷仅BLE保底（code22/code23）**：手机OTA不能写保底，必须用SWD只把本版`F411-OTA-Recovery.bin`写到`0x08008000`一次。主引导`0x08000000`本版未要求变化，可继续使用现有BIN。旧APP回传的`OTA,REBOOTING,BLE`仍被APK接受，所以保底就绪后APP可继续经手机OTA更新。
+- **现有保底仍兼容SPP OTA且布局一致**：不强制SWD；覆盖安装APK后按日常流程升级APP即可。
+- 不要把这理解成“每次升级都必须重刷三个BIN”；三个BIN只用于首次部署或上述保底迁移。
+
+### 一键流程内部行为（排障用）
+
+普通用户按上面的步骤操作即可，以下细节用于排障和协议核对：
+
+- 点“开始升级”时APK锁定本次目标（BIN与当前手表地址），释放原主连接，改用OTA页自己的BLE控制连接。
+- BLE阶段只用于探测`OTA,INFO`和发送一次`OTA,START`，不发送BIN正文。无论探测结果显示已在保底还是普通APP，打开SPP前都先关闭BLE。
+- SPP阶段把Android BLE地址首字节加1、其余五字节不变，作为同一模块的SPP地址；用户不需要另选SPP名称。RFCOMM使用标准SPP UUID `00001101-0000-1000-8000-00805f9b34fb`。
+- SPP连接后发送`OTA,INFO`并严格核对`OTA,LAYOUT,08010000,00050000`；布局不符或设备不识别时不发送start。核对通过后发送`start:长度:CRC32`，收到ready才单次发送BIN。
+- BIN按256字节外层块组织，块间40ms，最后一块之后不再补暂停；SPP是字节流，没有BLE的20字节单包限制。
+- 只有设备回传匹配长度的`ok,len:N`才算成功。成功后APK关闭SPP，等待APP启动，再恢复原BLE；恢复失败不回退固件，也不触发再次升级。
+- 停止、切后台、断连或SPP写失败会结束本次传输，不续传、不自动整轮重试；重新点“开始升级”会从头发送完整BIN。未完成接收时保底按“30秒无进展”复位后重新等待，指连续30秒收不到有效数据，不是整轮升级限30秒。
 
 ## 字节流协议与擦写范围
 
-1. 手机发送`OTA,INFO\n`，保底返回`OTA,LAYOUT,08010000,00050000`。本版手机拒绝旧布局或不识别查询的设备，不发送start。
-2. 手机发送`start:十进制长度:8位CRC32\n`。CRC为CRC-32/ISO-HDLC，与Python `zlib.crc32(BIN)`一致。保底继续兼容原`start:长度`调试方式，无CRC模式会警告，畸形CRC字段不会降级。
+1. 手机发送`OTA,INFO\n`。保底用同一条USART通道回`OTA,LAYOUT,...`，因此手机必须在对应连接上查询：APK先用BLE探测是否已在保底，关闭BLE进入SPP后再严格核对`OTA,LAYOUT,08010000,00050000`。布局不符或设备不识别时不发送start。
+2. 手机发送`start:十进制长度:8位CRC32\n`。CRC为CRC-32/ISO-HDLC，与Python `zlib.crc32(BIN)`一致。保底继续兼容原`start:长度`调试方式，无CRC模式会警告，畸形CRC字段不会降级。SPP可一次写入整条命令，不要求拆成BLE的20字节片。
 3. 等待`Flash erased, ready to receive data...`后发送原始BIN。不能添加HEX文本、换行、包头或包尾；接收阶段的新start会被当成正文。
 4. 完整接收并处理后留100ms保护窗口，检查多收字节、CRC、回读和向量；确认后回传`ok,len:N`，留500ms发送窗口再跳APP。错误回传后复位。
+
+### SPP承载与命令分帧
+
+日常APP关闭SPP，保底同时开BLE和SPP。手机OTA的控制阶段走BLE，正文阶段走SPP；两者不能同时用于发送BIN。
+
+- 保底把ASCII命令（`OTA,INFO`、`start:长度:CRC32`）以LF立即结算；不带LF时按1000ms接收空闲判定命令结束。`start:...`在SPP上可一次写完，不再有20字节分片问题。
+- BIN仍按256字节外层块组织，块间保留40ms暂停，最后一块之后不再补暂停。
+- SPP写成功只代表本机socket已接受，不代表手表收到，更不代表固件有效；只有设备回传的`ok,len:N`才是CRC、长度、回读、向量和EEPROM提交全部通过的确认。
+- 首次安全RFCOMM连接可能触发Android系统配对确认/PIN，允许一次即可；日常升级不要求每次手动配对或进入系统设置。
 
 | APP长度 | 擦除扇区 | 覆盖范围 |
 | --- | --- | --- |
@@ -105,8 +144,8 @@ python -X utf8 tests/ota/run.py
 python -X utf8 tests/battery_log/run.py
 ```
 
-主机执行真实选择逻辑、保底状态机、蓝牙驱动、EEPROM及Flash接口，覆盖空白/遗留首装直接启动APP、精确有效标志、升级中/畸形/撕裂BL标志、EEPROM读取失败、无效APP向量、缺失或错误保底向量的跳转。新增`tests/bootloader/boot_entry_harness.c`包含真实`boot_main.c`的`boot_recovery_requested`辅助函数，用自定义`entry_host/main.h`最小HAL桩验证空闲高电平立即返回、提前松开、1990ms松开、连续按住满2000ms及uint32 tick回绕判定。完整320KiB镜像、奇偶长度、DMA回绕、CRC损坏、写后读回和掉电标志路径保持不变，模拟擦写模型拒绝sector 0..3及7，完整镜像后确认主引导、保底和日志内容保留。手机与Python发送测试检查新分区、查询在start之前、ready在正文之前，以及旧布局在擦除前被拒绝。
+主机执行真实选择逻辑、保底状态机、蓝牙驱动、EEPROM及Flash接口，覆盖空白/遗留首装直接启动APP、精确有效标志、升级中/畸形/撕裂BL标志、EEPROM读取失败、无效APP向量、缺失或错误保底向量的跳转。新增`tests/bootloader/boot_entry_harness.c`包含真实`boot_main.c`的`boot_recovery_requested`辅助函数，用自定义`entry_host/main.h`最小HAL桩验证空闲高电平立即返回、提前松开、1990ms松开、连续按住满2000ms及uint32 tick回绕判定。完整320KiB镜像、奇偶长度、DMA回绕、CRC损坏、写后读回和掉电标志路径保持不变，模拟擦写模型拒绝sector 0..3及7，完整镜像后确认主引导、保底和日志内容保留。
 
-构建、主机和模拟器证据不代替实板验证。本次没有烧录手表；首次部署、实际SPP连续接收、Flash时序、断电后的重传与跳转仍需实机确认。
+构建、主机和模拟器证据不代替实板验证。本版新增或重建的APK、Recovery BIN和Upgrade APP BIN由父级实际构建、签名核对和测试后另行记录；本文不据旧版本证据声明新产物已通过测试、已烧录或已完成手机实测。首次部署、实际SPP连接（含首次系统配对）、BLE控制回执、Flash时序、断连后的完整重传与跳转仍需实机确认。上述主机测试清单是现有测试入口，不表示本版已重新运行。
 
-本版四个Keil目标均链接成功：主引导、保底、普通APP为0错误/0警告；升级APP因链接偏移变化全量重编，包含13条既有LVGL警告，新增引导/保底代码无警告。MAP的ROM占用分别为主引导6008字节、保底18492字节、升级APP223660字节，均在各自分区内。导出的三个HEX已核对地址、MSP与Reset范围，APP BIN与HEX逐字节一致，合并的Factory HEX只包含主引导和保底，地址低于`0x08010000`。
+上一版本（BLE OTA code22、一键BLE code23）的主机测试、Keil构建和签名记录属于历史证据，只说明当时版本，不自动适用于本版。2026-11-02三程序版本的Keil链接结果（主引导6008字节、保底18492字节、升级APP223660字节）同样仅供追溯。

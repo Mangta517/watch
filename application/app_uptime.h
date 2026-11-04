@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 
+/* 仅sensor任务调用：从HAL tick起算本次开机秒数，读两槽取较新记录。 */
 void app_uptime_init(void);
 /* 仅sensor读取本次开机秒数，包含Tickless补时及tick回绕。 */
 uint32_t app_uptime_get_seconds(void);

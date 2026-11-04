@@ -69,6 +69,7 @@ void MX_ADC1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
+    /* 关闭Sleep模式下ADC1时钟，进入睡眠后不再向ADC1供给总线时钟。 */
     /* 电池转换在任务内同步完成，Sleep期间无需ADC总线时钟。 */
     __HAL_RCC_ADC1_CLK_SLEEP_DISABLE();
 

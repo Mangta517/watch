@@ -24,9 +24,46 @@ static uint8_t stop_exti_seen;
 static uint8_t stop_exti_early; /* PB12未屏蔽时，STOP期间新到的DATA_RDY让WFI立即返回。 */
 static uint8_t stop_mpu_event; /* STOP期间器件新产生一次DATA_RDY事件，置EXTI->PR。 */
 
+/* sensor进度授权状态：由测试显式控制，不硬编码为真。 */
+static uint8_t wd_auth; /* 1 表示 app_task_watchdog_stop_allowed 返回授权。 */
+/* 暂停/恢复状态，验证配对与PLL前恢复。 */
+static uint8_t wd_paused;       /* 1 表示当前处于TPS3823暂停状态。 */
+static uint8_t wd_in_stop;      /* HAL_PWR_EnterSTOPMode置1，tps3823_stop_resume清零。 */
+static uint32_t wd_pause_count; /* 本轮累计暂停次数。 */
+static uint32_t wd_resume_count; /* 本轮累计恢复次数。 */
+static uint32_t wd_resume_rtc; /* 每次硬件恢复瞬间的一分钟内计数快照，用于度量硬件侧间隔。 */
+
 uint8_t app_task_is_screen_off(void)
 {
     return screen_off;
+}
+
+uint8_t app_task_watchdog_stop_allowed(void)
+{
+    assert(irq_masked);
+    return wd_auth;
+}
+
+void tps3823_stop_pause(void)
+{
+    assert(irq_masked && !wd_paused);
+    wd_paused = 1;
+    ++wd_pause_count;
+}
+
+void tps3823_stop_resume(void)
+{
+    assert(irq_masked && wd_paused);
+    /* STOP路径：resume必须在PLL恢复之前，此时CFGR SWS仍为HSI（0），不是PLL。 */
+    if (wd_in_stop != 0)
+    {
+        assert((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
+        wd_in_stop = 0;
+    }
+    wd_paused = 0;
+    ++wd_resume_count;
+    /* 记录恢复发生的硬件时基，供用例度量"最后一次恢复之后"的真实间隔。 */
+    wd_resume_rtc = rtc_count;
 }
 
 uint8_t watch_rtc_start_wakeup(uint32_t subsecond_counts)
@@ -80,6 +117,8 @@ void HAL_PWR_EnterSTOPMode(uint32_t regulator, uint8_t entry)
     stop_exti_imr = EXTI->IMR;
     stop_exti_seen = 1;
     ++stops;
+    /* STOP路径置标志，供tps3823_stop_resume断言PLL尚未恢复。 */
+    wd_in_stop = wd_paused;
     if (stop_mpu_event != 0)
     {
         EXTI->PR |= 1U << 12; /* 进入STOP之后才出现的DATA_RDY事件。 */
@@ -105,6 +144,8 @@ void host_enable_irq(void)
 {
     assert(irq_masked && kernel_tick == uwTick);
     assert(!wakeup_armed && (RCC->CFGR & RCC_CFGR_SWS) == RCC_CFGR_SWS_PLL);
+    /* 返回前必须已恢复TPS3823超时检测，不能有残留的暂停。 */
+    assert(!wd_paused);
     irq_masked = 0;
     /* 模拟pending的普通tick；UART/DMA回调只能在补时完成后观察时间。 */
     if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
@@ -124,7 +165,7 @@ void host_barrier(void)
     }
 }
 
-uint32_t watch_rtc_get_subsecond(void)
+uint32_t watch_rtc_get_counter(void)
 {
     uint32_t result;
     assert(irq_masked);
@@ -137,7 +178,7 @@ uint32_t watch_rtc_get_subsecond(void)
     {
         return UINT32_MAX;
     }
-    result = rtc_count & (WATCH_RTC_SUBSECOND_HZ - 1U);
+    result = rtc_count % WATCH_RTC_COUNTER_MOD;
     /* RTC读取返回前仍在运行CPU；该开销不能因SysTick暂停而丢掉。 */
     if (read_calls >= 2U)
     {
@@ -221,6 +262,12 @@ static void reset(uint32_t phase_cycles)
     stop_exti_seen = 0;
     stop_exti_early = 0;
     stop_mpu_event = 0;
+    wd_auth = 0;
+    wd_paused = 0;
+    wd_in_stop = 0;
+    wd_pause_count = 0;
+    wd_resume_count = 0;
+    wd_resume_rtc = 0;
     host_tim2 = host_tim3 = host_rcc = host_spi = host_dma = host_adc = host_gpio = host_exti = (Host_Peripheral_Type){0};
     RCC->CFGR = RCC_CFGR_SWS_PLL | RCC_CFGR_SW_PLL;
     RCC->CR = RCC_CR_PLLRDY | RCC_CR_PLLON;
@@ -229,7 +276,7 @@ static void reset(uint32_t phase_cycles)
 
 int main(void)
 {
-    uint32_t i, previous_tick, elapsed_total;
+    uint32_t i, previous_tick, elapsed_total, authorized_resume_rtc;
     reset(0);
     sleep_rtc_counts = 328U; /* UART在约10ms时提前唤醒原定20ms休眠。 */
     app_tickless_sleep(20U);
@@ -295,8 +342,10 @@ int main(void)
     sleep_rtc_counts = 6000;
     step_limit = 200;
     app_tickless_sleep(UINT32_MAX);
-    /* 400ms上限在Sleep路径受24位SysTick约束，单次只装载到262ms；内核据RTC实测补183ms。 */
+    /* 无授权时UINT32_MAX请求依次受1000/400ms上限，Sleep路径再受24位SysTick约束至262ms；
+     * RTC实测约183ms，内核据RTC差值补时。 */
     assert(kernel_tick == 183 && requested_load == 262 * HOST_COUNTS_PER_TICK - 1);
+    assert(wd_pause_count == 0); /* 无授权，不暂停。 */
 
     reset(0);
     rtc_count = 32000;
@@ -375,6 +424,57 @@ int main(void)
     puts("PASS: RTC early/deadline wake, partial ticks, fractional accumulation, second/midnight and tick wrap, pending/abort, LSE fallback and 200ms limit.");
     puts("PASS: mixed 5/10/20ms blocked-task deadlines retain their phases; the sleep adapter never steps over the earliest unblock time.");
     puts("PASS: CPU time during RTC reads is compensated, including cycle-counter wrap.");
+
+    /* 有sensor进度授权但BLE保持连接：STOP资格被否决，长等待仍走Sleep；
+     * 24位LOAD上限依旧把单次等待收紧到262ms，暂停与恢复必须成对包住这次实际WFI。
+     * 该用例不依赖STOP是否编译进来，因此放在配置分支之前。 */
+    reset(0);
+    wd_auth = 1;
+    screen_off = 1;
+    BLE_EN_GPIO_Port->ODR = BLE_EN_Pin;
+    sleep_rtc_counts = 6000;
+    step_limit = 400;
+    app_tickless_sleep(UINT32_MAX);
+    assert(stops == 0 && sleeps == 1 && kernel_tick == 183);
+    assert(requested_load == 262 * HOST_COUNTS_PER_TICK - 1);
+    assert(wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused);
+
+    /* RTC参考不可用时只做1ms心跳WFI：有授权同样必须在WFI之前暂停、返回之后立即恢复。 */
+    reset(0);
+    wd_auth = 1;
+    rtc_ready = 0;
+    normal_tick = 1;
+    app_tickless_sleep(20U);
+    assert(sleeps == 1U && kernel_tick == 1U && requested_load == (HOST_COUNTS_PER_TICK - 1U));
+    assert(wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused);
+
+    /* 等待不足2拍也走1ms心跳WFI：RTC计数有效但不补时，配对仍须成立且不推进RTC快照。 */
+    reset(0);
+    wd_auth = 1;
+    normal_tick = 1;
+    sleep_rtc_counts = 33U;
+    app_tickless_sleep(1U);
+    assert(sleeps == 1U && kernel_tick == 1U && rtc_count == 0U);
+    assert(wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused);
+
+    /* 内核要求放弃本轮睡眠、或入口已有到期tick：授权在两次检查之后才查询，
+     * 因此这两条直接返回的路径即便拿到授权也必须完全没有暂停动作。 */
+    reset(0);
+    wd_auth = 1;
+    abort_sleep = 1;
+    app_tickless_sleep(20U);
+    assert(!sleeps && !kernel_tick);
+    assert(wd_pause_count == 0 && wd_resume_count == 0);
+
+    reset(0);
+    wd_auth = 1;
+    SCB->ICSR = SCB_ICSR_PENDSTSET_Msk;
+    app_tickless_sleep(20U);
+    assert(!sleeps && kernel_tick == 1U);
+    assert(wd_pause_count == 0 && wd_resume_count == 0);
+
+    puts("PASS: authorization pairs pause/resume around every real idle wait (BLE-vetoed Sleep at the 262ms cap, "
+         "RTC-unavailable and sub-two-tick 1ms WFI), while abort/pending entries return before any pause.");
 
     if (APP_TICKLESS_ENABLE_STOP == 0)
     {
@@ -579,6 +679,96 @@ int main(void)
     step_limit = 401;
     app_tickless_sleep(400);
     assert(stops == 1 && stop_exti_imr == (1U << 4) && host_exti.IMR == (1U << 4));
+
+    /* 有sensor进度授权的1秒STOP：整段等待由暂停/恢复保护，不受400ms收紧；
+     * RTC一分钟内计数差恰为32768，补满1000个tick与TIM2的10000个100us诊断计数。 */
+    reset(0);
+    screen_off = 1;
+    wd_auth = 1;
+    sleep_rtc_counts = 32768U;
+    step_limit = 1000;
+    app_tickless_sleep(1000U);
+    assert(stops == 1 && sleeps == 0 && kernel_tick == 1000 && uwTick == 1000);
+    assert(TIM2->CNT == 10000);
+    assert(wakeup_counts == 999U * WATCH_RTC_SUBSECOND_HZ / 1000U);
+    assert(wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused && wd_in_stop == 0);
+
+    /* 起点距一分钟模数边界仅200计数：STOP跨分（午夜同分钟也是同一模数回绕）
+     * 之后取模差仍是完整1秒，绝不能因回绕补成0。 */
+    reset(0);
+    screen_off = 1;
+    wd_auth = 1;
+    rtc_count = WATCH_RTC_COUNTER_MOD - 200U;
+    sleep_rtc_counts = 32768U;
+    step_limit = 1000;
+    app_tickless_sleep(1000U);
+    assert(stops == 1 && sleeps == 0 && kernel_tick == 1000 && uwTick == 1000);
+    assert(TIM2->CNT == 10000);
+    assert(wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused && wd_in_stop == 0);
+
+    /* 从普通秒边界前768计数起步的完整1秒：跨秒取模差同样为32768。 */
+    reset(0);
+    screen_off = 1;
+    wd_auth = 1;
+    rtc_count = 32000U;
+    sleep_rtc_counts = 32768U;
+    step_limit = 1000;
+    app_tickless_sleep(1000U);
+    assert(stops == 1 && sleeps == 0 && kernel_tick == 1000 && uwTick == 1000);
+    assert(TIM2->CNT == 10000);
+    assert(wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused && wd_in_stop == 0);
+
+    /* 有授权时外设提前唤醒（约30ms）：只按实测RTC差补时，暂停/恢复仍各一次，
+     * 剩余等待由后续IDLE轮次重新决策。 */
+    reset(0);
+    screen_off = 1;
+    wd_auth = 1;
+    sleep_rtc_counts = 1000U;
+    step_limit = 1000;
+    app_tickless_sleep(1000U);
+    assert(stops == 1 && sleeps == 0 && kernel_tick == 30 && uwTick == 30);
+    assert(TIM2->CNT == 305);
+    assert(wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused && wd_in_stop == 0);
+
+    /* 授权300ms短STOP一次、随后授权失效的模型（覆盖touch重试300ms跨过200ms授权窗口的反例）：
+     * 暂停只在第一次实际等待之前发生；失去授权后700ms请求收紧到400ms，
+     * 且自始至终不再出现新的暂停，硬件超时检测连续有效。 */
+    reset(0);
+    screen_off = 1;
+    wd_auth = 1;
+    sleep_rtc_counts = 9830U; /* 约300ms。 */
+    step_limit = 1001;
+    app_tickless_sleep(300U);
+    assert(stops == 1 && wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused && wd_in_stop == 0);
+    assert(wakeup_counts == 299U * WATCH_RTC_SUBSECOND_HZ / 1000U);
+    authorized_resume_rtc = wd_resume_rtc;
+    /* 硬件恢复时刻即这次STOP结束，约300ms，不能提前也不能滞后。 */
+    assert(authorized_resume_rtc * 1000U / WATCH_RTC_SUBSECOND_HZ >= 299U);
+    assert(authorized_resume_rtc * 1000U / WATCH_RTC_SUBSECOND_HZ <= 301U);
+
+    wd_auth = 0;
+    sleep_rtc_counts = 13107U; /* 约400ms：无授权的700ms请求收紧至此上限。 */
+    app_tickless_sleep(700U);
+    assert(stops == 2 && wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused && wd_in_stop == 0);
+    assert(wakeup_counts == 399U * WATCH_RTC_SUBSECOND_HZ / 1000U);
+
+    sleep_rtc_counts = 9830U; /* 剩余300ms。 */
+    app_tickless_sleep(300U);
+    assert(stops == 3 && wd_pause_count == 1 && wd_resume_count == 1 && !wd_paused && wd_in_stop == 0);
+    assert(wakeup_counts == 299U * WATCH_RTC_SUBSECOND_HZ / 1000U);
+    assert(kernel_tick >= 990U && kernel_tick <= 1000U);
+    {
+        uint32_t gap_counts;
+        /* 自最后一次硬件恢复计数到累计等待结束的间隔：软件授权失效后由400/300ms上限
+         * 保证该间隔仍小于TPS3823最短900ms超时。 */
+        gap_counts = (rtc_count + WATCH_RTC_COUNTER_MOD - authorized_resume_rtc) % WATCH_RTC_COUNTER_MOD;
+        assert(gap_counts * 1000ULL / WATCH_RTC_SUBSECOND_HZ >= 600U);
+        assert(gap_counts * 1000ULL / WATCH_RTC_SUBSECOND_HZ <= 900U);
+    }
+
+    puts("PASS: an authorized 1s STOP compensates a full second across minute/midnight-modulo and second boundaries (never 0 on wrap), "
+         "pairs one pause/resume around the STOP, and after the authorization expires later waits cap at 400ms with no new pause "
+         "while the hardware gap stays below the 900ms timeout.");
     puts("PASS: STOP wake/clock-before-ISR, RTC and diagnostic time, deadline clamp, BLE/PWM/SPI/DMA/ADC veto, WUT and shadow-sync fallback.");
     puts("PASS: every real STOP masks the MPU PB12 EXTI (keeps PA4 and other lines) and restores the exact original IMR on normal and early wake.");
     puts("PASS: 5/10/100/200/400ms STOP blocks a new DATA_RDY event during STOP, keeps its EXTI PR pending, and still ends at the RTC deadline; preexisting NVIC pending is not blocked.");

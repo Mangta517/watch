@@ -846,54 +846,54 @@ static void touch_bridge_tests(void)
     lv_obj_update_layout(button);
     host_point.x = host_point.y = 15;
     host_touch = LV_INDEV_STATE_PRESSED;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     host_touch = LV_INDEV_STATE_RELEASED;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     lv_timer_handler();
     assert(host_short_clicks == 1); /* 两次采集之间没有LVGL轮询，仍收到完整点击。 */
     host_touch = LV_INDEV_STATE_PRESSED;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     lv_timer_handler();
     host_tick += 100; /* 模拟touch任务停滞，过期取消不能触发一次假点击。 */
     lv_timer_handler();
     assert(host_short_clicks == 1);
     host_touch = LV_INDEV_STATE_RELEASED;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     lv_timer_handler();
     /* 读失败取消按下；恢复时仍按住及之后松手都不能触发点击。 */
     host_touch = LV_INDEV_STATE_PRESSED;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     lv_timer_ready(lv_indev_get_next(NULL)->driver->read_timer);
     lv_timer_handler();
     host_touch_error = 1;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     lv_timer_ready(lv_indev_get_next(NULL)->driver->read_timer);
     lv_timer_handler();
     assert(host_short_clicks == 1);
     host_touch_error = 0;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     lv_timer_ready(lv_indev_get_next(NULL)->driver->read_timer);
     lv_timer_handler();
     assert(host_short_clicks == 1);
     host_touch = LV_INDEV_STATE_RELEASED;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     lv_timer_ready(lv_indev_get_next(NULL)->driver->read_timer);
     lv_timer_handler();
     assert(host_short_clicks == 1);
     /* 真实松手后的新点击正常，不永久禁用输入。 */
     host_touch = LV_INDEV_STATE_PRESSED;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     host_touch = LV_INDEV_STATE_RELEASED;
-    host_tick += 5;
+    host_tick += 10;
     app_touch_service();
     lv_timer_ready(lv_indev_get_next(NULL)->driver->read_timer);
     lv_timer_handler();
@@ -910,8 +910,8 @@ static void advance(unsigned ms)
     lv_mem_monitor_t memory;
     for (elapsed = 0; elapsed < ms; elapsed += 5)
     {
-        host_tick += 5; /* Match the firmware LVGL task's5ms scheduling. */
-        period_ms = 5;
+        host_tick += 5; /* 时钟保留5ms分辨率，触摸/LVGL按下面的10ms门限服务。 */
+        period_ms = 10;
         if (host_idle != 0)
         {
             period_ms = 20;
@@ -1802,7 +1802,7 @@ int main(int argc, char **argv)
     assert(host_flush_calls > 0);
     printf("PASS: immediate first-frame refresh before the UI service loop.\n");
     advance(30);
-    assert(s_page == PAGE_WATCH && host_light == 50);
+    assert(s_page == PAGE_WATCH && s_brightness == 35 && host_light == 35);
     assert(s_bt_eco != 0 && s_bt_enabled != 0 && host_bt_powered != 0); /* 出厂默认ECO，但亮屏仍保持供电。 */
     assert(strcmp(clock_text(), "10:10") == 0);
     assert_rtc_seconds(0);
@@ -1816,7 +1816,7 @@ int main(int argc, char **argv)
     drag(110, 216, 0, -100);
     drag(110, 100, 0, 120);
     assert(s_page == PAGE_WATCH && lv_obj_get_scroll_y(s_body) == 0 && s_history_count == 0);
-    assert(s_screen_on && host_light == 50); /* 开机按键松开不熄屏。 */
+    assert(s_screen_on && host_light == 35); /* 开机按键松开不熄屏。 */
     screenshot("watch");
     /* 三针来自同一RTC快照，秒针在0/15/30秒及分钟进位时跳格。 */
     assert(s_second_points[1].x == 100 && s_second_points[1].y == 18);

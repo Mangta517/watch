@@ -2176,7 +2176,7 @@ static void polling_tests(void)
     tick = 1000;
     memset(eeprom, 0xFF, sizeof(eeprom));
     assert(my_mpu6050_init() == 0);
-    assert(regs[MPU6050_ADDR][MPU6050_INT_ENABLE] == 0x01);
+    assert(regs[MPU6050_ADDR][MPU6050_INT_ENABLE] == 0x01); /* 保留器件DATA_RDY中断输出，主机侧靠PB12常驻屏蔽消除无用IRQ，sensor轮询INT_STATUS取帧。 */
     assert(regs[MPU6050_ADDR][MPU6050_FIFO_EN] == 0);
     assert(regs[MPU6050_ADDR][MPU6050_USER_CTRL] == 0);
     my_mpu6050_restore_offset(&zero);
@@ -2834,13 +2834,28 @@ static void stationary_flag_tests(void)
     activity_stationary_frames(&state, &now, 1, 0.0f);
     assert(state.stationary == 1);
 
-    /* 4) 断采超过最大间隔(600ms)时引用整体作废，已累计步数与抬腕次数保留。 */
-    common_activity_update(&state, 0.0f, 0.0f, -1.0f, now + 1000);
+    /* 4) 静止慢待机每秒一帧不作废：已静止时最大间隔放宽到1200ms，恰好1200ms仍新鲜，
+     *    反复1秒新鲜帧维持静止；超过1200ms才整体作废引用，已累计步数与抬腕次数保留。 */
+    assert(state.stationary == 1);
+    for (frames = 0; frames < 10; ++frames)
+    {
+        common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 1000);
+        assert(state.stationary == 1 && state.have_sample == 1 && state.have_still_ref == 1);
+        assert(state.steps == steps && state.wrist_sequence == wrist);
+    }
+    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 1200);
+    assert(state.stationary == 1 && state.have_still_ref == 1);
+    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 1300);
     assert(state.stationary == 0 && state.have_sample == 1 && state.have_still_ref == 0);
     assert(state.steps == steps && state.wrist_sequence == wrist);
-    now += 1200;
+    /* 作废后回到600ms窗口：静止结论已撤销，700ms间隔同样整体作废。 */
+    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 700);
+    assert(state.stationary == 0 && state.have_sample == 1 && state.have_still_ref == 0);
+    assert(state.steps == steps && state.wrist_sequence == wrist);
+    /* 重新对齐200ms读节拍；单个新鲜帧只重建差分参考，不得立即回到静止。 */
+    now = state.sample_ms + 200;
     activity_stationary_frames(&state, &now, 1, 0.0f);
-    assert(state.stationary == 0);
+    assert(state.stationary == 0 && state.have_sample == 1 && state.have_still_ref == 1);
 
     /* 5) 模拟读失败/无新帧的取消：单帧新鲜稳定不得立即回到静止，须重新连续满10秒。 */
     activity_stationary_frames(&state, &now, 51, 0.0f);
@@ -2864,7 +2879,7 @@ static void stationary_flag_tests(void)
     activity_stationary_frames(&wrapped, &wrap, 1, 0.0f);
     assert(wrapped.stationary == 1 && wrapped.steps == state.steps);
     assert((int32_t)wrap > 0 && (int32_t)wrapped.still_since_ms < 0);
-    puts("PASS: stationary needs 10.2s of fresh stable frames; motion, invalid magnitude, 600ms dropout and read-failure cancel restart the timer and keep steps/wrist.");
+    puts("PASS: stationary needs 10.2s of fresh stable frames; motion, invalid magnitude, 1200ms stationary dropout, 600ms non-stationary dropout and read-failure cancel restart the timer and keep steps/wrist.");
 
     /* 7) 真实后台5Hz路径：只有新鲜有效帧才放宽节拍，过期样本即使标记仍为1也要拒绝。 */
     memset(eeprom, 0xFF, sizeof(eeprom));
@@ -2910,15 +2925,98 @@ static void stationary_flag_tests(void)
     frames = stationary_service_wait(1, 90);
     assert(frames >= 45 && frames <= 56);
 
-    /* 10) 样本过期保护：停止取帧1.2秒后即使静止标记仍为1，也不再放宽节拍。 */
+    /* 10) 真实service路径的1秒新鲜度：静止后CPU每秒取一帧仍允许放宽节拍，恰好1200ms仍算新鲜，
+     *     超过1200ms才拒绝；过期后一拍取帧只重建参考，仍须重新连续稳定约10秒。 */
     assert(app_imu_is_stationary() == 1);
-    tick += 1000;
+    for (frames = 0; frames < 3; ++frames)
+    {
+        tick += 1000;
+        App_IMU_Service(1);
+        assert(app_imu_is_stationary() == 1);
+    }
+    tick += 1200;
+    assert(app_imu_is_stationary() == 1);
+    ++tick;
     assert(app_imu_is_stationary() == 0);
-    stationary_service_frame();
+    tick += 199;
+    App_IMU_Service(1);
     assert(app_imu_is_stationary() == 0);
     frames = stationary_service_wait(1, 90);
     assert(frames >= 45 && frames <= 56);
-    puts("PASS: real 5Hz background refuses stale, not-ready and NACKed frames; stationary only re-arms after another ~10s of fresh stability.");
+    puts("PASS: real 5Hz background keeps 1s idle reads fresh up to 1200ms and refuses stale, not-ready and NACKed frames; stationary only re-arms after another ~10s of fresh stability.");
+}
+
+/* 带非零计步/抬腕累计的静止放宽路径：1秒帧跨tick回绕仍维持静止，
+ * 超过1200ms与作废后的600ms窗口只清连续性，步数与抬腕累计保留。 */
+static void stationary_idle_gap_tests(void)
+{
+    common_activity_struct idle = {0};
+    static const float walking[] = {1.25f, 1.0f, 0.75f, 1.0f};
+    uint32_t idle_now = UINT32_MAX - 19500, steps, wrist;
+    unsigned cycle, sample, frames;
+
+    /* 起点刻意放在UINT32_MAX-19500：下面95帧200ms恰好走到回绕前沿，随后的1秒帧必跨0xFFFFFFFF。 */
+    activity_sample(&idle, 0.0f, 0.0f, -1.0f, &idle_now);
+    for (cycle = 0; cycle < 5; ++cycle)
+    {
+        for (sample = 0; sample < 4; ++sample)
+        {
+            activity_sample(&idle, 0.0f, -walking[sample], 0.0f, &idle_now);
+        }
+    }
+    steps = idle.steps;
+    assert(steps == 5 && idle.wrist_sequence == 0);
+    for (cycle = 0; cycle < 3; ++cycle)
+    {
+        activity_sample(&idle, 0.0f, -1.0f, 0.0f, &idle_now);
+    }
+    for (cycle = 0; cycle < 12; ++cycle)
+    {
+        activity_sample(&idle, 0.0f, 0.0f, -1.0f, &idle_now);
+    }
+    assert(idle.wrist_sequence == 1 && idle.steps == steps);
+    for (cycle = 0; cycle < 4; ++cycle)
+    {
+        activity_sample(&idle, 0.0f, 0.0f, 1.0f, &idle_now);
+    }
+    for (cycle = 0; cycle < 3; ++cycle)
+    {
+        activity_sample(&idle, 0.0f, 0.0f, -1.0f, &idle_now);
+    }
+    wrist = idle.wrist_sequence;
+    assert(wrist == 2 && idle.stationary == 0 && idle.steps == steps);
+    for (cycle = 0; cycle < 52; ++cycle)
+    {
+        activity_stationary_frames(&idle, &idle_now, 1, 0.0f);
+    }
+    assert(idle.stationary == 1 && (int32_t)idle.still_since_ms < 0);
+    /* 反复1秒新鲜帧：无符号间隔判定下跨越tick回绕也不取消静止，累计值不动。 */
+    for (frames = 0; frames < 10; ++frames)
+    {
+        common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 1000);
+        assert(idle.stationary == 1 && idle.have_sample == 1 && idle.have_still_ref == 1);
+        assert(idle.steps == steps && idle.wrist_sequence == wrist);
+    }
+    assert((int32_t)idle.still_since_ms < 0 && (int32_t)idle.sample_ms > 0);
+    /* 恰好1200ms仍新鲜，1300ms作废：清连续性与静止计时，步数和抬腕序号保留。 */
+    common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 1200);
+    assert(idle.stationary == 1 && idle.have_still_ref == 1);
+    common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 1300);
+    assert(idle.stationary == 0 && idle.have_sample == 1 && idle.have_still_ref == 0);
+    assert(idle.steps == steps && idle.wrist_sequence == wrist);
+    /* 已回到非静止的600ms窗口：700ms同样整体作废，600ms以内不作废但仍是0。 */
+    common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 700);
+    assert(idle.stationary == 0 && idle.have_sample == 1 && idle.have_still_ref == 0);
+    common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 600);
+    assert(idle.stationary == 0 && idle.have_sample == 1 && idle.have_still_ref == 1);
+    /* 重新连续稳定约10秒才再次放宽，全程不清零步数与抬腕。 */
+    for (frames = 0; frames < 55 && idle.stationary == 0; ++frames)
+    {
+        common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 200);
+        assert(idle.steps == steps && idle.wrist_sequence == wrist);
+    }
+    assert(idle.stationary == 1 && frames >= 49 && frames <= 52);
+    puts("PASS: stationary 1s idle reads survive repeated frames across tick wrap; 1300ms stationary and 700ms non-stationary dropouts clear only continuity, keeping steps and wrist raises.");
 }
 
 static void accel_reference_tests(void)
@@ -3114,6 +3212,7 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "stationary") == 0)
     {
         stationary_flag_tests();
+        stationary_idle_gap_tests();
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "mag_sleep_recovery") == 0)

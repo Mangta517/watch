@@ -34,7 +34,7 @@ extern "C"
 
     /* 调用前须完成MX_GPIO_Init/MX_USART1_UART_Init。
  * 兼容旧调用方的阻塞入口；手表启动使用下方begin/service。配置BLE名称、开启BLE并查询验证。
- * 普通/升级APP关闭SPP；仅F411_BOOTLOADER升级模式开启SPP，返回APP后重新关闭。
+ * 普通APP开启BLE并关闭SPP；保底恢复开启BLE并额外开启SPP。
  * 参数已匹配时不写配置；修改后重新上电。失败不阻止其他手表功能启动。
  * 本型号不配置CL/UT低功耗功能。返回HAL_OK/ERROR/TIMEOUT/BUSY。 */
     HAL_StatusTypeDef kt6368a_init(void);
@@ -49,7 +49,7 @@ extern "C"
 
     /* 电源切换/配置/收发接口须由同一个调用上下文串行使用，禁止在ISR调用。
  * power_on含HAL_Delay；power_off关闭USART1时钟/中断，UART引脚设为模拟无上下拉，避免反向供电。
- * 上电不改参数；configure开启BLE并设置BLE名称，按APP/Bootloader选择关闭/开启SPP。
+ * 上电不改参数；configure开启BLE、设置BLE名称并按构建设置SPP开关。
  * 仅在手机未连接时调用；本板无法读取连接状态。
  * name为1~30字节且不含CR/LF。 */
     HAL_StatusTypeDef kt6368a_power_on(void);

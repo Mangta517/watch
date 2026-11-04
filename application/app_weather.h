@@ -14,13 +14,16 @@ typedef struct
 } app_weather_struct;
 
 /* 与蓝牙日志/校时共用接收数据，仅由LVGL任务调用，不另行读取UART。
- * ASCII协议：WEATHER,WMO天气码,摄氏温度乘10,相对湿度百分比\n。 */
+ * ASCII协议：WEATHER,WMO天气码,摄氏温度乘10,相对湿度百分比\n；CR/LF或200ms空闲收尾。 */
 void app_weather_receive(const uint8_t *data, uint16_t size, uint32_t now_ms);
+/* LVGL每轮调用：仅收尾超过200ms无新字节的残帧，有换行时由receive直接解析。 */
 void app_weather_service(uint32_t now_ms);
 void app_weather_reset_receive(void); /* 不清除最后一份有效天气。 */
+/* LVGL任务内取当前快照；不跨任务加锁，NULL不处理。 */
 void app_weather_get_snapshot(app_weather_struct *snapshot);
 /* LVGL启动时恢复已校验的记录；已有手机天气时不覆盖，不恢复上次开机tick。 */
 void app_weather_restore(const app_weather_struct *snapshot);
+/* WMO天气码到显示文本的映射；未知码返回"UNKNOWN"，不修改快照。 */
 const char *app_weather_description(uint8_t code);
 
 #endif

@@ -2,7 +2,7 @@
 
 2026-11-02调整：蓝牙默认改为ECO省电、心率页新增独立AUTO每10分钟采样开关（默认关）、稳定熄屏进入约400ms慢待机、AHT采样窗口改为采样/恢复完成即收尾、触摸仅在休眠成功后才等待通知；温湿度仍为亮屏1秒/熄屏10分钟，普通待机和SPORT遵守同一屏幕策略。实际功耗、计步/抬腕精度及唤醒时序仍需实板测量。
 
-主频沿用64MHz、Scale3、Flash 2 wait states；本轮不调整背光亮度及10秒自动熄屏时间。
+主频沿用64MHz、Scale3、Flash 2 wait states；10秒自动熄屏时间不变。当前策略：LVGL服务、触摸采集与显示/输入刷新统一为10ms周期（`APP_LVGL_TASK_PERIOD`、`APP_TOUCH_PERIOD_MS`、`LV_DISP_DEF_REFR_PERIOD`、`LV_INDEV_DEF_READ_PERIOD`），待机仍为20ms；开机默认背光为35%（共享宏 `LCD_DEFAULT_BRIGHTNESS_PERCENT`）；MPU器件DATA_RDY中断输出保留 `INT_ENABLE=0x01`，主机侧由main启动持续屏蔽PB12消除无用IRQ，sensor按任务周期轮询INT_STATUS取帧。详见下文2026-11-03各章节。
 
 ## 蓝牙
 
@@ -29,7 +29,7 @@ ECO模式熄屏后等待初始化、接收队列、当前发送与维护事务�
 
 触摸任务仅在芯片休眠命令写入成功后才阻塞等待PA4通知；写入失败时首次立即重试，其后按500ms退避，亮屏通知可打断等待。休眠未成功时不报告为已休眠。
 
-## 2026-11-03 STOP期间统一屏蔽MPU DATA_RDY
+## 2026-11-03 STOP期间临时屏蔽MPU DATA_RDY（较早方案，已由当前开机常驻屏蔽覆盖）
 
 MPU6050的INT是锁存输出，PB12 EXTI回调只计数并置标志，应用没有读取这些标志：sensor按10/20/200/400ms自身任务期限直接读INT_STATUS和数据。原实现只在期望等待超过200ms时才屏蔽PB12，短STOP仍可能被器件锁存的DATA_RDY提前结束并多一次HSI→PLL恢复。现改为所有真实STOP在进入前保存`EXTI->IMR`并清除PB12位，唤醒后精确写回原值；PA4、RTC及其它EXTI位始终保留，不清`EXTI->PR`、不清NVIC pending，也不改变Sleep回退、各STOP否决条件、时间补偿和任务采样周期。
 
@@ -58,3 +58,35 @@ sensors、startup、UI（诊断开/关）、BLE、clock、tickless、touch、wat
 `tests/sensors/run.py`与`tests/startup/run.py`均通过。AHT回归覆盖24个10分钟窗口、到期前不触发、亮屏立即恢复1秒周期、在途转换和tick回绕；真实sensor任务调度模型覆盖31分钟、两次屏幕切换、独立5分钟气压周期及待机写失败重试。
 
 普通APP与升级APP的Keil ARMCC 5.06增量构建均0错误、0警告，已生成对应HEX；尚未烧录或实板测量新周期下的电流与续航。
+
+## 2026-11-03 本轮小范围低功耗优化
+
+本轮只调整软件节拍、背光默认值与MPU中断三处，均为主机可验证的配置/节拍改动，未改动其它业务逻辑，也未做实板电流测量。
+
+- 刷新与采集节拍：`APP_LVGL_TASK_PERIOD`、`APP_TOUCH_PERIOD_MS`、`LV_DISP_DEF_REFR_PERIOD`、`LV_INDEV_DEF_READ_PERIOD` 由 5ms 统一放宽到 10ms；待机 20ms、熄屏稳定等待 200/400ms、触摸休眠失败 500ms 退避、心率/姿态/环境/气压等传感器周期以及 1kHz RTOS tick 保持不变。
+- 默认背光：新增共享宏 `LCD_DEFAULT_BRIGHTNESS_PERCENT`（35），`LCD_Init` 开机设置与 UI 的 `s_brightness` 初值都使用该宏，避免上电瞬间高亮；亮度滑条仍为 2..100、熄屏置 0、亮屏恢复用户设定值。
+- MPU 中断：恢复配置表的 `INT_ENABLE(0x38)` 保留 0x01，器件 DATA_RDY 中断输出继续使能；`Core/Src/main.c` 的 USER CODE 2 内、`App_Task_Create()` 之前用 `EXTI->IMR &= ~MPU6050_INT_Pin` 持续屏蔽 PB12（早于稍后的 sensor 初始化，避免倒置时序），只清该位，不禁用共享 NVIC 组，不改 CubeMX 生成区。仅靠主机侧常驻屏蔽即消除无用 IRQ，器件原有 `INT_PIN_CFG`、`INT_STATUS`/锁存工作与全部时间戳/故障恢复路径保持不变；旧的 ISR 边沿计数与标志 API 仅为兼容旧调用方保留，不删除。上一节“仅在真实 STOP 期间临时屏蔽 PB12”为较早方案，现由开机常驻屏蔽覆盖：`app_tickless.c` 不改，STOP 前保存、唤醒后还原原掩码时 PB12 继续保持屏蔽，STOP 期间的临时屏蔽逻辑不再改变 PB12 的最终状态。
+
+## 2026-11-03 MOT 运动唤醒研究结论
+
+未启用 MPU MOT（运动）硬件唤醒，仍按当前 5Hz 低功耗循环加 400ms 静止软件轮询。研究结论：MOT 主要收益是省去 CPU 与 I2C 轮询；但 `app_imu_is_stationary()` 与 `common_activity` 在约 600ms 无新帧后会退出静止判定并重置抬腕及步态状态，驱动侧“1s 无帧恢复”需要区分是器件异常还是有意等待；要真正以 MOT 唤醒替代轮询，还需补充 ISR→任务通知通路、进入 STOP 时保留运动检测所需的 PB12（与本轮屏蔽 PB12 的取向相反），并结合实板起步、抬腕与误唤醒验证。仅写寄存器不足以安全启用，故本轮不做该改动。
+
+## 2026-11-03 10ms、35%与PB12常驻屏蔽验收
+
+Codex独立运行startup、sensors、touch、tickless与UI五套主机回归，全部通过。UI覆盖诊断开/关、10ms触摸采集与LVGL服务、缓存短按、滑动/滑条、页面切换、熄屏与亮度恢复；startup执行真实main启动片段，确认只关闭PB12、保留PA4和其它EXTI位，已关闭的PB12不会被重新打开。看门狗、静止400ms及采样/恢复原有回归继续通过。
+
+普通APP与升级APP使用ARMCC 5.06全量构建，均为0错误、13条来自未修改LVGL源码的警告。原产物目录及环境临时目录不可写，验收使用临时工程副本调整输出目录并指定可写临时目录；已核对副本除输出/列表目录外与正式工程一致，仍编译本地D盘源码，正式uvprojx未改，临时工程副本已删除。UI产物同样放在本次可写验收目录，测试断言与功能覆盖未缩减。
+
+未烧录、未测电流；10ms下的实机滑动、短按、动画流畅度与35%背光的强光可读性仍需上板验证。
+
+## 2026-11-04 静止慢待机放宽到1秒与空闲等待暂停外部看门狗（当前）
+
+本节取代上文把稳定熄屏慢待机写成400ms的表述；按日期标注的旧段落保留为历史，其中的数值不是当前值。
+
+- 慢待机节拍：稳定熄屏且加速度连续约10秒不变后，普通熄屏的CPU读取与基础服务节拍由400ms放宽为1000ms（`APP_SENSOR_SLEEP_IDLE_POLL_MS`），sensor发布给LVGL的通知等待超时同步为1000ms；出现新运动时同一轮就回到200ms（`APP_SENSOR_SLEEP_POLL_MS`）。心率10ms、SPORT、亮屏刷新、姿态页以及温湿度/气压转换与恢复窗口的100ms检查维持原周期，不因慢待机放宽。
+- 采集代价：MPU器件输出率仍是5Hz，慢待机只是CPU每秒读一帧，两次读取之间器件产生的帧被丢弃，短动作可能漏采，抬腕判定的延迟也可能增加。活动层断采容忍随之分档：非静止仍为600ms（`COMMON_ACTIVITY_MAX_GAP_MS`），已静止放宽到1200ms（`COMMON_ACTIVITY_STATIONARY_MAX_GAP_MS`），使1秒读数加调度抖动不会反复作废静止、计步与抬腕的连续判定；真正超档时只清连续性，累计步数和已发布抬腕序号保留。
+- RTC计时：睡眠补偿改用一分钟内的“秒＋亚秒”计数，并按一分钟模数计算差值，避免睡满1秒被原亚秒模减算成零，同时覆盖跨分和午夜。
+- 外部看门狗：TPS3823最短硬件超时仍是900ms。距最近一次由新sensor进度确认的双任务喂狗不超过200ms（`APP_WATCHDOG_STOP_WINDOW_MS`）且当前为1000ms静止慢待机节拍时，`app_task_watchdog_stop_allowed()`授权本轮所有实际IDLE等待路径（含短STOP、普通Sleep以及RTC不可用回退的1ms WFI）把PB2/WDI切为高阻，暂停芯片超时计时；PB1/WDG_EN保持低电平，芯片欠压复位通路仍然接通。醒来立即恢复推挽输出并补一次喂狗脉冲，该恢复路径不更新`app_watchdog.last_feed_ms`，因此200ms授权窗口不会因暂停本身续期；sensor或LVGL停止推进后授权自然失效，长等待被收紧到400ms（`APP_TICKLESS_WATCHDOG_PAUSE_MIN_TICKS`），任务停滞仍会被硬件超时复位。单次STOP上限仍为1000ms，不存在“超过1000ms的STOP”。
+- 残余风险：授权期内如果RTC/LSE永不唤醒（LSE停振且无其它中断到来），WDI高阻期间无法依靠看门狗超时复位，只能等唤醒后恢复喂狗，此路径需实板评估。
+
+本轮只涉及软件节拍、活动层容差与看门狗暂停逻辑；未烧录、未测待机电流，也未做实板计步/抬腕精度与唤醒时延验证。Codex已独立运行startup、sensors、tickless、clock、watchdog、touch、UI七套主机回归，全部通过；普通APP与升级APP的ARMCC 5.06全量构建均为0错误、13条既有LVGL警告。

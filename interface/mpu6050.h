@@ -3,11 +3,13 @@
  * @file    mpu6050.h
  * @brief   MPU6050 驱动 —— 走软件 I2C SENSOR 总线 (PB14=SCL, PB13=SDA)
  *          移植自旧工程 flight_hal/interface/my_mpu6050.c (硬件 I2C1 版)，
- *          函数名/寄存器配置/校准逻辑保持一致，便于旧上层代码直接复用。
+ *          沿用旧函数名；量程、采样与校准行为以本工程当前实现为准，便于旧上层代码直接复用。
  *
- * 中断说明：数据就绪中断已使能 —— 器件 INT_PIN_CFG(0x37)=0x20
- *          (高有效/推挽/锁存, 读 0x3A 清除), INT_ENABLE(0x38)=0x01(DATA_RDY)；
- *          INT 接 PB12, ISR 只记事件，sensor 任务读 0x3A 释放锁存。
+ * 中断说明：器件数据就绪中断输出仍使能 —— INT_ENABLE(0x38)=0x01；
+ *          器件 INT_PIN_CFG(0x37) 仍为 0x20 (高有效/推挽/锁存, 读 0x3A 清除)；
+ *          main 启动即持续屏蔽 PB12 EXTI（早于稍后的 sensor 初始化，避免倒置时序），
+ *          sensor 任务按周期轮询 INT_STATUS 的 DATA_RDY，读 0x3A 同时释放器件锁存。
+ *          ISR 边沿计数/标志 API 仅为兼容旧调用方保留。
  ******************************************************************************
  */
 #ifndef __MPU6050_H
@@ -90,18 +92,22 @@ extern "C"
 #define MPU6050_DLPF_CFG         0x03 /* 陀螺仪42Hz、加速度44Hz */
 
     /* ------------------------------------------------------------ 数据结构 */
+    /* 三轴陀螺仪原始或零偏修正后的计数，单位 LSB；
+     * 按 MPU6050_GYRO_LSB_PER_DPS 换算为 °/s。 */
     typedef struct
     {
-        int16_t Gyro_x; /* 向左飞为正，向右飞为负，表示横滚角 */
-        int16_t Gyro_y; /* 向后飞为正，向前飞为负，表示俯仰角 */
-        int16_t Gyro_z; /* 逆时针为正，顺时针为负，表示偏航角 */
+        int16_t Gyro_x; /* X 轴陀螺仪计数 (LSB) */
+        int16_t Gyro_y; /* Y 轴陀螺仪计数 (LSB) */
+        int16_t Gyro_z; /* Z 轴陀螺仪计数 (LSB) */
     } Gyro_struct;
 
+    /* 三轴加速度计数，单位 LSB；按 MPU6050_ACCEL_LSB_PER_G 换算为 g，
+     * 静止值包含重力在各轴上的投影。 */
     typedef struct
     {
-        int16_t Accel_x; /* 向前为负 */
-        int16_t Accel_y; /* 向右为正 */
-        int16_t Accel_z; /* 朝上飞加速度为正 */
+        int16_t Accel_x; /* X 轴加速度计数 (LSB) */
+        int16_t Accel_y; /* Y 轴加速度计数 (LSB) */
+        int16_t Accel_z; /* Z 轴加速度计数 (LSB) */
     } Accel_struct;
 
     typedef struct
@@ -136,8 +142,8 @@ extern "C"
 
     typedef struct
     {
-        int16_t accel[3]; /* 原始LSB的零偏，Z轴不包含重力1g。 */
-        int16_t gyro[3];
+        int16_t accel[3]; /* X/Y/Z 三轴加速度原始 LSB 零偏，Z 轴不包含重力 1g。 */
+        int16_t gyro[3];  /* X/Y/Z 三轴陀螺仪原始 LSB 零偏。 */
     } mpu6050_offset_struct;
 
     /* 仅sensor任务使用；恢复后不启动静止校准，原读取路径继续减去这些偏移。 */
@@ -145,7 +151,7 @@ extern "C"
     void my_mpu6050_restore_offset(const mpu6050_offset_struct *offset);
 
     /* sensor任务用正常读取的同一帧逐步校准，不额外读I2C或等待。
-     * 保留连续100帧静止判断和100帧平均；等待静止3s、平均阶段2s真实时间超时。 */
+     * 保留连续100帧静止判断和100帧平均；100Hz档等待/平均超时为3s/2s，其他档位按当前周期与10ms基准之比缩放。 */
     void my_mpu6050_zero_offset_begin(uint32_t now_ms);
     mpu6050_cal_state my_mpu6050_zero_offset_step(Accel_Gyro_struct *raw, uint8_t valid, uint32_t now_ms);
     mpu6050_cal_state my_mpu6050_zero_offset_state(void);
@@ -208,7 +214,9 @@ extern "C"
     uint8_t my_mpu6050_get_temp(int16_t *temp_01c);
 
     /* ---------------------------------------- 数据就绪中断 (PB12 EXTI 上升沿) */
-    /* ISR 只置标志/计边沿；器件锁存在 get_data 的任务事务中释放。 */
+    /* 器件 DATA_RDY 输出仍使能 (INT_ENABLE=0x01, INT_PIN_CFG=0x20)；main 启动即持续屏蔽 PB12，
+     * 以下 ISR/计数 API 仅为兼容旧调用方保留，正常运行不再进入本驱动的中断回调；
+     * 器件锁存仍在 get_data 的任务事务中读取 INT_STATUS 释放。 */
 
     /* 任务上下文查询并清除"数据就绪"标志: 1=发生过(已清), 0=无。
  * 注意: 标志只有 1 位, 同一时刻窗口内多个中断会合并成一个, 不能用来计频! */

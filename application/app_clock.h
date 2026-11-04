@@ -2,7 +2,7 @@
 #define APP_CLOCK_H
 #include <stdint.h>
 
-#define APP_CLOCK_FRAME_IDLE_MS 200
+#define APP_CLOCK_FRAME_IDLE_MS 200 /* 无换行帧的空闲收尾门限，毫秒 */
 
 typedef enum
 {
@@ -15,8 +15,10 @@ typedef enum
 /* 与蓝牙显示共用一个接收入口，仅在LVGL任务调用。支持H:M / HH:MM / HH:MM:SS；省略秒时置零。
  * CR/LF结束消息；无换行时以200ms接收空闲为结束，分段数据不会提前设置RTC。 */
 void app_clock_receive(const uint8_t *data, uint16_t size, uint32_t now_ms);
+/* 仅靠接收空闲超时收尾无换行的残帧；有换行时receive直接处理，不重复设置RTC。 */
 void app_clock_service(uint32_t now_ms);
 void app_clock_reset_receive(void); /* 丢字节时仅废弃残帧，保留已完成的校时结果。 */
+/* 返回最近一次帧解析结果：SYNCED成功写RTC/INVALID格式非法/RTC_ERROR校验通过但写失败/NONE尚无帧。 */
 app_clock_result app_clock_get_result(void);
 /* LVGL上下文读取合法校时消息计数；用于无连接状态脚时确认手机通信就绪。 */
 uint32_t app_clock_get_received_count(void);

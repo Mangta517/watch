@@ -65,6 +65,7 @@ void HAL_RTC_MspInit(RTC_HandleTypeDef* rtcHandle)
   {
   /* USER CODE BEGIN RTC_MspInit 0 */
         /* watch_rtc 的自有句柄已配置时钟；此 MSP 仅处理 CubeMX 的 hrtc。 */
+        /* 句柄不是本工程的 hrtc 时提前返回，不再继续执行本段的RTC时钟源与时钟使能配置。 */
         if (rtcHandle != &hrtc)
         {
             return;

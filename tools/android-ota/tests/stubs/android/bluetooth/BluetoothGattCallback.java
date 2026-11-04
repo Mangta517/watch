@@ -1,0 +1,28 @@
+package android.bluetooth;
+
+public class BluetoothGattCallback
+{
+    public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState)
+    {
+    }
+
+    public void onServicesDiscovered(BluetoothGatt gatt, int status)
+    {
+    }
+
+    public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status)
+    {
+    }
+
+    public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status)
+    {
+    }
+
+    public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic)
+    {
+    }
+
+    public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, byte[] value)
+    {
+    }
+}

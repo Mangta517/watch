@@ -19,9 +19,9 @@ extern "C"
 
 #include <stdint.h>
 
-#define APP_BARO_HISTORY_POINTS    24
-#define APP_BARO_HISTORY_PERIOD_MS 600000
-#define APP_BARO_HISTORY_NONE      INT16_MIN
+#define APP_BARO_HISTORY_POINTS    24      /* 高度柱状历史点数，最旧在左 */
+#define APP_BARO_HISTORY_PERIOD_MS 600000  /* 每柱间隔，毫秒(10分钟) */
+#define APP_BARO_HISTORY_NONE      INT16_MIN /* 缺测柱标记：该十分钟没有有效读数 */
 
     typedef struct
     {
@@ -50,6 +50,7 @@ extern "C"
     void App_Baro_Service(void);
     /* sensor在采样尝试完成后调用；十分钟一柱，失败保留空位，独立于页面生命周期。 */
     void app_baro_record_history(void);
+    /* 加锁取24点高度柱状历史的一致快照；NULL不处理。 */
     void app_baro_get_history(app_baro_history_struct *history);
 
     /**

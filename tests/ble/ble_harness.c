@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+/* 普通APP要求SPP关闭，保底恢复要求SPP开启；预置相反值以验证按构建切换。 */
 #if defined(F411_BOOTLOADER)
 #define TEST_EXPECTED_SPP "01"
 #define TEST_INITIAL_SPP  "00"
@@ -598,7 +599,7 @@ int main(void)
     puts("PASS: UART RX callback priority is 12 before first reception and after MSP reinitialization.");
 #endif
     assert(kt6368a_get_init_status() == HAL_ERROR);
-    /* 从相反SPP配置迁移到当前APP/升级模式，重新上电后生效，SPP名称保持不变。 */
+    /* 从预置的相反SPP状态迁移到当前构建的目标配置，重新上电后生效，SPP名称保持不变。 */
     assert(kt6368a_init() == HAL_OK);
     assert(kt6368a_get_init_status() == HAL_OK);
     assert(strcmp(current_ble_name, KT6368A_BLE_NAME) == 0);

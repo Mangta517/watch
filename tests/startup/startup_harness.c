@@ -249,6 +249,7 @@ static uint32_t first_frame_chunk_ms = 150U;
 static unsigned int first_frame_chunks = 10U;
 static void (*display_progress_callback)(void);
 static uint32_t watchdog_last_falling_ms;
+static uint8_t watchdog_idle_paused;
 static uint8_t runtime_render, runtime_sensor_stalled;
 static uint32_t runtime_chunk_ms = 150U;
 static unsigned int runtime_chunks = 10U, render_yields;
@@ -274,6 +275,26 @@ void tps3823_feed(void)
     }
     ++watchdog_feeds;
     watchdog_last_falling_ms = tick;
+}
+
+/* 硬件空闲暂停的测试私有模型：真实顺序由application/app_tickless.c实现并经tests/tickless验证，
+ * 本harness不链接tickless，只复刻"实际等待前查询授权、醒来立即补一次下降沿"的外部效果。
+ * 等待前读取真实app_task_watchdog_stop_allowed()，只有sensor进度授权为真才记录本次暂停。 */
+static void watchdog_model_idle_pause(void)
+{
+    watchdog_idle_paused = app_task_watchdog_stop_allowed();
+}
+
+/* idle等待结束模拟tps3823_stop_resume立即输出下降沿，只刷新硬件最后下降沿基线；
+ * 不改写app_watchdog.last_feed_ms、不增加watchdog_feeds，
+ * 因此200ms软件授权窗口仍只由真实sensor进度喂狗续期，暂停不会自我延长。 */
+static void watchdog_model_idle_resume(void)
+{
+    if (watchdog_idle_paused != 0)
+    {
+        watchdog_idle_paused = 0;
+        watchdog_last_falling_ms = tick;
+    }
 }
 
 static void test_watchdog_progress(uint8_t wrap)
@@ -348,6 +369,41 @@ static void test_watchdog_startup(uint8_t wrap)
     }
     assert(watchdog_feeds == 49U && app_watchdog.sensor_started == 0);
     puts("Watchdog: sensor startup may progress for 5s, then missing first round stops feeding, including tick wrap: PASS");
+}
+
+static void test_watchdog_stop_authorization(uint8_t wrap)
+{
+    uint32_t feed_mark;
+    tick = 1000;
+    if (wrap != 0)
+    {
+        tick = UINT32_MAX - 150U;
+    }
+    memset(&app_watchdog, 0, sizeof(app_watchdog));
+    s_sleep_poll_ms = APP_SENSOR_SLEEP_IDLE_POLL_MS;
+    /* sensor 尚未产生进度：即使刚发生喂狗也拒绝授权长 STOP。 */
+    app_watchdog.last_feed_ms = tick;
+    assert(app_task_watchdog_stop_allowed() == 0);
+    /* sensor 已启动：距最近一次真实喂狗不超过200ms且为1000ms慢待机节拍才授权。 */
+    app_watchdog.sensor_started = 1;
+    feed_mark = app_watchdog.last_feed_ms;
+    assert(app_task_watchdog_stop_allowed() == 1);
+    /* 授权查询本身不喂狗、不推进授权时刻。 */
+    assert(app_watchdog.last_feed_ms == feed_mark);
+    tick += 200; /* 恰好200ms边界仍授权。 */
+    assert(app_task_watchdog_stop_allowed() == 1);
+    tick += 1; /* 超过200ms且没有新sensor进度真实喂狗：不续期。 */
+    assert(app_task_watchdog_stop_allowed() == 0);
+    /* 非静止慢待机的200ms节拍即使喂狗新鲜也不授权。 */
+    s_sleep_poll_ms = APP_SENSOR_SLEEP_POLL_MS;
+    app_watchdog.last_feed_ms = tick;
+    assert(app_task_watchdog_stop_allowed() == 0);
+    /* 回到1000ms节拍后按同一last_feed_ms立即恢复授权，函数仍未改写喂狗时刻。 */
+    s_sleep_poll_ms = APP_SENSOR_SLEEP_IDLE_POLL_MS;
+    feed_mark = app_watchdog.last_feed_ms;
+    assert(app_task_watchdog_stop_allowed() == 1);
+    assert(app_watchdog.last_feed_ms == feed_mark);
+    puts("Watchdog: long-STOP pause requires sensor start, real feed within 200ms and 1000ms idle poll; not renewed without progress, including tick wrap: PASS");
 }
 
 void startup_boot_set(uint8_t field, uint32_t value)
@@ -447,7 +503,7 @@ uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
 {
     if (sleep_stationary_test != 0)
     {
-        assert(clear == pdTRUE && wait == 400 && s_sleep_poll_ms == 400);
+        assert(clear == pdTRUE && wait == 1000 && s_sleep_poll_ms == 1000);
         return 1;
     }
     if (lvgl_wait_test != 0)
@@ -561,7 +617,7 @@ void vTaskDelay(TickType_t ticks)
         sensor_timing_wait(ticks);
         return;
     }
-    assert((ticks == 5 || ticks == 1 || ((power_profile != 0 || lvgl_wait_test != 0) && (s_power_state & APP_POWER_IDLE) != 0 && ticks == 20U)) && task_count == 3);
+    assert((ticks == 10 || ticks == 1 || ((power_profile != 0 || lvgl_wait_test != 0) && (s_power_state & APP_POWER_IDLE) != 0 && ticks == 20U)) && task_count == 3);
     /* Tickless由独立硬件/内核模型验证；任务阻塞不能替代进度喂狗。 */
     assert(watchdog_feeds == feeds);
     tick += ticks;
@@ -828,8 +884,8 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     }
     if (sleep_test != 0)
     {
-        assert(ticks == 10U || ticks == 20U || ticks == 40U || ticks == 100U || ticks == 200 || ticks == 400);
-        if (ticks == 200 || ticks == 400)
+        assert(ticks == 10U || ticks == 20U || ticks == 40U || ticks == 100U || ticks == 200 || ticks == 400 || ticks == 1000);
+        if (ticks == 200 || ticks == 1000)
         {
             ++sleep_idle_waits;
             assert(lvgl_notifications == sleep_idle_waits);
@@ -839,13 +895,15 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
             assert(ticks == 10U);
         }
         assert(++sensor_rounds == app_sensor_watchdog_progress);
+        /* 有效下降沿间隔必须始终短于芯片最短900ms超时：获sensor进度授权的idle等待在醒来时
+         * 由下面的pause/resume模型立即补一次下降沿，未获授权时不记录暂停，本断言照常拦截停滞。 */
         assert((uint32_t)(tick - watchdog_last_falling_ms) < 900);
         app_watchdog_service();
         if (sleep_stationary_test != 0)
         {
-            if (ticks == 400)
+            if (ticks == 1000)
             {
-                assert(s_sleep_poll_ms == 400);
+                assert(s_sleep_poll_ms == 1000);
                 app_lvgl_wait(APP_IDLE_POLL_MS, 1);
                 ++stationary_slow_waits;
                 stationary_seen_slow = 1;
@@ -854,8 +912,8 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
             {
                 ++stationary_fast_waits;
             }
-            /* 10~12秒加速度稳定→400ms慢待机；恢复运动→立即回到200ms，进入与退出各至少验证一次。 */
-            if (stationary_seen_slow != 0 && sensor_elapsed_ms >= 12000 && ticks != 400)
+            /* 10~12秒加速度稳定→1000ms慢待机；恢复运动→立即回到200ms，进入与退出各至少验证一次。 */
+            if (stationary_seen_slow != 0 && sensor_elapsed_ms >= 12000 && ticks != 1000)
             {
                 stationary_back_fast = 1;
                 assert(stationary_slow_waits >= 2U && stationary_fast_waits >= 1U);
@@ -902,8 +960,12 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
             assert(battery_sleep_mode == 0);
             longjmp(sensor_stop, 1);
         }
+        /* 本轮处理结束后进入的idle等待：先按真实授权判定是否允许暂停TPS3823超时检测，
+         * 再推进这段等待时间，醒来时补硬件下降沿，等价于tickless的pause/resume顺序。 */
+        watchdog_model_idle_pause();
         sensor_elapsed_ms += ticks;
         tick += ticks;
+        watchdog_model_idle_resume();
         if (sleep_stationary_test == 4 && sensor_elapsed_ms >= 12000)
         {
             app_task_set_power_state(0, 0, 0, 0);
@@ -1450,7 +1512,7 @@ void App_IMU_Service(uint8_t read_mag)
         {
             if (stationary_sample_seen != 0)
             {
-                assert((uint32_t)(tick - stationary_last_sample) <= 400);
+                assert((uint32_t)(tick - stationary_last_sample) <= 1000);
             }
             stationary_sample_seen = 1;
             stationary_last_sample = tick;
@@ -1473,7 +1535,7 @@ void App_IMU_Service(uint8_t read_mag)
                 assert(sensor_elapsed_ms - sleep_pose_ms >= 200);
                 if (sleep_stationary_test != 0)
                 {
-                    assert(sensor_elapsed_ms - sleep_pose_ms <= 400);
+                    assert(sensor_elapsed_ms - sleep_pose_ms <= 1000);
                 }
                 else
                 {
@@ -1966,7 +2028,7 @@ int main(int argc, char **argv)
         if (sleep_stationary_test != 0)
         {
             assert(stationary_back_fast != 0);
-            puts("PASS: slow idle reads stay within 400ms, LVGL follows 400ms and motion/recovery/wake/PPG exits immediately.");
+            puts("PASS: slow idle reads stay within 1000ms, LVGL follows 1000ms and motion/recovery/wake/PPG exits immediately.");
             return 0;
         }
         assert(sleep_first_seen != 0);
@@ -1993,6 +2055,11 @@ int main(int argc, char **argv)
     if (argc > 1 && (strcmp(argv[1], "watchdog_startup") == 0 || strcmp(argv[1], "watchdog_startup_wrap") == 0))
     {
         test_watchdog_startup((uint8_t)(strcmp(argv[1], "watchdog_startup_wrap") == 0));
+        return 0;
+    }
+    if (argc > 1 && (strcmp(argv[1], "watchdog_stop") == 0 || strcmp(argv[1], "watchdog_stop_wrap") == 0))
+    {
+        test_watchdog_stop_authorization((uint8_t)(strcmp(argv[1], "watchdog_stop_wrap") == 0));
         return 0;
     }
     if (argc > 1)
@@ -2091,7 +2158,7 @@ int main(int argc, char **argv)
     if (touch_work_ms != 0)
     {
         assert(result == 1 && touch_inits == 1 && touch_samples == 1);
-        puts("Touch task: priority 1, 1KB stack, post-first-frame startup, 5ms cadence and no catch-up after a slow read: PASS");
+        puts("Touch task: priority 1, 1KB stack, post-first-frame startup, 10ms cadence and no catch-up after a slow read: PASS");
         return 0;
     }
     if (runtime_render != 0)
@@ -2121,7 +2188,7 @@ int main(int argc, char **argv)
         printf("Power policy %s: dynamic sensor period, idle touch/display period and continuing RTC startup: PASS\n", argv[1]);
         return 0;
     }
-    assert(result == 1 && frame && service_count > 900);
+    assert(result == 1 && frame && service_count > 450);
     assert(watchdog_inits == 1 && watchdog_enables == 1);
     assert(hardware_count == 5 && battery_samples == 1 && sensor_ran);
     assert(touch_inits == 1 && touch_samples == 1 && task_count == 3);
@@ -2129,7 +2196,7 @@ int main(int argc, char **argv)
     {
         assert(watchdog_feeds == first_frame_chunks + 1U);
         assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650U + first_frame_chunks * first_frame_chunk_ms);
-        assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 5U);
+        assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 10);
         assert(app_watchdog.started_ms == milestones[APP_BOOT_FIRST_FRAME_MS] && display_progress_callback != NULL);
         puts("Startup: 1.5s/3s first frames maintain falling-edge intervals below 900ms; startup phases have separate deadlines: PASS");
     }
@@ -2137,7 +2204,7 @@ int main(int argc, char **argv)
     {
         assert(watchdog_feeds == 1);
         assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650);
-        assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == 655);
+        assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == 660);
     }
     assert(milestones[APP_BOOT_RTC_END_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 5000U);
     assert(milestones[APP_BOOT_BT_END_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);

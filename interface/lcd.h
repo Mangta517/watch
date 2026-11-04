@@ -33,6 +33,10 @@ extern "C"
 #define LCD_BL_CCR_INVERT 0
 #define LCD_BL_ARR        300
 
+/* 默认背光亮度百分比: LCD_Init 开机设置与 UI 的 s_brightness 共用同一值，
+ * 开机默认为 35%，避免上电瞬间高亮。 */
+#define LCD_DEFAULT_BRIGHTNESS_PERCENT 35
+
 /* RGB565 常用色 */
 #define LCD_BLACK 0x0000
 #define LCD_WHITE 0xFFFF

@@ -147,6 +147,7 @@ int main(void)
         }
     }
     assert(app_ota_service(1, 30) == 1 && sends == 1);
+    assert(strcmp(message, "OTA,REBOOTING,SPP\r\n") == 0);
     app_ota_reset_receive();
     app_ota_service(0, 31);
     tx_done = 1;

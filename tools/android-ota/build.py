@@ -6,8 +6,136 @@ import subprocess
 import zipfile
 
 
+# 原BLE DUAL(3)在Android缓存后仍返回3；SPP升级结束必须回到BLE(2)，不能误选经典蓝牙(1)。
+TRANSPORT_METHOD_OLD = """.method public static transport_type(I)I
+    .locals 2
+
+    .line 12
+    const/4 v0, 0x2
+
+    if-ne p0, v0, :cond_0
+
+    .line 14
+    return v0
+
+    .line 16
+    :cond_0
+    const/4 v0, 0x1
+
+    if-eq p0, v0, :cond_2
+
+    const/4 v1, 0x3
+
+    if-ne p0, v1, :cond_1
+
+    goto :goto_0
+
+    .line 20
+    :cond_1
+    const/4 p0, 0x0
+
+    return p0
+
+    .line 18
+    :cond_2
+    :goto_0
+    return v0
+.end method"""
+
+TRANSPORT_METHOD_NEW = """.method public static transport_type(I)I
+    .locals 2
+
+    .line 12
+    const/4 v0, 0x2
+
+    if-ne p0, v0, :cond_0
+
+    .line 14
+    return v0
+
+    .line 16
+    :cond_0
+    const/4 v1, 0x3
+
+    if-ne p0, v1, :cond_1
+
+    .line 18
+    return v0
+
+    .line 20
+    :cond_1
+    const/4 v0, 0x1
+
+    if-ne p0, v0, :cond_2
+
+    .line 22
+    return v0
+
+    .line 24
+    :cond_2
+    const/4 v0, 0x0
+
+    return v0
+.end method"""
+
+
 def run(command, cwd):
     subprocess.run([str(item) for item in command], cwd=cwd, check=True)
+
+
+def patch_ble_mode(decoded):
+    """把DUAL(3)路由改回BLE(2)：0->0、1->1、2->2、3->2；重复执行不再改动。"""
+    path = decoded / "smali_classes2/dev/mangta/wave/BleMode.smali"
+    if not path.is_file():
+        raise RuntimeError("The decoded APK has no BleMode.smali for DUAL routing")
+    text = path.read_bytes().decode("utf-8")
+    if "\r\n" in text:
+        newline = "\r\n"
+    else:
+        newline = "\n"
+    normalized = text.replace("\r\n", "\n")
+    old_count = normalized.count(TRANSPORT_METHOD_OLD)
+    new_count = normalized.count(TRANSPORT_METHOD_NEW)
+    if old_count == 0 and new_count == 1:
+        return False
+    if old_count != 1 or new_count != 0:
+        raise RuntimeError("BleMode transport_type must match the expected old method exactly once")
+    patched = normalized.replace(TRANSPORT_METHOD_OLD, TRANSPORT_METHOD_NEW)
+    path.write_bytes(patched.replace("\n", newline).encode("utf-8"))
+    return True
+
+
+def ensure_permission(manifest, name, attributes, remove=()):
+    """Add or update one uses-permission tag without touching other permissions."""
+    pattern = re.compile(r'<uses-permission(?=\s)[^>]*android:name="' + re.escape(name) + r'"[^>]*?/>')
+    match = pattern.search(manifest)
+    if match is None:
+        tag = '<uses-permission android:name="' + name + '"'
+        for key, value in attributes:
+            tag += ' ' + key + '="' + value + '"'
+        tag += '/>'
+        return manifest.replace("    <application", '    ' + tag + '\n    <application', 1)
+    tag = match.group(0)
+    for key in remove:
+        tag = re.sub(r'\s+' + re.escape(key) + r'="[^"]*"', '', tag)
+    for key, value in attributes:
+        attribute = re.compile(r'\b' + re.escape(key) + r'="[^"]*"')
+        if attribute.search(tag):
+            tag = attribute.sub(key + '="' + value + '"', tag, count=1)
+        else:
+            tag = tag[:-2].rstrip() + ' ' + key + '="' + value + '"/>'
+    return manifest[:match.start()] + tag + manifest[match.end():]
+
+
+def ensure_ble_permissions(manifest):
+    """Android 12+扫描/连接权限，并保留全SDK范围的位置权限。"""
+    manifest = ensure_permission(manifest, "android.permission.BLUETOOTH_CONNECT", [])
+    manifest = ensure_permission(manifest, "android.permission.BLUETOOTH_SCAN",
+                                 [("android:usesPermissionFlags", "neverForLocation")])
+    # 旧版WatchSync天气在Android 12+仍读位置；maxSdkVersion=30会静默拒绝，必须连同缓存清单一起清除。
+    manifest = ensure_permission(manifest, "android.permission.ACCESS_FINE_LOCATION", [],
+                                 ["android:maxSdkVersion"])
+    return manifest
 
 
 def main():
@@ -41,10 +169,7 @@ def main():
         manifest = manifest.replace("</application>", '<activity android:name="dev.mangta.wave.OtaActivity" '
             'android:exported="false" android:screenOrientation="portrait" android:theme="@android:style/Theme.Material.Light"/>\n'
             '    </application>')
-    if "android.permission.BLUETOOTH_CONNECT" not in manifest:
-        manifest = manifest.replace("    <application", '    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>\n    <application')
-    if "android.permission.BLUETOOTH_SCAN" not in manifest:
-        manifest = manifest.replace("    <application", '    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>\n    <application')
+    manifest = ensure_ble_permissions(manifest)
     if 'android:name="dev.mangta.wave.OtaLaunchActivity"' not in manifest:
         # 旧Splash在权限完成前创建蓝牙线程，新入口取得授权后再进入旧启动流程。
         launcher = ('            <intent-filter>\n'
@@ -60,9 +185,10 @@ def main():
     manifest_path.write_text(manifest, encoding="utf-8")
     yaml_path = decoded / "apktool.yml"
     yaml = yaml_path.read_text(encoding="utf-8")
-    yaml = re.sub(r"(?m)^  versionCode:.*$", "  versionCode: 21", yaml)
-    yaml = re.sub(r"(?m)^  versionName:.*$", "  versionName: 1.95-wave.16-recovery", yaml)
+    yaml = re.sub(r"(?m)^  versionCode:.*$", "  versionCode: 24", yaml)
+    yaml = re.sub(r"(?m)^  versionName:.*$", "  versionName: 1.95-wave.19-spp-oneclick", yaml)
     yaml_path.write_text(yaml, encoding="utf-8")
+    patch_ble_mode(decoded)
     hook = decoded / "smali_classes2/dev/mangta/wave/WaveBridge.smali"
     text = hook.read_text(encoding="utf-8")
     anchor = "    invoke-static {p0, v0}, Ldev/mangta/wave/WatchSync;->attach(Landroid/app/Activity;Landroid/widget/LinearLayout;)V"

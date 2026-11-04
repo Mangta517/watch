@@ -2,7 +2,9 @@ package dev.mangta.wave;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.zip.CRC32;
 
@@ -97,6 +99,44 @@ public final class OtaProtocolTest
         }
     }
 
+    private static final class Scripted implements OtaProtocol.Transport
+    {
+        final ArrayDeque<String> lines = new ArrayDeque<>();
+        int writes;
+
+        Scripted(String... script)
+        {
+            for (String line : script)
+            {
+                lines.add(line);
+            }
+        }
+
+        @Override
+        public void write(byte[] data, int offset, int length)
+        {
+            check(new String(data, offset, length, StandardCharsets.US_ASCII).equals("OTA,INFO\n"));
+            ++writes;
+        }
+
+        @Override
+        public String readLine(int timeout) throws IOException
+        {
+            check(timeout > 0);
+            if (lines.isEmpty())
+            {
+                throw new SocketTimeoutException("普通APP无应答");
+            }
+            return lines.removeFirst();
+        }
+
+        @Override
+        public void pause(int ms)
+        {
+            check(ms > 0);
+        }
+    }
+
     public static void main(String[] args) throws Exception
     {
         for (int length : new int[]{101, 512, 10001, 327680})
@@ -117,7 +157,8 @@ public final class OtaProtocolTest
             check(new String(fake.command, StandardCharsets.US_ASCII).equals(String.format(java.util.Locale.ROOT,
                 "start:%d:%08x\n", length, crc.getValue())));
             check(Arrays.equals(data, fake.payload.toByteArray()) && completed[0] == 1);
-            check(fake.pauses == (length + 255) / 256 && fake.reads == 5);
+            // 40ms只出现在数据块之间，最后一包后不再暂停，避免丢掉紧跟的ok,len:N。
+            check(fake.pauses == (length + 255) / 256 - 1 && fake.reads == 5);
         }
         for (byte[] bad : new byte[][]{new byte[0], new byte[8], new byte[327681]})
         {
@@ -160,6 +201,60 @@ public final class OtaProtocolTest
         {
             check(old.command == null && old.writes == 1 && old.payload.size() == 0);
         }
-        System.out.println("PASS: phone CRC/vectors/length, ready-before-BIN, exact maximum/odd payload, pacing, strict ack and device errors");
+
+        // 普通APP的日常诊断行在截止前忽略，随后仍能确认保底布局。
+        Scripted normal = new Scripted("battery 87%", "heart 72", OtaProtocol.LAYOUT);
+        check(OtaProtocol.probe(normal, 1000) == OtaProtocol.Probe.RECOVERY && normal.writes == 1);
+        Scripted rebooting = new Scripted("battery 87%", "OTA,REBOOTING,BLE");
+        check(OtaProtocol.probe(rebooting, 1000) == OtaProtocol.Probe.REBOOTING);
+        // 非OTA行之后没有布局时，读超时仍是普通APP，不能被诊断行掩盖。
+        Scripted silent = new Scripted("battery 87%");
+        try
+        {
+            OtaProtocol.probe(silent, 1000);
+            throw new AssertionError("diagnostics alone accepted as recovery");
+        }
+        catch (SocketTimeoutException expected)
+        {
+        }
+        // 明确的OTA错误和错误布局不能被诊断忽略逻辑吞掉。
+        for (String rejection : new String[]{"OTA,EEPROM_ERROR", "OTA,UNAVAILABLE", "OTA,LAYOUT,08008000,00058000",
+            "OTA,WHAT"})
+        {
+            try
+            {
+                OtaProtocol.probe(new Scripted("battery 87%", rejection), 1000);
+                throw new AssertionError("rejection accepted: " + rejection);
+            }
+            catch (OtaProtocol.ProbeException expected)
+            {
+            }
+        }
+        // START后的回执等待：日常诊断忽略，SPP/BLE两种REBOOTING都可确认；明确拒绝立即抛出。
+        Scripted rebootAck = new Scripted("battery 87%", "OTA,REBOOTING,SPP");
+        check(OtaProtocol.awaitReboot(rebootAck, 1000));
+        // 旧APP只会回BLE后缀；新SPP保底仍必须能识别，升级流程不能只认一种。
+        Scripted legacyAck = new Scripted("battery 87%", "OTA,REBOOTING,BLE");
+        check(OtaProtocol.awaitReboot(legacyAck, 1000));
+        Scripted rebootMissing = new Scripted("battery 87%");
+        check(!OtaProtocol.awaitReboot(rebootMissing, 1000));
+        try
+        {
+            OtaProtocol.awaitReboot(new Scripted("OTA,UNAVAILABLE"), 1000);
+            throw new AssertionError("reboot rejection accepted");
+        }
+        catch (OtaProtocol.ProbeException expected)
+        {
+        }
+        try
+        {
+            OtaProtocol.awaitReboot(new Scripted("OTA,LAYOUT,08008000,00058000"), 1000);
+            throw new AssertionError("reboot layout mismatch accepted");
+        }
+        catch (OtaProtocol.ProbeException expected)
+        {
+        }
+        System.out.println("PASS: phone CRC/vectors/length, ready-before-BIN, exact maximum/odd payload, pacing, strict ack and device errors, "
+            + "probe diagnostics and typed timeout");
     }
 }

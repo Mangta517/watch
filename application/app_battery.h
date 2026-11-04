@@ -7,8 +7,8 @@
 
 #include "main.h"
 
-#define APP_BATTERY_PERIOD_MS 1000
-#define APP_BATTERY_SLEEP_PERIOD_MS 10000
+#define APP_BATTERY_PERIOD_MS 1000 /* 亮屏及启动阶段采样周期，毫秒 */
+#define APP_BATTERY_SLEEP_PERIOD_MS 10000 /* 熄屏且启动平均完成后的采样周期，毫秒 */
 /* PA1 的 1M/1M 分压为1:2；参考电压使用3V3标称值，上板后可按实测VDDA校准。 */
 #define APP_BATTERY_VREF_MV 3300
 
@@ -16,8 +16,8 @@ typedef struct
 {
     uint32_t voltage_mv; /* 1/8低通后的电池电压，单位mV。 */
     uint16_t adc_raw;    /* 本次转换的原始ADC值，供诊断使用。 */
-    HAL_StatusTypeDef result;
-    uint8_t valid;
+    HAL_StatusTypeDef result; /* 本轮ADC采样流程结果，不区分具体失败阶段。 */
+    uint8_t valid;            /* 1=启动平均已完成且本次转换成功，UI才可展示电压。 */
     uint8_t percent; /* 稳定采样后估算0～100%；本次开机只降不升，仅valid时可用。 */
 } app_battery_struct;
 
@@ -25,7 +25,9 @@ typedef struct
 void app_battery_init(void);
 /* sensor任务设置屏幕状态；启动8次有效采样仍保持1s，完成后熄屏改为10s。 */
 void app_battery_set_sleep_mode(uint8_t sleeping);
+/* sensor每轮调用；到期时发起单次转换，以2ms超时参数轮询等待，再更新滤波快照。 */
 void app_battery_service(void);
+/* UI等消费方取一致快照(加锁整体复制)；NULL不处理，锁未建时输出全零。 */
 void app_battery_get_snapshot(app_battery_struct *snapshot);
 
 #endif

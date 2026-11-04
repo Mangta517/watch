@@ -447,6 +447,65 @@ int main(int argc, char **argv)
     assert(watch_rtc_get_subsecond() == 32767U && !shadow_locked);
     rtc_subsecond = 0;
     assert(watch_rtc_get_subsecond() == 0 && !shadow_locked);
+
+    /* 真实的一分钟内递增计数：由同一次时间/日期快照的"秒×32768 + 本秒已过亚秒"合成；
+     * 跨秒、跨分和午夜都按 WATCH_RTC_COUNTER_MOD 取模，差值仍恰为一整秒。 */
+    {
+        uint32_t seconds_saved = rtc_seconds;
+        uint32_t fraction_saved = rtc_subsecond;
+        uint32_t reads_saved = get_time_calls;
+        uint32_t counter_before;
+        uint32_t counter_after;
+        uint32_t delta;
+        uint32_t reads_before;
+
+        rtc_seconds = 5;
+        rtc_subsecond = 100;
+        assert(watch_rtc_get_counter() == 5U * WATCH_RTC_SUBSECOND_HZ + 100U && !shadow_locked);
+        assert(watch_rtc_get_subsecond() == 100U);
+        rtc_subsecond = 32767U;
+        assert(watch_rtc_get_counter() == 5U * WATCH_RTC_SUBSECOND_HZ + 32767U);
+        assert(watch_rtc_get_subsecond() == 32767U);
+
+        /* 第59秒末到下一分钟第0秒：计数从接近模数处回到小值，模差仍为一整秒。 */
+        rtc_seconds = 59;
+        rtc_subsecond = 100;
+        counter_before = watch_rtc_get_counter();
+        assert(counter_before == 59U * WATCH_RTC_SUBSECOND_HZ + 100U);
+        rtc_seconds = 60;
+        counter_after = watch_rtc_get_counter();
+        assert(counter_after == 100U && !shadow_locked);
+        delta = (counter_after + WATCH_RTC_COUNTER_MOD - counter_before) % WATCH_RTC_COUNTER_MOD;
+        assert(delta == WATCH_RTC_SUBSECOND_HZ);
+        assert(watch_rtc_get_subsecond() == 100U);
+
+        /* 午夜23:59:59到00:00:00：小时与日期归零同样不改变模差，get_subsecond只返回相位。 */
+        rtc_seconds = 86399;
+        counter_before = watch_rtc_get_counter();
+        assert(counter_before == 59U * WATCH_RTC_SUBSECOND_HZ + 100U);
+        rtc_seconds = 0;
+        counter_after = watch_rtc_get_counter();
+        delta = (counter_after + WATCH_RTC_COUNTER_MOD - counter_before) % WATCH_RTC_COUNTER_MOD;
+        assert(counter_after == 100U && delta == WATCH_RTC_SUBSECOND_HZ);
+        assert(watch_rtc_get_subsecond() == 100U);
+
+        /* LSE停振时递增计数无效：不触发HAL读取，也不残留影子锁存。 */
+        reads_before = get_time_calls;
+        lse_ready = 0;
+        assert(watch_rtc_get_counter() == UINT32_MAX);
+        assert(watch_rtc_get_subsecond() == UINT32_MAX);
+        assert(get_time_calls == reads_before && !shadow_locked);
+        lse_ready = 1;
+
+        /* 恢复夹具状态，后续老用例仍看到原来的时间与相位。 */
+        rtc_seconds = seconds_saved;
+        rtc_subsecond = fraction_saved;
+        assert(watch_rtc_get_counter() == (seconds_saved % 60U) * WATCH_RTC_SUBSECOND_HZ + fraction_saved);
+        assert(watch_rtc_get_subsecond() == fraction_saved);
+        assert(rtc_seconds == seconds_saved && get_time_calls > reads_saved);
+    }
+    puts("PASS: watch_rtc_get_counter composes seconds and fraction from one snapshot; modulo deltas stay one full "
+         "second across second, minute and midnight boundaries, and read as invalid without HAL access when LSE is lost.");
     lse_ready = 0;
     assert(watch_rtc_get_subsecond() == UINT32_MAX);
     assert(watch_rtc_is_synced());

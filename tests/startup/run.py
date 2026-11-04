@@ -14,6 +14,9 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
     entry = main_source.index("int main(void)")
     prefix = main_source[main_source.index("{", entry) + 1:main_source.index("  MX_DMA_Init();", entry)]
     (Path(out) / "main_prefix.inc").write_text("static void boot_entry(void)\n{\n" + prefix + "}\n", encoding="utf-8")
+    power_start = main_source.index("/* USER CODE BEGIN 2 */", entry) + len("/* USER CODE BEGIN 2 */")
+    power_config = main_source[power_start:main_source.index("    App_Task_Create();", power_start)]
+    (Path(out) / "main_power.inc").write_text("static void boot_power_config(void)\n{\n" + power_config + "}\n", encoding="utf-8")
     power_exe = str(Path(out) / "power.exe")
     subprocess.run([
         gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -32,7 +35,8 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
     ], cwd=root, check=True)
     for mode in ["ok", "devices_failed", "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
                  "cal_success", "cal_failed", "save_error", "manual_cal", "watchdog_progress", "watchdog_wrap",
-                 "watchdog_startup", "watchdog_startup_wrap", "first_frame_stall", "first_frame_slow",
+                 "watchdog_startup", "watchdog_startup_wrap", "watchdog_stop", "watchdog_stop_wrap",
+                 "first_frame_stall", "first_frame_slow",
                  "first_frame_deadline", "first_frame_sparse", "runtime_slow", "runtime_sparse",
                  "runtime_sensor_stalled", "runtime_deadline", "baro_cadence", "environment_policy", "environment_policy_wrap", "environment_policy_sleep_retry",
                  "reference_recovery", "environment_policy_early", "touch_alloc_failed", "touch_overrun",

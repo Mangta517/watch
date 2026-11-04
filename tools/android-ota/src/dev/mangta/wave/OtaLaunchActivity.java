@@ -21,7 +21,8 @@ public final class OtaLaunchActivity extends Activity
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(40, 60, 40, 40);
         TextView text = new TextView(this);
-        text.setText("蓝牙调试器 · 波形 OTA\n\n请允许附近设备权限，以连接手表BLE和升级SPP。");
+        text.setText("蓝牙调试器 · 波形 OTA\n\n请允许BLE扫描和连接权限（Android 6–11为位置权限），"
+            + "用于BLE日常连接和SPP升级；首次升级时系统可能再弹出蓝牙配对确认。");
         layout.addView(text);
         Button retry = new Button(this);
         retry.setText("允许附近设备并打开App");
@@ -31,13 +32,25 @@ public final class OtaLaunchActivity extends Activity
         open();
     }
 
+    private boolean granted(String permission)
+    {
+        return checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
+    }
+
     private void open()
     {
-        if (Build.VERSION.SDK_INT >= 31 &&
-            (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED ||
-             checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED))
+        if (Build.VERSION.SDK_INT >= 31)
         {
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN}, 102);
+            if (!granted(Manifest.permission.BLUETOOTH_CONNECT) || !granted(Manifest.permission.BLUETOOTH_SCAN))
+            {
+                requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN}, 102);
+                return;
+            }
+        }
+        else if (Build.VERSION.SDK_INT >= 23 && !granted(Manifest.permission.ACCESS_FINE_LOCATION))
+        {
+            // Android 6–11的BLE扫描受位置权限和系统位置服务约束。
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 102);
             return;
         }
         Intent intent = new Intent();
@@ -50,10 +63,17 @@ public final class OtaLaunchActivity extends Activity
     public void onRequestPermissionsResult(int code, String[] permissions, int[] results)
     {
         super.onRequestPermissionsResult(code, permissions, results);
-        if (code == 102 && results.length == 2 && results[0] == PackageManager.PERMISSION_GRANTED &&
-            results[1] == PackageManager.PERMISSION_GRANTED)
+        if (code != 102 || results.length == 0)
         {
-            open();
+            return;
         }
+        for (int result : results)
+        {
+            if (result != PackageManager.PERMISSION_GRANTED)
+            {
+                return;
+            }
+        }
+        open();
     }
 }

@@ -11,6 +11,12 @@ GPIO_TypeDef host_gpio_a, host_gpio_b;
 static unsigned int step;
 static uint8_t button_pressed = 1;
 static uint8_t output_high, output_enabled;
+static unsigned int flash_powerdown_calls, regulator_calls;
+static struct
+{
+    uint32_t IMR;
+} host_exti;
+#define EXTI (&host_exti)
 
 static void enable_gpio_a(void)
 {
@@ -55,10 +61,34 @@ static void MX_GPIO_Init(void)
 
 #include "main_prefix.inc"
 
+static void HAL_PWREx_EnableFlashPowerDown(void)
+{
+    ++flash_powerdown_calls;
+}
+
+static void HAL_PWREx_EnableLowRegulatorLowVoltage(void)
+{
+    ++regulator_calls;
+}
+
+#include "main_power.inc"
+
 int main(void)
 {
+    uint32_t original_imr = 0xA5A5FFFF;
+
     boot_entry();
     assert(step == 7 && !button_pressed && output_high && output_enabled);
     puts("PASS: PA3 power hold and reset capture precede HAL/clock initialization.");
+    EXTI->IMR = original_imr;
+    boot_power_config();
+    assert((EXTI->IMR & MPU6050_INT_Pin) == 0);
+    assert((EXTI->IMR | MPU6050_INT_Pin) == original_imr);
+    assert((EXTI->IMR & WAKE_Pin) != 0);
+    original_imr = EXTI->IMR;
+    boot_power_config();
+    assert(EXTI->IMR == original_imr);
+    assert(flash_powerdown_calls == 2 && regulator_calls == 2);
+    puts("PASS: startup keeps MPU PB12 masked and preserves PA4, all other EXTI lines and an already-masked PB12.");
     return 0;
 }

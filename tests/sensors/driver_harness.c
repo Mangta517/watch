@@ -360,7 +360,8 @@ static void init_delay_tests(int state)
     LCD_Init();
     assert(elapsed_ms - start >= 320);
     assert(hal_waits + task_waits == 3);
-    assert(htim3.arr == LCD_BL_ARR && htim3.compare == LCD_BL_ARR * 80 / 100);
+    assert(LCD_DEFAULT_BRIGHTNESS_PERCENT == 35);
+    assert(htim3.arr == LCD_BL_ARR && htim3.compare == LCD_BL_ARR * LCD_DEFAULT_BRIGHTNESS_PERCENT / 100);
     LCD_ST7789_SleepIn();
     assert(lcd_clock_mask == 0 && htim3.compare == 0 && (host_tim3.CR1 & TIM_CR1_CEN) == 0);
     LCD_ST7789_SleepOut();
