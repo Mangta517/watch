@@ -30,8 +30,9 @@ if not library.exists() or max(p.stat().st_mtime for p in dependencies) > librar
     subprocess.run([gcc, "@" + str(response)], cwd=ROOT, check=True)
 print("Building and testing the watch UI...", flush=True)
 dma_exe = OUT / "dma_harness.exe"
-subprocess.run([gcc, "-Itests/sensors/host"] + args + ["-Iinterface", "-Wall", "-Wextra", "-Werror",
-               "tests/ui/dma_harness.c", str(library), "-lm", "-o", str(dma_exe)], cwd=ROOT, check=True)
+subprocess.run([gcc, "-std=c99", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
+                "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-IMiddlewares/LVGL", "-IMiddlewares/LVGL/lvgl",
+                "tests/ui/dma_harness.c", "interface/lcd.c", str(library), "-lm", "-o", str(dma_exe)], cwd=ROOT, check=True)
 subprocess.run([str(dma_exe)], cwd=ROOT, check=True)
 subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + ["-DAPP_DEBUG_TELEMETRY=1", "-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)

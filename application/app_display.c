@@ -43,7 +43,9 @@ void App_Display_Init(void)
 void App_Display_Service(void)
 {
     App_Display_Lock();
+    lv_port_disp_service();
     lv_timer_handler();
+    lv_port_disp_service();
     App_Display_Unlock();
 }
 

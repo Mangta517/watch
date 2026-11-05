@@ -56,6 +56,13 @@ extern "C"
 
     /* DMA 异步刷屏 (SPI1_TX DMA @DMA2_Stream2, OV_Watch/Watch 同款): 发起即返回,
  * 传输完成经 HAL_SPI_TxCpltCallback → LCD_Set_Flush_Complete_Callback 注册的回调通知 */
+    typedef enum
+    {
+        LCD_FLUSH_WAIT,
+        LCD_FLUSH_DONE,
+        LCD_FLUSH_ERROR
+    } lcd_flush_result;
+    lcd_flush_result lcd_flush_service(void);
     typedef void (*LCD_CallbackFunc_t)(void);
     void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb);
     void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, const uint16_t *color_p);

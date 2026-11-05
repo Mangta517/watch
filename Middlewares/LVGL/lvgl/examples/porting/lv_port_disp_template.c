@@ -36,6 +36,8 @@ static lv_color_t buf_2[LVGL_BUF_PX];
 /* 本次在途 flush 的驱动指针: LVGL 保证 flush_ready 前不会再进 flush_cb, 单飞安全 */
 static volatile lv_disp_drv_t *s_flush_drv = NULL;
 static TaskHandle_t s_flush_task;
+static uint8_t s_redraw_required;
+static void disp_retire_flush(void);
 
 /**********************
  *   GLOBAL FUNCTIONS
@@ -83,29 +85,49 @@ static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_
 }
 
 /* DMA完成即可唤醒LVGL；等待期间sensor可运行，不额外等待下一个1ms tick。 */
-static void disp_wait(lv_disp_drv_t *disp_drv)
+static void disp_retire_flush(void)
 {
-    (void)disp_drv;
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+    lcd_flush_result result = lcd_flush_service();
+    if (result != LCD_FLUSH_WAIT && s_flush_drv != NULL)
     {
-        (void)ulTaskNotifyTake(pdTRUE, 1U);
+        lv_disp_drv_t *drv = (lv_disp_drv_t *)s_flush_drv;
+        s_flush_drv = NULL;
+        lv_disp_flush_ready(drv);
+        if (result == LCD_FLUSH_ERROR)
+        {
+            s_redraw_required = 1;
+        }
     }
 }
 
-/* lcd.c 的 HAL_SPI_TxCpltCallback 在 DMA2_Stream2 中断上下文调用此处。
- * LCD_Init已将DMA2_Stream2设为优先级12，满足本工程FreeRTOS的ISR API限制。 */
+void lv_port_disp_service(void)
+{
+    disp_retire_flush();
+    if (s_redraw_required != 0)
+    {
+        s_redraw_required = 0;
+        lv_obj_invalidate(lv_scr_act()); /* 在 lv_timer_handler 外补画丢失的图块。 */
+    }
+}
+
+static void disp_wait(lv_disp_drv_t *disp_drv)
+{
+    (void)disp_drv;
+    disp_retire_flush();
+    if (s_flush_drv != NULL && xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+    {
+        (void)ulTaskNotifyTake(pdTRUE, 1U);
+        disp_retire_flush();
+    }
+}
+
+/* DMA ISR 仅通知；所有 LVGL 缓冲区收尾均由任务执行。 */
 static void lcd_flush_ready_cb(void)
 {
-    lv_disp_drv_t *drv = (lv_disp_drv_t *)s_flush_drv;
     BaseType_t woken = pdFALSE;
-    if (drv != NULL)
+    if (s_flush_drv != NULL && s_flush_task != NULL)
     {
-        s_flush_drv = NULL;
-        lv_disp_flush_ready(drv);
-        if (s_flush_task != NULL)
-        {
-            vTaskNotifyGiveFromISR(s_flush_task, &woken);
-            portYIELD_FROM_ISR(woken);
-        }
+        vTaskNotifyGiveFromISR(s_flush_task, &woken);
+        portYIELD_FROM_ISR(woken);
     }
 }

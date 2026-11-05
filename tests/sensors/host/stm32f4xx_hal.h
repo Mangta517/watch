@@ -48,14 +48,26 @@ typedef struct
 typedef struct
 {
     uint32_t SR, DR;
+    uint32_t CR2;
 } SPI_TypeDef;
+#define SPI_CR2_TXDMAEN 2
 extern SPI_TypeDef host_spi;
 #define SPI1                (&host_spi)
 #define SPI_SR_BSY          0x80U
 #define READ_BIT(reg, bits) ((reg) & (bits))
+typedef enum
+{
+    HAL_DMA_STATE_READY,
+    HAL_DMA_STATE_BUSY
+} HAL_DMA_StateTypeDef;
+typedef struct
+{
+    HAL_DMA_StateTypeDef State;
+} DMA_HandleTypeDef;
 typedef struct
 {
     SPI_TypeDef *Instance;
+    DMA_HandleTypeDef *hdmatx;
 } SPI_HandleTypeDef;
 typedef struct
 {
@@ -87,4 +99,10 @@ void HAL_NVIC_SetPriority(int irq, uint32_t priority, uint32_t subpriority);
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout);
 HAL_StatusTypeDef HAL_SPI_Transmit_DMA(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size);
 HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *timer, uint32_t channel);
+
+HAL_DMA_StateTypeDef HAL_DMA_GetState(DMA_HandleTypeDef *dma);
+HAL_StatusTypeDef HAL_DMA_Abort(DMA_HandleTypeDef *dma);
+HAL_StatusTypeDef HAL_SPI_Abort(SPI_HandleTypeDef *spi);
+void HAL_NVIC_ClearPendingIRQ(int irq);
+
 #endif

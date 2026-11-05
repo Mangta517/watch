@@ -142,6 +142,19 @@ void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, 
  *       且命令/参数写都在上一笔 ready 之后, 天然串行)
  *****************************************************************************/
 static LCD_CallbackFunc_t s_lcd_flush_done_cb = NULL;
+#define LCD_DMA_TIMEOUT_MS 100
+
+enum
+{
+    LCD_DMA_IDLE,
+    LCD_DMA_RUNNING,
+    LCD_DMA_DONE,
+    LCD_DMA_ERROR,
+    LCD_DMA_RECOVERING
+};
+
+static volatile uint8_t s_dma_state;
+static uint32_t s_dma_started_ms;
 
 void LCD_Set_Flush_Complete_Callback(LCD_CallbackFunc_t cb)
 {
@@ -153,38 +166,86 @@ void LCD_Color_Fill_DMA(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t ye
     uint32_t bytes = (uint32_t)(xend - xsta + 1) * (uint32_t)(yend - ysta + 1) * 2;
 
     LCD_Address_Set(xsta, ysta, xend, yend);
-
     if (bytes > 0xFFFE)
-    { /* F4 HAL Size 为 uint16: 超 64KB 罕见大块, 退回阻塞分片 */
+    {
         LCD_Color_Fill(xsta, ysta, xend, yend, color_p);
-        if (s_lcd_flush_done_cb != NULL)
-        {
-            s_lcd_flush_done_cb(); /* 阻塞路径无 DMA 中断, 手动补完成事件 */
-        }
+        s_dma_state = LCD_DMA_DONE; /* 阻塞路径由任务收尾，不调用 ISR 通知接口。 */
         return;
     }
+    s_dma_started_ms = HAL_GetTick();
+    s_dma_state = LCD_DMA_RUNNING;
     if (HAL_SPI_Transmit_DMA(&hspi1, (uint8_t *)color_p, (uint16_t)bytes) != HAL_OK)
     {
-        Error_Handler();
+        s_dma_state = LCD_DMA_ERROR;
     }
 }
 
-/* DMA 传输完成回调 (HAL_DMA_IRQHandler→SPI_DMATransmitCplt 的下游, DMA2_Stream2 中断上下文)
- * 注意: 只做"等末字节移位完成 + 清残留标志 + 通知", 不调任何 FreeRTOS API。 */
+/* 仅任务调用：先确认 DMA 停止，再交还绘制缓冲区；每笔只消费一次完成事件。 */
+lcd_flush_result lcd_flush_service(void)
+{
+    uint32_t mask = __get_PRIMASK();
+    uint8_t state;
+
+    __disable_irq();
+    state = s_dma_state;
+    if (state == LCD_DMA_DONE)
+    {
+        s_dma_state = LCD_DMA_IDLE;
+        __set_PRIMASK(mask);
+        return LCD_FLUSH_DONE;
+    }
+    if (state != LCD_DMA_ERROR &&
+        (state != LCD_DMA_RUNNING || (uint32_t)(HAL_GetTick() - s_dma_started_ms) < LCD_DMA_TIMEOUT_MS))
+    {
+        __set_PRIMASK(mask);
+        return LCD_FLUSH_WAIT;
+    }
+    s_dma_state = LCD_DMA_RECOVERING;
+    __set_PRIMASK(mask);
+
+    /* 超时路径让 SPI 先取消其 DMA，避免对已 READY 的流二次取消。
+     * SPI_DMAError 已清 TXDMAEN 时，再显式停止仍 BUSY 的 DMA。 */
+    if (HAL_SPI_Abort(&hspi1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    if (HAL_DMA_GetState(hspi1.hdmatx) == HAL_DMA_STATE_BUSY)
+    {
+        if (HAL_DMA_Abort(hspi1.hdmatx) != HAL_OK)
+        {
+            Error_Handler(); /* 未确认停止时不能重用缓冲区。 */
+        }
+    }
+    HAL_NVIC_ClearPendingIRQ(DMA2_Stream2_IRQn);
+    s_dma_state = LCD_DMA_IDLE;
+    return LCD_FLUSH_ERROR;
+}
+
+/* HAL 已完成 SPI 事务收尾；ISR 只记录结果并唤醒任务，不等待 BSY。 */
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    if (hspi->Instance == SPI1)
+    if (hspi == &hspi1 && s_dma_state == LCD_DMA_RUNNING)
     {
-        while (READ_BIT(hspi->Instance->SR, SPI_SR_BSY) != 0)
-        {
-        } /* 等末字节移出(~1字节位时间) */
-        (void)hspi->Instance->DR; /* 清可能残留的 RXNE/OVR */
+        s_dma_state = LCD_DMA_DONE;
         if (s_lcd_flush_done_cb != NULL)
         {
             s_lcd_flush_done_cb();
         }
     }
 }
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi == &hspi1 && s_dma_state == LCD_DMA_RUNNING)
+    {
+        s_dma_state = LCD_DMA_ERROR;
+        if (s_lcd_flush_done_cb != NULL)
+        {
+            s_lcd_flush_done_cb();
+        }
+    }
+}
+
 
 /* 单色填充(局部): 用 64 像素的重复色缓冲分片写 */
 void LCD_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, uint16_t color)

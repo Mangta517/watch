@@ -24,7 +24,7 @@
 
 GPIO_TypeDef host_gpio_a, host_gpio_b;
 SPI_TypeDef host_spi;
-SPI_HandleTypeDef hspi1 = {&host_spi};
+SPI_HandleTypeDef hspi1 = {.Instance = &host_spi};
 TIM_HandleTypeDef htim3;
 static int scheduler_state;
 static uint32_t primask, elapsed_ms, hal_waits, task_waits;
@@ -338,4 +338,28 @@ int main(void)
     touch_recovery_tests();
     puts("PASS: real LCD/touch init and sleep delays, reset/probe recovery, failure threshold and coordinates");
     return 0;
+}
+
+uint32_t HAL_GetTick(void)
+{
+    return elapsed_ms;
+}
+HAL_DMA_StateTypeDef HAL_DMA_GetState(DMA_HandleTypeDef *dma)
+{
+    (void)dma;
+    return HAL_DMA_STATE_READY;
+}
+HAL_StatusTypeDef HAL_DMA_Abort(DMA_HandleTypeDef *dma)
+{
+    (void)dma;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_SPI_Abort(SPI_HandleTypeDef *spi)
+{
+    (void)spi;
+    return HAL_OK;
+}
+void HAL_NVIC_ClearPendingIRQ(int irq)
+{
+    (void)irq;
 }
