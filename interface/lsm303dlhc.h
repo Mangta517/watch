@@ -6,15 +6,9 @@
 #ifndef __LSM303DLHC_H
 #define __LSM303DLHC_H
 
-#include <stdint.h>
+#include "imu_types.h"
 
 #define LSM303DLHC_MAG_ADDR 0x1E
-
-typedef struct
-{
-    int16_t raw[3];    /* 芯片 X/Y/Z 顺序，不是寄存器的 X/Z/Y 顺序 */
-    float field_uT[3]; /* 标称灵敏度换算，尚未做安装校准 */
-} lsm303dlhc_mag_struct;
 
 typedef enum
 {

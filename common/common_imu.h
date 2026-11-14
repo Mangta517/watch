@@ -2,8 +2,8 @@
  ******************************************************************************
  * @file    common_imu.h
  * @brief   姿态解算 (公共层) —— 六轴 quaternion 融合 + 磁参考航向修正
- *          仅做数学处理，不访问HAL或总线；输入类型依赖interface/mpu6050.h，
- *          灵敏度跟随mpu6050.h中的运动档配置：±1000°/s、±4g。
+ *          仅做数学处理，不访问HAL或总线；输入类型与灵敏度来自imu_types.h，
+ *          对应当前驱动运动档配置：±1000°/s、±4g。
  ******************************************************************************
  */
 #ifndef __COMMON_IMU_H__
@@ -14,7 +14,7 @@ extern "C"
 {
 #endif
 
-#include "mpu6050.h" /* Accel_Gyro_struct (原始 LSB 输入) */
+#include "imu_types.h" /* Accel_Gyro_struct (原始LSB输入) */
 
     /* 欧拉角 (单位: 度) —— 与 flight 端 common_config.h 中定义一致 */
     typedef struct

@@ -1,7 +1,7 @@
 /** MPU六轴零偏掉电保存；EEPROM 0x60/0x80两槽各32字节，与原磁校准记录分开。 */
 #ifndef APP_IMU_STORE_H
 #define APP_IMU_STORE_H
-#include "mpu6050.h"
+#include "imu_types.h"
 
 typedef enum
 {

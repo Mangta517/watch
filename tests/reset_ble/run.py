@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory(prefix="watch-reset-ble-") as output:
     exe = str(Path(output) / "reset-ble.exe")
     subprocess.run([
         gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
-        "-Itests/reset_ble/host", "-Iapplication", "-Iinterface",
+        "-Itests/reset_ble/host", "-Iapplication", "-Iinterface", "-Icommon",
         "tests/reset_ble/reset_ble_harness.c", "application/app_reset_ble.c", "-o", exe,
     ], cwd=root, check=True)
     subprocess.run([exe], cwd=root, check=True)

@@ -23,7 +23,7 @@
 uint8_t lcd_is_stop_idle(void)
 {
     return __HAL_TIM_GET_COMPARE(&htim3, TIM_CHANNEL_3) == 0 &&
-           (SPI1->SR & SPI_SR_BSY) == 0 && (hspi1.hdmatx->Instance->CR & DMA_SxCR_EN) == 0;
+           (SPI1->SR & SPI_SR_BSY) == 0 && (DMA2_Stream2->CR & DMA_SxCR_EN) == 0;
 }
 
 /* 引脚快捷宏 (全部来自 CubeMX 生成的 main.h) */

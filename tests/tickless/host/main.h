@@ -36,6 +36,9 @@ typedef struct
 extern Host_Peripheral_Type host_tim2, host_tim3, host_rcc, host_spi, host_dma, host_adc, host_gpio, host_exti;
 #define TIM2 (&host_tim2)
 #define TIM3 (&host_tim3)
+#define htim3 host_tim3
+#define TIM_CHANNEL_3 3
+#define __HAL_TIM_GET_COMPARE(timer, channel) ((timer)->CCR3)
 #define RCC (&host_rcc)
 #define SPI1 (&host_spi)
 #define DMA2_Stream2 (&host_dma)

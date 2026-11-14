@@ -10,6 +10,8 @@
   ******************************************************************************
 ***/
 #include "app_imu.h"
+#include "mpu6050.h"
+#include "lsm303dlhc.h"
 #include "app_diag.h"
 #include "app_heart.h"
 

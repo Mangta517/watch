@@ -3,7 +3,7 @@
 
 #include "main.h"
 
-/* 保留HAL错误码供电池快照和诊断使用；成功时输出12位ADC原始值。 */
+/* 保留HAL错误码供电池快照和诊断使用；成功时输出12位ADC原始值，NULL输出返回HAL_ERROR且不启动ADC。 */
 HAL_StatusTypeDef battery_adc_read_raw(uint32_t timeout_ms, uint16_t *raw);
 uint8_t battery_adc_is_stop_idle(void);
 

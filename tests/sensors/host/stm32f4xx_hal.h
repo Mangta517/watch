@@ -69,6 +69,8 @@ typedef struct
 {
     uint32_t CR;
 } DMA_Stream_TypeDef;
+extern DMA_Stream_TypeDef host_dma_stream;
+#define DMA2_Stream2 (&host_dma_stream)
 typedef struct
 {
     DMA_Stream_TypeDef *Instance;

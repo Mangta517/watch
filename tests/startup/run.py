@@ -2,13 +2,23 @@
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(root / "tests"))
+from source_extract import extract_functions
 gcc = shutil.which("gcc")
 if not gcc:
     raise SystemExit("Desktop GCC is required.")
 with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
+    lifecycle = "\n".join(extract_functions(root / "application" / (module + ".c"), names) for module, names in [
+        ("app_imu", ["app_imu_init_hw", "app_imu_init_mag_hw", "app_imu_recover_step", "app_imu_mag_recover_step",
+                     "app_imu_calibration_begin", "app_imu_calibration_progress", "app_imu_restore_offset", "app_imu_get_offset"]),
+        ("app_baro", ["app_baro_init_hw", "app_baro_set_sleep", "app_baro_recover_step"]),
+        ("app_heart", ["app_heart_init_hw"]),
+    ])
+    (Path(out) / "sensor_lifecycle.inc").write_text(lifecycle, encoding="utf-8")
     # Execute the actual main startup prefix, without duplicating its GPIO setup.
     main_source = (root / "Core/Src/main.c").read_text(encoding="utf-8")
     entry = main_source.index("int main(void)")
@@ -28,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
     subprocess.run([
         gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
         "-Itests/startup/host", "-Itests/sensors/host", "-ICore/Inc",
-        "-Iapplication", "-Iinterface", "-Icommon",
+        "-Iapplication", "-Iinterface", "-Icommon", "-I" + out,
         "-IMiddlewares/LVGL/lvgl/examples/porting",
         "tests/startup/startup_harness.c", "application/app_uptime.c", "application/app_weather.c",
         "application/app_weather_store.c", "tests/diagnostics/diag_stub.c", "-o", exe,

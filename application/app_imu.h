@@ -18,9 +18,7 @@ extern "C"
 {
 #endif
 
-#include "mpu6050.h" /* Accel_Gyro_struct */
-#include "lsm303dlhc.h"
-#include <stdint.h>
+#include "imu_types.h"
 
     typedef enum
     {

@@ -174,20 +174,6 @@ void HAL_UART_RxHalfCpltCallback(UART_HandleTypeDef *uart)
     }
 }
 
-void int_bootloader_rx_complete(void)
-{
-    /* 一整轮DMA接收完成，回绕计数加1。 */
-    ++dma_wrap_count;
-    /* 发布后半区结束的绝对字节位置。 */
-    dma_ready_end[1] = dma_wrap_count * BOOTLOADER_DMA_SIZE;
-}
-
-void int_bootloader_rx_error(void)
-{
-    /* 累计UART/DMA接收错误次数，主循环据此中止传输。 */
-    ++uart1_rx_error_count;
-}
-
 static uint8_t int_bootloader_rx_override(uint8_t is_error)
 {
     if (dma_active == 0)
@@ -196,11 +182,14 @@ static uint8_t int_bootloader_rx_override(uint8_t is_error)
     }
     if (is_error != 0)
     {
-        int_bootloader_rx_error();
+        /* 累计UART/DMA接收错误次数，主循环据此中止传输。 */
+        ++uart1_rx_error_count;
     }
     else
     {
-        int_bootloader_rx_complete();
+        /* 一整轮DMA接收完成，发布后半区结束的绝对字节位置。 */
+        ++dma_wrap_count;
+        dma_ready_end[1] = dma_wrap_count * BOOTLOADER_DMA_SIZE;
     }
     return 1;
 }

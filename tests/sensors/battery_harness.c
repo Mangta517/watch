@@ -291,6 +291,9 @@ int main(int argc, char **argv)
     assert(battery_adc_is_stop_idle() == 0 && host_adc1.CR2 == 0x101);
     host_adc1.CR2 &= ~ADC_CR2_ADON;
     assert(battery_adc_is_stop_idle() != 0);
+    assert(battery_adc_read_raw(2, NULL) == HAL_ERROR);
+    assert(starts == 0 && polls == 0 && reads == 0 && stops == 0);
+    puts("PASS: NULL ADC output returns HAL_ERROR without starting a conversion.");
     app_battery_init();
     app_battery_get_snapshot(&snapshot);
     assert(!snapshot.valid && snapshot.result == HAL_OK);

@@ -1137,12 +1137,15 @@ void kt6368a_receive_polled(uint8_t byte, uint8_t errors)
 /* USART1接收完成中断：把字节入队并重新挂起下一字节接收。 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if ((huart != &huart1) || !ble.powered)
+    if (huart != &huart1)
     {
-        /* 非USART1句柄或模块未供电：忽略本次回调。 */
         return;
     }
     if (s_rx_override != NULL && s_rx_override(0) != 0)
+    {
+        return;
+    }
+    if (!ble.powered)
     {
         return;
     }
@@ -1164,12 +1167,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 /* USART1错误中断：计数、标记边界，清错误标志后重挂接收。 */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    if ((huart != &huart1) || !ble.powered)
+    if (huart != &huart1)
     {
-        /* 非USART1句柄或模块未供电：忽略本次错误。 */
         return;
     }
     if (s_rx_override != NULL && s_rx_override(1) != 0)
+    {
+        return;
+    }
+    if (!ble.powered)
     {
         return;
     }

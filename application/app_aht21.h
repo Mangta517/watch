@@ -5,7 +5,7 @@
 #ifndef __APP_AHT21_H__
 #define __APP_AHT21_H__
 
-#include "aht21.h"
+#include "climate_types.h"
 
 #define APP_AHT21_PERIOD_MS 1000 /* 亮屏采样周期，毫秒 */
 #define APP_AHT21_SLEEP_PERIOD_MS 600000 /* 熄屏采样周期，毫秒(10分钟) */

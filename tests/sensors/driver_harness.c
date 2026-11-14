@@ -24,7 +24,7 @@
 
 GPIO_TypeDef host_gpio_a, host_gpio_b;
 SPI_TypeDef host_spi;
-static DMA_Stream_TypeDef host_dma_stream;
+DMA_Stream_TypeDef host_dma_stream;
 static DMA_HandleTypeDef host_dma = {&host_dma_stream};
 SPI_HandleTypeDef hspi1 = {.Instance = &host_spi, .hdmatx = &host_dma};
 static TIM_TypeDef host_tim3;
@@ -890,6 +890,12 @@ int main(void)
     assert(lcd_is_stop_idle() == 0);
     host_dma_stream.CR = 0;
     assert(lcd_is_stop_idle() != 0);
+    hspi1.hdmatx = NULL;
+    assert(lcd_is_stop_idle() != 0);
+    host_dma_stream.CR = DMA_SxCR_EN;
+    assert(lcd_is_stop_idle() == 0);
+    host_dma_stream.CR = 0;
+    hspi1.hdmatx = &host_dma;
     puts("PASS: real LCD STOP query independently vetoes backlight, SPI busy and enabled TX DMA.");
     lcd_address_tests();
     lcd_fill_tests();

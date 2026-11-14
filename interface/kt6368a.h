@@ -73,7 +73,7 @@ extern "C"
     /* 同一到达tick分块；遇空闲/错误边界另起一块，显示任务延迟不能切断消息。 */
     uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct *info);
     uint8_t kt6368a_rx_pending(void);
-    /* 非0表示事件已由接管者处理；启动接收前绑定，停止后解除，仅USART1回调使用。 */
+    /* 非0表示事件已处理；仅USART1，优先于BLE供电检查。接管者在接收启动前绑定，停止成功后解除；断电不代其解绑。 */
     typedef uint8_t (*kt6368a_rx_override_fn)(uint8_t is_error);
     void kt6368a_set_rx_override(kt6368a_rx_override_fn callback);
     uint8_t kt6368a_is_stop_idle(void);

@@ -5,7 +5,7 @@
 #include "app_heart.h"
 #include "app_diag.h"
 #include "em7028.h"
-#include "mpu6050.h"
+#include "imu_types.h"
 #include "main.h"
 #include "FreeRTOS.h"
 #include "semphr.h"

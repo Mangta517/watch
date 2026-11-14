@@ -1,6 +1,7 @@
 /** MPU1记录28字节：格式、序号、量程、六轴int16零偏、CRC32。
  *  两个32字节槽位在0x60/0x80，更新失败保留旧副本；不覆盖磁力计记录。 */
 #include "app_imu_store.h"
+#include "mpu6050.h"
 #include "app_diag.h"
 #include "bl24c02.h"
 #include "FreeRTOS.h"

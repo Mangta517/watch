@@ -766,7 +766,23 @@ int main(void)
         host_ble_gpio.ODR = BLE_EN_Pin;
         assert(kt6368a_is_stop_idle() == 0);
         host_ble_rcc.APB2ENR |= RCC_APB2ENR_USART1EN;
-        puts("PASS: UART RX override handles complete/error, falls through when declined or cleared, and ignores other handles; STOP checks both power and clock.");
+        kt6368a_power_off();
+        kt6368a_set_rx_override(test_rx_override);
+        HAL_UART_RxCpltCallback(&other);
+        HAL_UART_ErrorCallback(&other);
+        assert(override_completions == 2 && override_errors == 1);
+        HAL_UART_RxCpltCallback(&huart1);
+        HAL_UART_ErrorCallback(&huart1);
+        assert(override_completions == 3 && override_errors == 2 && !rx_armed);
+        override_claim = 0;
+        errors = kt6368a_get_rx_errors();
+        HAL_UART_RxCpltCallback(&huart1);
+        HAL_UART_ErrorCallback(&huart1);
+        assert(override_completions == 4 && override_errors == 3 && !rx_armed);
+        assert(kt6368a_get_rx_errors() == errors && kt6368a_rx_pending() == 0);
+        kt6368a_set_rx_override(NULL);
+        assert(kt6368a_power_on() == HAL_OK);
+        puts("PASS: UART RX override is independent of BLE power, ignores other handles and falls through only to powered RX; STOP checks both power and clock.");
     }
     {
         kt6368a_rx_info_struct info;

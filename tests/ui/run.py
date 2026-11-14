@@ -14,7 +14,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 gcc = shutil.which("gcc")
 if not gcc:
     raise SystemExit("Desktop GCC is required (for example MinGW on Windows).")
-includes = ["tests/ui/host", "Core/Inc", "application", "interface", "Middlewares/LVGL", "Middlewares/LVGL/lvgl",
+includes = ["tests/ui/host", "Core/Inc", "application", "interface", "common", "Middlewares/LVGL", "Middlewares/LVGL/lvgl",
             "Middlewares/LVGL/lvgl/examples/porting"]
 sources = sorted((ROOT / "Middlewares/LVGL/lvgl/src").rglob("*.c"))
 args = ["-std=c99", "-O1", "-g", "-include", "tests/ui/host/platform.h"]

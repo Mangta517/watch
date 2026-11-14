@@ -35,8 +35,6 @@ uint8_t int_bootloader_process(void);
 uint8_t int_bootloader_finish(void);
 uint8_t int_bootloader_stop(void);
 uint8_t int_bootloader_rx_dma_active(void);
-void int_bootloader_rx_complete(void);
-void int_bootloader_rx_error(void);
 uint8_t int_bootloader_app_is_valid(void);
 void int_bootloader_jump_to_app(void);
 

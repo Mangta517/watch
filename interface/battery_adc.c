@@ -3,9 +3,14 @@
 
 HAL_StatusTypeDef battery_adc_read_raw(uint32_t timeout_ms, uint16_t *raw)
 {
-    HAL_StatusTypeDef result = HAL_ADC_Start(&hadc1);
+    HAL_StatusTypeDef result;
     HAL_StatusTypeDef stop_result;
 
+    if (raw == NULL)
+    {
+        return HAL_ERROR;
+    }
+    result = HAL_ADC_Start(&hadc1);
     if (result == HAL_OK)
     {
         /* ADC时钟8MHz、采样480周期，调用方提供有限轮询超时。 */

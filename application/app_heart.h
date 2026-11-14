@@ -6,7 +6,7 @@
 #define __APP_HEART_H__
 
 #include <stdint.h>
-#include "em7028.h"
+#include "heart_types.h"
 
 typedef enum
 {

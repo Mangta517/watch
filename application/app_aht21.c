@@ -4,6 +4,7 @@
  *        只有本层(单生产者)读写传感器与节拍状态，UI 通过 app_aht21_get_snapshot 取值。
  */
 #include "app_aht21.h"
+#include "aht21.h"
 #include "app_diag.h"
 #include "main.h"
 #include "FreeRTOS.h"

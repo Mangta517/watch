@@ -5,7 +5,7 @@
 #ifndef __EM7028_H__
 #define __EM7028_H__
 
-#include <stdint.h>
+#include "heart_types.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -22,23 +22,6 @@ extern "C"
         EM7028_NOT_READY, /* 未启动、首帧等待中，或读取时跨过数据更新 */
         EM7028_ERROR      /* 参数、识别、总线或配置失败 */
     } em7028_result;
-
-    typedef enum
-    {
-        EM7028_FAULT_NONE,
-        EM7028_FAULT_READ,
-        EM7028_FAULT_WRITE,
-        EM7028_FAULT_PID,
-        EM7028_FAULT_CONFIG,
-        EM7028_FAULT_DATA_CHANGED
-    } em7028_fault_kind;
-
-    typedef struct
-    {
-        em7028_fault_kind kind;
-        uint8_t reg;
-        uint8_t value; /* PID/配置不符时的读回值；通信失败时无效 */
-    } em7028_fault;
 
     /* MX_GPIO_Init 和 my_i2c_init(MY_I2C_BUS_SENSOR) 后调用。
  * PID 不匹配时最多读取三次；识别成功后关闭模式及中断，配置 1 倍增益/RANGE=8/最高时钟/16 位/HRS1。

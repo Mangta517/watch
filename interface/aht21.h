@@ -5,30 +5,10 @@
 #ifndef __AHT21_H__
 #define __AHT21_H__
 
-#include <stdint.h>
+#include "climate_types.h"
 
 #define AHT21_ADDR          0x38
 #define AHT21_CONVERSION_MS 80
-
-typedef enum
-{
-    AHT21_OK,
-    AHT21_BUSY,
-    AHT21_I2C_ERROR,
-    AHT21_CALIBRATION_ERROR,
-    AHT21_CRC_ERROR,
-    AHT21_TIMEOUT,
-    AHT21_INVALID_ARGUMENT
-} aht21_result;
-
-typedef struct
-{
-    uint32_t humidity_raw;    /* 20 位无符号原始值 */
-    uint32_t temperature_raw; /* 20 位无符号原始值 */
-    float humidity_rh;        /* %RH */
-    float temperature_c;      /* ℃ */
-    uint8_t status;
-} aht21_struct;
 
 /* 总线初始化后调用；仅启动阶段等待 40ms，必要时初始化再等待 10ms。 */
 aht21_result aht21_init(void);

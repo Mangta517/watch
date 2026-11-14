@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "app_imu.h"
+#include "mpu6050.h"
+#include "lsm303dlhc.h"
 #include "app_heart.h"
 #include "common_imu.h"
 #include "common_activity.h"

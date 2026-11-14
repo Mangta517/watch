@@ -21,7 +21,7 @@ extern "C"
 #endif
 
 #include "main.h"
-#include <stdint.h>
+#include "imu_types.h"
 
 /* ------------------------------------------------------------ 器件 I2C 地址 */
 /* 7 位地址 (ADDR 接地)。软件 I2C 层内部自动拼接读写位，
@@ -86,35 +86,8 @@ extern "C"
 /* 手表运动档：寄存器配置与解算/校准共同引用，改量程时须同步灵敏度。 */
 #define MPU6050_GYRO_RANGE       MPU6050_GYRO_RANGE_1000DPS
 #define MPU6050_ACCEL_RANGE      MPU6050_ACCEL_RANGE_4G
-#define MPU6050_GYRO_LSB_PER_DPS 32.8f
-#define MPU6050_ACCEL_LSB_PER_G  8192
 #define MPU6050_SAMPLE_PERIOD_MS 10   /* DLPF启用时1kHz/(9+1)=100Hz */
 #define MPU6050_DLPF_CFG         0x03 /* 陀螺仪42Hz、加速度44Hz */
-
-    /* ------------------------------------------------------------ 数据结构 */
-    /* 三轴陀螺仪原始或零偏修正后的计数，单位 LSB；
-     * 按 MPU6050_GYRO_LSB_PER_DPS 换算为 °/s。 */
-    typedef struct
-    {
-        int16_t Gyro_x; /* X 轴陀螺仪计数 (LSB) */
-        int16_t Gyro_y; /* Y 轴陀螺仪计数 (LSB) */
-        int16_t Gyro_z; /* Z 轴陀螺仪计数 (LSB) */
-    } Gyro_struct;
-
-    /* 三轴加速度计数，单位 LSB；按 MPU6050_ACCEL_LSB_PER_G 换算为 g，
-     * 静止值包含重力在各轴上的投影。 */
-    typedef struct
-    {
-        int16_t Accel_x; /* X 轴加速度计数 (LSB) */
-        int16_t Accel_y; /* Y 轴加速度计数 (LSB) */
-        int16_t Accel_z; /* Z 轴加速度计数 (LSB) */
-    } Accel_struct;
-
-    typedef struct
-    {
-        Gyro_struct Gyro;
-        Accel_struct Accel;
-    } Accel_Gyro_struct;
 
     /* ------------------------------------------------------------ 接口函数 */
     /* 返回值约定：0=成功，1=失败（总线 NACK/超时）                             */
@@ -129,22 +102,6 @@ extern "C"
     /* 仅sensor任务：begin使数据无效，step每拍至多一笔事务；0=就绪，1=失败冷却，2=推进中。 */
     void my_mpu6050_recover_begin(void);
     uint8_t my_mpu6050_recover_step(uint32_t now_ms);
-
-    typedef enum
-    {
-        MPU6050_CAL_IDLE,
-        MPU6050_CAL_WAIT_STILL,
-        MPU6050_CAL_AVERAGING,
-        MPU6050_CAL_DONE,
-        MPU6050_CAL_FAILED,
-        MPU6050_CAL_RESTORED
-    } mpu6050_cal_state;
-
-    typedef struct
-    {
-        int16_t accel[3]; /* X/Y/Z 三轴加速度原始 LSB 零偏，Z 轴不包含重力 1g。 */
-        int16_t gyro[3];  /* X/Y/Z 三轴陀螺仪原始 LSB 零偏。 */
-    } mpu6050_offset_struct;
 
     /* 仅sensor任务使用；恢复后不启动静止校准，原读取路径继续减去这些偏移。 */
     void my_mpu6050_get_offset(mpu6050_offset_struct *offset);

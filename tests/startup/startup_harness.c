@@ -5,6 +5,9 @@
 #include "../../application/app_task.c"
 #include "bl24c02.h"
 #include "spl006.h"
+#include "mpu6050.h"
+#include "lsm303dlhc.h"
+#include "em7028.h"
 #include "app_weather.h"
 
 static unsigned battery_log_calls;
@@ -2371,66 +2374,5 @@ uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
     return 0;
 }
 
-/* 复用既有器件桩，模拟应用服务边界。 */
-void app_imu_init_hw(void)
-{
-    app_diag_sensor_init(APP_DIAG_MPU, my_mpu6050_init());
-}
-
-void app_imu_init_mag_hw(void)
-{
-    app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_init());
-}
-
-uint8_t app_imu_recover_step(uint32_t now_ms)
-{
-    uint8_t result = my_mpu6050_recover_step(now_ms);
-    app_diag_sensor_recovery(APP_DIAG_MPU, result);
-    return result;
-}
-
-void app_imu_mag_recover_step(uint32_t now_ms)
-{
-    app_diag_sensor_recovery(APP_DIAG_MAG, lsm303dlhc_mag_recover_step(now_ms));
-}
-
-void app_imu_calibration_begin(uint32_t now_ms)
-{
-    my_mpu6050_zero_offset_begin(now_ms);
-}
-
-mpu6050_cal_state app_imu_calibration_progress(uint16_t *stable, uint16_t *average)
-{
-    my_mpu6050_zero_offset_progress(stable, average);
-    return my_mpu6050_zero_offset_state();
-}
-
-void app_imu_restore_offset(const mpu6050_offset_struct *offset)
-{
-    my_mpu6050_restore_offset(offset);
-}
-
-void app_imu_get_offset(mpu6050_offset_struct *offset)
-{
-    my_mpu6050_get_offset(offset);
-}
-
-void app_baro_init_hw(void)
-{
-    app_diag_sensor_init(APP_DIAG_BARO, spl006_init());
-}
-
-uint8_t app_baro_set_sleep(uint8_t sleeping)
-{
-    return spl006_set_sleep(sleeping);
-}
-
-void app_baro_recover_step(uint32_t now_ms)
-{
-    app_diag_sensor_recovery(APP_DIAG_BARO, spl006_recover_step(now_ms));
-}
-
-void app_heart_init_hw(void)
-{
-    app_diag_sensor_init(APP_DIAG_HEART, em7028_init());
-}
+/* 从当前应用源码提取真实生命周期入口；器件事务仍由上面的桩模拟。 */
+#include "sensor_lifecycle.inc"
