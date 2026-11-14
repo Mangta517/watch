@@ -1,6 +1,15 @@
 #include "int_battery_log.h"
-#include "kt6368a.h"
+#include "ram_uart_poll.h"
 #include <string.h>
+
+static uint8_t (*s_rx_is_enabled)(void);
+static void (*s_rx_receive)(uint8_t byte, uint8_t errors);
+
+void int_battery_log_set_rx_callbacks(uint8_t (*is_enabled)(void), void (*receive)(uint8_t byte, uint8_t errors))
+{
+    s_rx_is_enabled = is_enabled;
+    s_rx_receive = receive;
+}
 
 /* 测试替换寄存器的副作用，固件直接写半字、读取BSY，不调用Flash中的HAL。 */
 #ifndef BATTERY_LOG_PROGRAM_HALFWORD
@@ -17,9 +26,7 @@ __attribute__((section("battery_log_ram"), noinline))
 static uint8_t battery_log_program_halfword(uint32_t address, uint16_t value, uint16_t received[8], uint8_t *count, uint8_t uart_enabled)
 {
     /* status保存最近一次读到的Flash状态寄存器快照。 */
-    uint32_t status, uart_status;
-    /* byte把USART1数据字节和SR错误位拼成一个16位值，交给轮询接收入口。 */
-    uint16_t byte;
+    uint32_t status;
     /* 只改PSIZE字段，设为半字编程并置PG位，进入编程状态。 */
     FLASH->CR = (FLASH->CR & ~FLASH_CR_PSIZE) | FLASH_PSIZE_HALF_WORD | FLASH_CR_PG;
     /* 直接向目标地址写入半字，由硬件启动本次编程；该宏不经过Flash中的HAL函数。 */
@@ -32,24 +39,7 @@ static uint8_t battery_log_program_halfword(uint32_t address, uint16_t value, ui
         /* 仅当调用方告知UART接收已使能时才查询USART1。 */
         if (uart_enabled != 0)
         {
-            /* 读取USART1状态寄存器，RXNE表示接收数据寄存器非空，低4位为PE/FE/NF/ORE错误标志。 */
-            uart_status = USART1->SR;
-            /* 有数据可读或有任一接收错误时都需要读DR，读DR会同时清除这些标志。 */
-            if ((uart_status & (USART_SR_RXNE | 0x0F)) != 0)
-            {
-                /* 低8位保存数据，bit8..11保存PE/FE/NF/ORE标志，合成一个值交给上层区分。 */
-                byte = (uint16_t)((USART1->DR & 0xFF) | ((uart_status & 0x0F) << 8));
-                /* 缓冲区最多存放8个字节，未满时追加并递增计数。 */
-                if (*count < 8)
-                {
-                    received[(*count)++] = byte;
-                }
-                /* 缓冲已满：丢弃该字节，并在第8项置溢出标记。 */
-                else
-                {
-                    received[7] |= 0x0800; /* 不把异常长等待导致的溢出伪装成完整消息。 */
-                }
-            }
+            ram_uart_poll_usart1(received, count);
         }
     }
     while ((status & FLASH_SR_BSY) != 0);
@@ -101,7 +91,7 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
     uint16_t value;
     /* 编程忙等期间从UART取出的字节及错误标志，最多缓存8个。 */
     uint16_t received[8];
-    /* count为已缓存个数，byte为轮询下标，uart_enabled表示KT6368A接收是否使能。 */
+    /* count为已缓存个数，byte为轮询下标，uart_enabled表示已绑定的串口接收是否使能。 */
     uint8_t count, byte, uart_enabled;
     /* 进入临界区前保存的PRIMASK值。 */
     uint32_t mask;
@@ -123,7 +113,7 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
             return 1;
         }
     }
-    /* sensor持有日志锁；单次编程在SRAM轮询UART，半字之间恢复中断，最后写CRC。 */
+    /* sensor持有日志锁；单次编程在SRAM轮询UART，半字之间恢复中断，逐半字写入调用方传入的8字节记录并读回校验。 */
     result = HAL_FLASH_Unlock();
     /* 只有解锁成功才进行擦除标志清除和编程。 */
     if (result == HAL_OK)
@@ -142,8 +132,8 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
             __disable_irq();
             /* 本次编程期间轮询到的UART字节数从0开始。 */
             count = 0;
-            /* 查询KT6368A是否已使能接收，决定忙等时是否顺带取UART数据。 */
-            uart_enabled = kt6368a_rx_is_enabled();
+            /* 回调只在Flash空闲时执行；忙等期间只运行内联寄存器轮询。 */
+            uart_enabled = s_rx_is_enabled != NULL && s_rx_receive != NULL && s_rx_is_enabled() != 0;
             /* 默认本次半字编程成功，失败时再改为HAL_ERROR。 */
             result = HAL_OK;
             /* 在SRAM中轮询完成半字编程，返回非0表示Flash错误标志置位。 */
@@ -152,10 +142,10 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
             {
                 result = HAL_ERROR;
             }
-            /* 把忙等期间缓存的字节逐个送进KT6368A统一接收流程。 */
+            /* Flash已退出忙态，才把缓存字节交给调用方的接收入口。 */
             for (byte = 0; byte < count; ++byte)
             {
-                kt6368a_receive_polled((uint8_t)received[byte], (uint8_t)(received[byte] >> 8));
+                s_rx_receive((uint8_t)received[byte], (uint8_t)(received[byte] >> 8));
             }
             /* 恢复进入本次编程前的中断屏蔽状态。 */
             __set_PRIMASK(mask);

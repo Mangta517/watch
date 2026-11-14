@@ -106,12 +106,20 @@ void host_lcd_clock_set(uint32_t clock, uint8_t enabled);
 #define DMA2_Stream2_IRQn                            2
 #define SPI1_IRQn                                    35
 #define __HAL_TIM_SET_AUTORELOAD(timer, value)       ((timer)->arr = (value))
+#define __HAL_TIM_GET_COMPARE(timer, channel) ((timer)->compare)
 #define __HAL_TIM_SET_COMPARE(timer, channel, value) ((timer)->compare = (value))
 
 typedef struct
 {
     uint32_t unused;
 } ADC_HandleTypeDef;
+typedef struct
+{
+    uint32_t CR2;
+} Host_ADC_TypeDef;
+extern Host_ADC_TypeDef host_adc1;
+#define ADC1 (&host_adc1)
+#define ADC_CR2_ADON 1
 HAL_StatusTypeDef HAL_ADC_Start(ADC_HandleTypeDef *adc);
 HAL_StatusTypeDef HAL_ADC_PollForConversion(ADC_HandleTypeDef *adc, uint32_t timeout_ms);
 uint32_t HAL_ADC_GetValue(ADC_HandleTypeDef *adc);

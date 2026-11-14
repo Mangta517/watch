@@ -41,6 +41,7 @@ static int scheduler_state = taskSCHEDULER_RUNNING;
 static unsigned hal_delay_calls, task_delay_calls;
 static uint32_t primask;
 static uint8_t bus_active, mutex_taken;
+static uint8_t baro_request_on_unlock;
 static int fail_dev = -1, fail_reg = -1;
 static unsigned reads, mag_frames, mag_config_writes, bus_transactions;
 static uint32_t transfer_ms, spl_reset_ended, spl_status_ended;
@@ -139,6 +140,11 @@ int xSemaphoreGive(SemaphoreHandle_t mutex)
 {
     assert(mutex && mutex_taken);
     mutex_taken = 0;
+    if (baro_request_on_unlock != 0)
+    {
+        baro_request_on_unlock = 0;
+        assert(app_baro_calibrate_altitude(110) == 0);
+    }
     return 1;
 }
 
@@ -1536,11 +1542,21 @@ static void baro_service_tests(void)
 {
     app_baro_struct sample;
     app_baro_history_struct history;
+    float standard_altitude;
     App_Baro_Init();
     memset(regs[SPL006_ADDR], 0, 6);
     regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
     App_Baro_Service();
     assert(App_Baro_GetSnapshot(&sample) && sample.pressure_pa == 100000 && isfinite(sample.alt_m));
+    standard_altitude = sample.alt_m;
+    assert(app_baro_calibrate_altitude(110) == 1);
+    app_baro_set_reference(102125, 0, 0);
+    assert(App_Baro_GetSnapshot(&sample) && sample.pressure_pa == 100000);
+    assert(sample.alt_m > standard_altitude + 60.0f && sample.alt_m < standard_altitude + 70.0f);
+    App_Baro_Service();
+    assert(App_Baro_GetSnapshot(&sample) && sample.alt_m > standard_altitude + 60.0f);
+    app_baro_set_reference(101325, 0, 0);
+    assert(App_Baro_GetSnapshot(&sample) && fabsf(sample.alt_m - standard_altitude) < 0.01f);
     app_baro_record_history();
     app_baro_get_history(&history);
     assert(history.sequence == 1 && history.altitude_m[23] == (int16_t)roundf(sample.alt_m));
@@ -1628,6 +1644,83 @@ static void baro_service_tests(void)
     }
     assert(history.altitude_m[23] != APP_BARO_HISTORY_NONE);
     puts("PASS: sport barometer pause leaves elapsed slots empty, including pauses longer than the history window.");
+}
+
+static void baro_calibration_tests(void)
+{
+    app_baro_struct sample;
+    float standard_altitude, calibrated_altitude;
+    unsigned reads;
+    memset(regs[SPL006_ADDR], 0, 6);
+    regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
+    app_baro_reset_calibration();
+    app_baro_set_reference(101325, 0, 0);
+    App_Baro_Service();
+    assert(App_Baro_GetSnapshot(&sample));
+    standard_altitude = sample.alt_m;
+    app_baro_set_reference(0, 200, 1);
+    assert(App_Baro_GetSnapshot(&sample) && sample.reference_ready && sample.temperature_corrected);
+    assert(sample.alt_m > standard_altitude + 1.0f);
+    app_baro_set_reference(0, -100, 1);
+    assert(App_Baro_GetSnapshot(&sample) && sample.alt_m < standard_altitude);
+    app_baro_set_reference(0, 999, 0);
+    assert(App_Baro_GetSnapshot(&sample) && !sample.temperature_corrected);
+    assert(fabsf(sample.alt_m - standard_altitude) < 0.01f);
+    app_baro_set_reference(101325, 200, 1);
+    assert(app_baro_calibrate_altitude(-1001) == 1 && app_baro_calibrate_altitude(9001) == 1);
+    assert(app_baro_calibrate_altitude(500) == 0 && app_baro_calibration_pending());
+    assert(App_Baro_GetSnapshot(&sample) && sample.alt_m < 200.0f);
+    reads = spl_reads;
+    App_Baro_Service();
+    assert(spl_reads > reads && !app_baro_calibration_pending());
+    assert(App_Baro_GetSnapshot(&sample) && sample.calibration_state == APP_BARO_CAL_APPLIED);
+    assert(sample.pressure_pa == 100000 && fabsf(sample.alt_m - 500.0f) < 0.2f);
+    App_Baro_Service();
+    assert(App_Baro_GetSnapshot(&sample) && fabsf(sample.alt_m - 500.0f) < 0.2f);
+    app_baro_set_reference(101425, 200, 1);
+    assert(App_Baro_GetSnapshot(&sample) && sample.alt_m > 508.0f && sample.alt_m < 510.0f);
+    calibrated_altitude = sample.alt_m;
+    assert(app_baro_calibrate_altitude(110) == 0);
+    fail_dev = SPL006_ADDR;
+    App_Baro_Service();
+    fail_dev = -1;
+    assert(!app_baro_calibration_pending());
+    App_Baro_GetSnapshot(&sample);
+    assert(sample.calibration_state == APP_BARO_CAL_FAILED && fabsf(sample.alt_m - calibrated_altitude) < 0.01f);
+    assert(app_baro_calibrate_altitude(110) == 0);
+    app_baro_reset_calibration();
+    assert(!app_baro_calibration_pending());
+    app_baro_set_reference(101325, 0, 0);
+    App_Baro_Service();
+    assert(App_Baro_GetSnapshot(&sample) && sample.calibration_state == APP_BARO_CAL_NONE);
+    assert(fabsf(sample.alt_m - standard_altitude) < 0.01f);
+    assert(app_baro_calibrate_altitude(-50) == 0);
+    App_Baro_Service();
+    assert(App_Baro_GetSnapshot(&sample) && fabsf(sample.alt_m + 50.0f) < 0.2f);
+    /* 正校准偏差也不能把非正原始气压变成有效高度。 */
+    regs[SPL006_ADDR][SPL06_C00_BYTE2] = 0;
+    regs[SPL006_ADDR][SPL06_C00_BYTE1] = 0;
+    assert(spl006_init() == 0);
+    regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
+    App_Baro_Service();
+    App_Baro_GetSnapshot(&sample);
+    assert(sample.pressure_pa == 0 && sample.alt_m == 0.0f);
+    regs[SPL006_ADDR][SPL06_C00_BYTE2] = 0x18;
+    regs[SPL006_ADDR][SPL06_C00_BYTE1] = 0x6A;
+    assert(spl006_init() == 0);
+    regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
+    assert(app_baro_calibrate_altitude(500) == 0);
+    baro_request_on_unlock = 1;
+    App_Baro_Service();
+    assert(app_baro_calibration_pending());
+    App_Baro_GetSnapshot(&sample);
+    assert(fabsf(sample.alt_m - 500.0f) < 0.2f);
+    App_Baro_Service();
+    assert(!app_baro_calibration_pending());
+    App_Baro_GetSnapshot(&sample);
+    assert(fabsf(sample.alt_m - 110.0f) < 0.2f);
+    app_baro_reset_calibration();
+    puts("PASS: phone temperature/fallback, fresh-sample altitude calibration, pressure refresh, negative altitude, failure retention and reset.");
 }
 
 static void spl006_sleep_recovery_tests(void)
@@ -2464,24 +2557,25 @@ static void power_profile_tests(void)
     regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
     regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
     regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
-    assert(my_mpu6050_init() == 0 && lsm303dlhc_mag_init() == 0);
+    app_imu_init_hw();
+    app_imu_init_mag_hw();
     App_IMU_Init();
     assert(app_imu_set_sample_period(20) == 20);
     assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 19 && regs[MPU6050_ADDR][MPU6050_CONFIG] == 4);
     assert(regs[0x1E][0x00] == 0x14);
     writes = mpu_writes;
     assert(app_imu_set_sample_period(20) == 20 && mpu_writes == writes);
-    my_mpu6050_restore_offset(&zero);
-    my_mpu6050_zero_offset_begin(tick);
+    app_imu_restore_offset(&zero);
+    app_imu_calibration_begin(tick);
     for (i = 0; i <= 200; ++i)
     {
         raw = (Accel_Gyro_struct){.Gyro = {66, -33, 99}, .Accel = {20, -10, 8222}};
         my_mpu6050_zero_offset_step(&raw, 1, tick);
         tick += 20;
     }
-    my_mpu6050_zero_offset_progress(&stable, &average);
+    assert(app_imu_calibration_progress(&stable, &average) == MPU6050_CAL_DONE);
     assert(my_mpu6050_zero_offset_state() == MPU6050_CAL_DONE && stable == 100 && average == 100);
-    my_mpu6050_restore_offset(&zero);
+    app_imu_restore_offset(&zero);
     word(MPU6050_ADDR, 0x3F, 8192);
     assert(app_imu_set_sample_period(40) == 40);
     assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 39 && regs[MPU6050_ADDR][MPU6050_CONFIG] == 5);
@@ -2494,7 +2588,7 @@ static void power_profile_tests(void)
         assert(App_IMU_GetSnapshot(&snapshot) != 0);
         assert(heart_motion_ms == tick);
     }
-    assert(spl006_init() == 0);
+    app_baro_init_hw();
     assert(app_imu_set_sample_period(10) == 10);
     assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 9 && regs[MPU6050_ADDR][MPU6050_CONFIG] == MPU6050_DLPF_CFG);
     assert(regs[0x1E][0x00] == 0x18);
@@ -2502,15 +2596,17 @@ static void power_profile_tests(void)
     assert(app_imu_set_sample_period(10) == 10 && mpu_writes == writes);
     assert(app_imu_set_sample_period(40) == 40);
     app_imu_set_sleep(1);
-    assert(spl006_set_sleep(1) == 0);
+    assert(app_baro_set_sleep(1) == 0);
     assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x41);
     assert(regs[0x1E][0x02] == 0x03 && (regs[SPL006_ADDR][SPL06_MEAS_CFG] & 7) == 0);
     tick += 300000;
     app_imu_set_sleep(0);
-    assert(spl006_set_sleep(0) == 0);
+    assert(app_baro_set_sleep(0) == 0);
     assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 0x01);
     assert(regs[0x1E][0x02] == 0 && (regs[SPL006_ADDR][SPL06_MEAS_CFG] & 7) == 7);
-    assert(my_mpu6050_recover_step(tick) == 0 && lsm303dlhc_mag_recover_step(tick) == 0 && spl006_recover_step(tick) == 0);
+    assert(app_imu_recover_step(tick) == 0);
+    app_imu_mag_recover_step(tick);
+    app_baro_recover_step(tick);
     assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 39 && regs[0x1E][0x00] == 0x0C);
     for (i = 0; i < 500; ++i)
     {
@@ -3264,6 +3360,7 @@ int main(int argc, char **argv)
     spl006_init_tests();
     spl006_sample_tests();
     baro_service_tests();
+    baro_calibration_tests();
     spl006_sleep_recovery_tests();
     mpu_init_error_tests();
     init_delay_tests();

@@ -5,6 +5,8 @@ void Error_Handler(void);
 #include "../../application/app_task.c"
 #include "../../interface/kt6368a.c"
 
+Host_BLE_GPIO_TypeDef host_ble_gpio;
+Host_BLE_RCC_TypeDef host_ble_rcc;
 UART_HandleTypeDef huart1 = {USART1, {115200}, 0};
 static uint32_t tick, notifications, irq_count, wait_count, delay_count;
 static uint32_t wire_remaining, wire_sent, wire_fraction, consumed;

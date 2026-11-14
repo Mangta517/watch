@@ -11,7 +11,6 @@
  */
 
 #include "main.h"
-#include "int_battery_log.h"
 #include "boot_layout.h"
 
 #define BOOTLOADER_DMA_SIZE            8192

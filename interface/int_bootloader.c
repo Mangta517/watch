@@ -1,5 +1,6 @@
 #include "int_bootloader.h"
 #include "usart.h"
+#include "kt6368a.h"
 #include "bl24c02.h"
 #include <string.h>
 
@@ -187,6 +188,23 @@ void int_bootloader_rx_error(void)
     ++uart1_rx_error_count;
 }
 
+static uint8_t int_bootloader_rx_override(uint8_t is_error)
+{
+    if (dma_active == 0)
+    {
+        return 0;
+    }
+    if (is_error != 0)
+    {
+        int_bootloader_rx_error();
+    }
+    else
+    {
+        int_bootloader_rx_complete();
+    }
+    return 1;
+}
+
 uint8_t int_bootloader_stop(void)
 {
     /* 中止USART1当前DMA接收。 */
@@ -195,6 +213,7 @@ uint8_t int_bootloader_stop(void)
     if (status == HAL_OK)
     {
         dma_active = 0;
+        kt6368a_set_rx_override(NULL);
     }
     /* 中止失败则累计错误计数，便于上层识别异常。 */
     else
@@ -247,6 +266,7 @@ uint8_t bootloader_start_dma(uint32_t length)
     /* 清除USART1溢出错误标志，防止启动后立即报错。 */
     __HAL_UART_CLEAR_OREFLAG(&huart1);
     /* 标记DMA接收进入活动状态。 */
+    kt6368a_set_rx_override(int_bootloader_rx_override);
     dma_active = 1;
     /* 启动8192字节循环DMA接收，缓冲区为双半区数组首地址。 */
     status = HAL_UART_Receive_DMA(&huart1, &rx_dma_buf[0][0], BOOTLOADER_DMA_SIZE);
@@ -254,6 +274,7 @@ uint8_t bootloader_start_dma(uint32_t length)
     if (status != HAL_OK)
     {
         dma_active = 0;
+        kt6368a_set_rx_override(NULL);
     }
     /* 对外统一为0成功、1失败。 */
     return (status != HAL_OK);

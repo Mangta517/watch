@@ -102,7 +102,7 @@ static volatile uint8_t s_stop_pending; /* 上一拍停测写失败，1表示下
 #define APP_HEART_SLEEP_TIMEOUT_MS 10000
 static uint8_t s_sleep_mode, s_sleep_active; /* 熄屏模式；后台自动测量窗口是否进行中。 */
 static uint8_t s_sport_mode, s_sport_failed; /* 运动模式；运动模式下启动失败锁存。 */
-static uint8_t s_auto_enabled; /* 后台自动心率开关；静态存储期默认0，省电关闭，不写EEPROM。 */
+static uint8_t s_auto_enabled = 1; /* 后台自动心率开关；开机默认开启每10分钟测量，不写EEPROM。 */
 static uint32_t s_sleep_cycle_ms, s_sleep_started_ms; /* 后台周期起点与本轮窗口起点，单位ms。 */
 static uint32_t poll_tick; /* 上一次进入PPG读取的tick，用于30ms节流。 */
 static uint32_t good_tick; /* 最近一次成功读到原始值的tick。 */
@@ -674,6 +674,11 @@ static void heart_process(uint16_t raw, uint32_t now, uint32_t elapsed, app_hear
         /* 长时间无任何心跳：判定无信号。 */
         data->state = APP_HEART_NO_SIGNAL;
     }
+}
+
+void app_heart_init_hw(void)
+{
+    app_diag_sensor_init(APP_DIAG_HEART, em7028_init());
 }
 
 /* 创建快照锁并保留启动时的器件故障；器件待机配置由sensor启动流程完成。 */

@@ -10,15 +10,15 @@ root = Path(__file__).resolve().parents[2]
 gcc = shutil.which("gcc")
 if not gcc:
     raise SystemExit("Desktop GCC is required.")
-sources = ["tests/sensors/sensor_harness.c", "interface/lsm303dlhc.c",
+sources = ["common/platform_delay.c", "tests/sensors/sensor_harness.c", "interface/lsm303dlhc.c",
            "interface/mpu6050.c", "interface/spl006.c",
            "interface/bl24c02.c", "application/app_mag_store.c", "application/app_imu_store.c", "application/app_uptime.c",
            "common/common_imu.c", "common/common_activity.c", "application/app_imu.c", "application/app_baro.c"]
 with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     battery_exe = str(Path(out) / "battery.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
-                    "-Itests/sensors/host", "-ICore/Inc", "-Iapplication",
-                    "tests/sensors/battery_harness.c", "application/app_battery.c",
+                    "-Itests/sensors/host", "-ICore/Inc", "-Iapplication", "-Iinterface",
+                    "tests/sensors/battery_harness.c", "application/app_battery.c", "interface/battery_adc.c",
                     "-o", battery_exe], cwd=root, check=True)
     subprocess.run([battery_exe], cwd=root, check=True)
     subprocess.run([battery_exe, "percentage"], cwd=root, check=True)
@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     aht21_exe = str(Path(out) / "aht21.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Iapplication", "-Icommon",
-                    "tests/sensors/aht21_harness.c", "interface/aht21.c", "application/app_aht21.c",
+                    "tests/sensors/aht21_harness.c", "interface/aht21.c", "common/platform_delay.c", "application/app_aht21.c",
                     "-lm", "-o", aht21_exe], cwd=root, check=True)
     subprocess.run([aht21_exe], cwd=root, check=True)
     exe = str(Path(out) / "sensors.exe")
@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-include", "tests/sensors/host/i2c_platform.h",
                     "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Icommon",
-                    "tests/sensors/driver_harness.c", "interface/lcd.c", "interface/touch.c", "common/my_i2c.c",
+                    "tests/sensors/driver_harness.c", "interface/lcd.c", "common/platform_delay.c", "interface/touch.c", "common/my_i2c.c",
                     "-o", driver_exe], cwd=root, check=True)
     subprocess.run([driver_exe], cwd=root, check=True)
     heart_exe = str(Path(out) / "em7028.exe")

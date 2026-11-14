@@ -13,6 +13,8 @@
 #define TEST_INITIAL_SPP  "01"
 #endif
 
+Host_BLE_GPIO_TypeDef host_ble_gpio;
+Host_BLE_RCC_TypeDef host_ble_rcc = {RCC_APB2ENR_USART1EN};
 UART_HandleTypeDef huart1 = {USART1, {115200}, 0};
 static uint32_t tick, mask, delay_calls;
 static uint8_t *rx_target;
@@ -128,6 +130,14 @@ void HAL_GPIO_WritePin(void *port, uint16_t pin, GPIO_PinState value)
         reply("AT+VER2.0\r\nTD+boot-info\r\n");
     }
     powered = (value == GPIO_PIN_SET);
+    if (powered != 0)
+    {
+        host_ble_gpio.ODR |= BLE_EN_Pin;
+    }
+    else
+    {
+        host_ble_gpio.ODR &= ~BLE_EN_Pin;
+    }
     if (!powered)
     {
         pending_size = pending_pos = 0;
@@ -176,6 +186,7 @@ HAL_StatusTypeDef HAL_UART_Init(UART_HandleTypeDef *uart)
     uart_irq_priority = 0; /* 与真实MSP相同，重新初始化会恢复优先级0。 */
 #endif
     uart_clock_enabled = 1;
+    host_ble_rcc.APB2ENR |= RCC_APB2ENR_USART1EN;
     ++uart_starts;
     return HAL_OK;
 }
@@ -183,6 +194,7 @@ HAL_StatusTypeDef HAL_UART_DeInit(UART_HandleTypeDef *uart)
 {
     assert(uart == &huart1 && uart_clock_enabled != 0 && !rx_armed);
     uart_clock_enabled = 0;
+    host_ble_rcc.APB2ENR &= ~RCC_APB2ENR_USART1EN;
     ++uart_stops;
     return HAL_OK;
 }
@@ -578,6 +590,21 @@ static void timed_rx_tests(void)
     puts("PASS: real UART arrival timestamps, idle/loss positions, delayed consumption, overflow, ring/tick wrap and IRQ state.");
 }
 
+static unsigned override_completions, override_errors;
+static uint8_t override_claim;
+static uint8_t test_rx_override(uint8_t is_error)
+{
+    if (is_error != 0)
+    {
+        ++override_errors;
+    }
+    else
+    {
+        ++override_completions;
+    }
+    return override_claim;
+}
+
 int main(void)
 {
     uint8_t buffer[1024];
@@ -711,6 +738,36 @@ int main(void)
     staged_startup_tests();
     explicit_power_tests();
     timed_rx_tests();
+    {
+        UART_HandleTypeDef other = huart1;
+        kt6368a_flush_rx();
+        override_claim = 1;
+        kt6368a_set_rx_override(test_rx_override);
+        HAL_UART_RxCpltCallback(&other);
+        HAL_UART_ErrorCallback(&other);
+        assert(override_completions == 0 && override_errors == 0);
+        errors = kt6368a_get_rx_errors();
+        HAL_UART_RxCpltCallback(&huart1);
+        HAL_UART_ErrorCallback(&huart1);
+        assert(override_completions == 1 && override_errors == 1 && rx_armed);
+        assert(kt6368a_rx_pending() == 0 && kt6368a_get_rx_errors() == errors);
+        override_claim = 0;
+        inject(0x41);
+        assert(override_completions == 2 && kt6368a_read(buffer, 1) == 1 && buffer[0] == 0x41);
+        kt6368a_set_rx_override(NULL);
+        override_claim = 1;
+        inject(0x42);
+        assert(override_completions == 2 && kt6368a_read(buffer, 1) == 1 && buffer[0] == 0x42);
+        assert(kt6368a_is_stop_idle() == 0);
+        host_ble_gpio.ODR = 0;
+        assert(kt6368a_is_stop_idle() == 0);
+        host_ble_rcc.APB2ENR &= ~RCC_APB2ENR_USART1EN;
+        assert(kt6368a_is_stop_idle() != 0);
+        host_ble_gpio.ODR = BLE_EN_Pin;
+        assert(kt6368a_is_stop_idle() == 0);
+        host_ble_rcc.APB2ENR |= RCC_APB2ENR_USART1EN;
+        puts("PASS: UART RX override handles complete/error, falls through when declined or cleared, and ignores other handles; STOP checks both power and clock.");
+    }
     {
         kt6368a_rx_info_struct info;
         kt6368a_flush_rx();

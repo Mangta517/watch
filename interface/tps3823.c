@@ -1,7 +1,6 @@
 #include "tps3823.h"
 #include "main.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "platform_delay.h"
 
 #define TPS3823_RESET_RELEASE_MS 301 /* 手册复位延时最大 300ms，留出时间裕量。 */
 
@@ -49,16 +48,7 @@ void tps3823_enable(void)
     /* 先回到断开态：复位线屏蔽、WDI 高阻、软件标志清零 */
     tps3823_disable();
     /* 等待正常上电复位延时；非A版若已被WDI跳变锁存，必须断电，等待不能解锁。 */
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    {
-        /* 调度器已运行：用 FreeRTOS 延时让出 CPU，多等一拍避免 tick 边界缩短等待 */
-        vTaskDelay(pdMS_TO_TICKS(TPS3823_RESET_RELEASE_MS) + 1);
-    }
-    else
-    {
-        /* 调度器未启动：用 HAL 忙等，参数单位为 ms */
-        HAL_Delay(TPS3823_RESET_RELEASE_MS);
-    }
+    platform_delay_min_ms(TPS3823_RESET_RELEASE_MS);
 
     /* 先把 WDI 预置为低电平，切输出后即驱动低，避免切换瞬间出现高脉冲 */
     HAL_GPIO_WritePin(WDI_GPIO_Port, WDI_Pin, GPIO_PIN_RESET);

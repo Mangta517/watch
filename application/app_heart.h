@@ -42,13 +42,15 @@ typedef struct
     app_heart_state state;
 } app_heart_sample_struct;
 
-/* 调度器启动后在 sensor 任务创建快照锁；EM7028 已由开机流程配置为待机。 */
+/* sensor开机流程配置EM7028为待机；软件初始化另外创建快照锁。 */
+void app_heart_init_hw(void);
+/* 调度器启动后在sensor任务创建快照锁。 */
 void app_heart_init(void);
 /* sensor每轮调用；内部限速30ms，返回1表示本轮访问了PPG总线，供磁轮询错开。 */
 uint8_t app_heart_service(void);
 /* 仅sensor任务：熄屏每10分钟自动测一次，有效BPM即停，最多10秒；保留亮屏手动请求。 */
 void app_heart_set_sleep_mode(uint8_t sleeping);
-/* 后台自动心率独立开关，默认关闭省电；set只提交请求不读I2C，sensor负责及时停止在途后台测量并保留有效值。 */
+/* 后台自动心率独立开关，开机默认开启每10分钟测量；set只提交请求不读I2C，sensor负责及时停止在途后台测量并保留有效值。 */
 void app_heart_set_auto_enabled(uint8_t enabled);
 uint8_t app_heart_get_auto_enabled(void);
 /* sensor任务：运动模式强制连续测量，停止运动后恢复原手动请求，不发送原始蓝牙波形。 */

@@ -5,10 +5,7 @@
  */
 #include "bl24c02.h"
 #include "my_i2c.h"
-#ifndef F411_BOOTLOADER
-#include "FreeRTOS.h"
-#include "task.h"
-#endif
+#include "platform_delay.h"
 #include "main.h"
 #include <stddef.h>
 
@@ -170,35 +167,15 @@ bl24c02_error bl24c02_get_error(uint16_t *address)
 
 static uint8_t bl24c02_wait_ready(void)
 {
-#ifdef F411_BOOTLOADER
-    /* Bootloader无RTOS：以HAL毫秒节拍记录等待起点。 */
     uint32_t start = HAL_GetTick();
-    /* 未ACK不一定表示内部写周期在忙：未探测到ACK时继续轮询，直到ACK或超时。 */
     while (my_i2c_probe(MY_I2C_BUS_EEPROM, BL24C02_ADDR) != 0)
     {
-        /* 等待时间达到10ms上限仍未就绪，返回失败。 */
         if ((uint32_t)(HAL_GetTick() - start) >= BL24C02_READY_TIMEOUT_MS)
         {
             return 1;
         }
-        /* 忙等期间阻塞1ms，给EEPROM内部写周期留出时间。 */
-        HAL_Delay(1);
+        platform_delay_ms(1);
     }
-#else
-    /* RTOS环境：以系统tick计数记录等待起点。 */
-    TickType_t start = xTaskGetTickCount();
-    /* 同样轮询器件ACK，未就绪则继续等待。 */
-    while (my_i2c_probe(MY_I2C_BUS_EEPROM, BL24C02_ADDR) != 0)
-    {
-        /* 把10ms超时门限换算成tick，与已等待tick数比较，达到即返回失败。 */
-        if ((TickType_t)(xTaskGetTickCount() - start) >= pdMS_TO_TICKS(BL24C02_READY_TIMEOUT_MS))
-        {
-            return 1;
-        }
-        /* 让出CPU一个tick，其他任务可在此期间运行。 */
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-#endif
     /* 探测到ACK或循环未进入，说明器件已就绪。 */
     return 0;
 }

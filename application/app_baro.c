@@ -23,20 +23,21 @@
 /* 连续 N 次总线失败才判离线: SPL006 与 MPU6050 共总线, 偶发瞬态不宜翻 OFFLINE */
 #define APP_BARO_OFFLINE_STREAK 3
 
-/* 标准大气压海平面参考 (Pa)。气压高度公式:
- *   h = 44330 * (1 - (P / 101325)^0.1902989)   [m]
- * 以固定 101325 为基准 => 得到的是"相对标准海平面"的气压高度,
- * 会随天气(实际海平面气压变化)整体漂移, 不是 GPS 真高; 手表足够,
- * 若要本地准, 用当地 QNH 替换此常量或做一次"当前置零"即可。 */
-#define APP_BARO_SEA_LEVEL_PA 101325.0f
+/* 标准模型保留原参数；有手机环境温度时，按0.0065K/m递减率求温压高度。
+ * 手机温度近似所在地空气温度，芯片原始温度仍只用于SPL006压力补偿。 */
 #define APP_BARO_ALT_SCALE    44330.0f
 #define APP_BARO_ALT_POW      0.1902989f
+#define APP_BARO_LAPSE_K_PER_M 0.0065f
 
 /**********************
  *  STATIC VARIABLES
  **********************/
 static SemaphoreHandle_t s_baro_mux; /* 保护快照 */
 static app_baro_struct s_baro_data;  /* 最新数据 (锁内赋值) */
+static uint32_t s_sea_level_pa = 101325; /* 手机未同步时使用标准参考，和快照共用互斥锁。 */
+static int16_t s_temperature_x10;
+static int16_t s_calibration_altitude_m;
+static float s_pressure_correction_pa; /* 已知海拔校准得到的压力偏差，仅用于高度换算。 */
 static uint8_t s_online;             /* 1=快照有效 */
 static uint32_t s_sample_ms;
 static uint8_t s_err_streak; /* 连续总线失败计数 (仅 Service 读写) */
@@ -72,10 +73,45 @@ static void baro_unlock(void)
     }
 }
 
+/* 调用方持有快照锁，压力输入为SPL006温度补偿后的Pa。 */
+static float baro_altitude(float pressure_pa)
+{
+    float temperature_k;
+    /* 压力或校准后气压非正时无法求幂，返回0m保护。 */
+    if (pressure_pa <= 0.0f || pressure_pa + s_pressure_correction_pa <= 0.0f)
+    {
+        return 0.0f;
+    }
+    /* 先叠加已知海拔校准偏差；若手机环境温度有效则按实测温压公式，否则用标准大气模型。 */
+    pressure_pa += s_pressure_correction_pa;
+    if (s_baro_data.temperature_corrected != 0)
+    {
+        temperature_k = (float)s_temperature_x10 / 10.0f + 273.15f;
+        return temperature_k / APP_BARO_LAPSE_K_PER_M *
+               (powf((float)s_sea_level_pa / pressure_pa, APP_BARO_ALT_POW) - 1.0f);
+    }
+    return APP_BARO_ALT_SCALE * (1.0f - powf(pressure_pa / (float)s_sea_level_pa, APP_BARO_ALT_POW));
+}
+
 /**********************
  *   GLOBAL FUNCTIONS
  **********************/
-/* 只做软件初始化：器件配置在 sensor 任务启动流程里由 spl006_init 完成。 */
+void app_baro_init_hw(void)
+{
+    app_diag_sensor_init(APP_DIAG_BARO, spl006_init());
+}
+
+uint8_t app_baro_set_sleep(uint8_t sleeping)
+{
+    return spl006_set_sleep(sleeping);
+}
+
+void app_baro_recover_step(uint32_t now_ms)
+{
+    app_diag_sensor_recovery(APP_DIAG_BARO, spl006_recover_step(now_ms));
+}
+
+/* 只做软件初始化：器件配置在sensor任务调用app_baro_init_hw时完成。 */
 void App_Baro_Init(void)
 {
     uint16_t i; /* 遍历 24 个历史槽的下标。 */
@@ -162,14 +198,14 @@ void app_baro_get_history(app_baro_history_struct *history)
     baro_unlock();
 }
 
-/* 仅sensor调用：调用驱动读取一组压力与温度原始计数并做温度补偿，换算标准气压高度。
+/* 仅sensor调用：调用驱动读取一组压力与温度原始计数并做温度补偿，换算温度修正后的气压高度。
  * 仅总线失败累计离线连败；未就绪保留快照，超新鲜度门限统一判离线。 */
 void App_Baro_Service(void)
 {
     int32_t praw = 0;  /* 本次读到的原始压力计数，驱动填充。 */
     int32_t traw = 0;  /* 本次读到的原始温度计数，用于补偿。 */
     int32_t ppa = 0;   /* 温度补偿后的气压，单位 Pa。 */
-    float alt;         /* 由气压换算的高度，单位 m。 */
+    float reference_pressure_pa, temperature_k; /* 已知海拔处的模型气压及环境绝对温度。 */
     uint8_t pr, tr;    /* 从返回码拆出的压力字节、温度字节，0/1/2 为状态。 */
     uint16_t result;   /* spl006_read_sample 的 16 位返回码：低字节压力、高字节温度。 */
     uint32_t read_started = app_diag_clock_count(); /* 读开始时刻，仅用于诊断耗时。 */
@@ -182,33 +218,40 @@ void App_Baro_Service(void)
     pr = (uint8_t)result;
     tr = (uint8_t)(result >> 8);
 
+    /* 本次结果与校准收尾一起发布，释放锁后到达的新请求留给下一次采样。 */
+    baro_lock();
+
     if ((pr == 0) && (tr == 0) && (spl006_process_pressure(praw, traw, &ppa) == 0))
     {
         /* 两路都成功且补偿成功：记一条 OK 诊断，值传 0。 */
         app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_OK, 0, read_started);
-        /* 气压→高度: 除法前先判 ppa>0, 防异常帧导致 powf 域错误 */
-        if (ppa > 0)
+        if (s_baro_data.calibration_state == APP_BARO_CAL_PENDING && ppa > 0)
         {
-            /* 标准大气压公式：44330 * (1 - (P/101325)^0.1902989)，结果单位 m。 */
-            alt = APP_BARO_ALT_SCALE * (1.0f - powf((float)ppa / APP_BARO_SEA_LEVEL_PA, APP_BARO_ALT_POW));
-        }
-        else
-        {
-            /* 非正气压不能取幂，高度按 0 处理，避免无效运算。 */
-            alt = 0.0f;
+            /* 用当前参考反算已知海拔处的气压，偏差在后续采样及手机刷新后继续生效。 */
+            if (s_baro_data.temperature_corrected != 0)
+            {
+                temperature_k = (float)s_temperature_x10 / 10.0f + 273.15f;
+                reference_pressure_pa = (float)s_sea_level_pa /
+                    powf(1.0f + APP_BARO_LAPSE_K_PER_M * (float)s_calibration_altitude_m / temperature_k, 1.0f / APP_BARO_ALT_POW);
+            }
+            else
+            {
+                reference_pressure_pa = (float)s_sea_level_pa *
+                    powf(1.0f - (float)s_calibration_altitude_m / APP_BARO_ALT_SCALE, 1.0f / APP_BARO_ALT_POW);
+            }
+            s_pressure_correction_pa = reference_pressure_pa - (float)ppa;
+            s_baro_data.calibration_state = APP_BARO_CAL_APPLIED;
         }
         /* 有效帧清零连续总线失败计数，并刷新最近成功采样时刻(ms)。 */
         s_err_streak = 0;
         s_sample_ms = HAL_GetTick();
         s_service_valid = 1;
-        /* 加锁发布本轮快照：补偿气压、高度、两路原始计数，同时把在线标志置 1。 */
-        baro_lock();
+        /* 发布本轮快照：补偿气压、高度、两路原始计数，同时把在线标志置1。 */
         s_baro_data.pressure_pa = ppa;
-        s_baro_data.alt_m = alt;
+        s_baro_data.alt_m = baro_altitude((float)ppa);
         s_baro_data.press_raw = praw;
         s_baro_data.temp_raw = traw;
         s_online = 1;
-        baro_unlock();
     }
     else if ((pr == 2) || (tr == 2))
     {
@@ -218,9 +261,7 @@ void App_Baro_Service(void)
         if (++s_err_streak >= APP_BARO_OFFLINE_STREAK)
         {
             /* 连续 3 次总线失败：加锁把在线标志清 0，快照数值保留。 */
-            baro_lock();
             s_online = 0;
-            baro_unlock();
         }
     }
     else
@@ -237,14 +278,92 @@ void App_Baro_Service(void)
         }
         s_err_streak = 0; /* 未就绪/补偿失败不是总线故障，不累计离线连败 */
     }
+    if (s_baro_data.calibration_state == APP_BARO_CAL_PENDING)
+    {
+        /* 本次采样失败时结束请求，保留此前的校准偏差，等待用户重新提交。 */
+        s_baro_data.calibration_state = APP_BARO_CAL_FAILED;
+    }
     /* 1Hz 器件在暂停(运动/环境窗口)后仍可能留旧快照，用新鲜度门限统一判离线。 */
     if ((uint32_t)(HAL_GetTick() - s_sample_ms) >= SPL006_SAMPLE_MAX_AGE_MS)
     {
         /* 距最近成功采样已超过最大允许年龄：加锁清在线标志，快照数值不动。 */
-        baro_lock();
         s_online = 0;
-        baro_unlock();
     }
+    baro_unlock();
+}
+
+/* 参考气压和温度与高度同锁更新；若参数变化且已有有效气压则立即重算海拔，sensor下一次采样继续沿用。 */
+void app_baro_set_reference(uint32_t pressure_pa, int16_t temperature_x10, uint8_t temperature_valid)
+{
+    uint8_t changed;
+    baro_lock();
+    /* 收到非零海平面气压时标记手机参考就绪；传0则沿用当前海平面气压。 */
+    if (pressure_pa != 0)
+    {
+        s_baro_data.reference_ready = 1;
+    }
+    else
+    {
+        pressure_pa = s_sea_level_pa;
+    }
+    /* 天气温度无效或过期时清零温度缓存，退回标准模型。 */
+    if (temperature_valid == 0)
+    {
+        temperature_x10 = 0;
+    }
+    changed = s_sea_level_pa != pressure_pa || s_temperature_x10 != temperature_x10 ||
+              s_baro_data.temperature_corrected != temperature_valid;
+    s_sea_level_pa = pressure_pa;
+    s_temperature_x10 = temperature_x10;
+    s_baro_data.temperature_corrected = temperature_valid;
+    /* 参考气压或温补状态变化且已有气压读数时，立即重算当前海拔供UI即时刷新。 */
+    if (changed != 0 && s_baro_data.pressure_pa > 0)
+    {
+        s_baro_data.alt_m = baro_altitude((float)s_baro_data.pressure_pa);
+    }
+    baro_unlock();
+}
+
+/* 提交已知海拔(-1000..9000m)校准请求，需先同步手机海平面气压；返回0=已受理，1=越界或未同步。 */
+uint8_t app_baro_calibrate_altitude(int16_t altitude_m)
+{
+    /* 限制输入海拔在-1000..9000m合理范围内。 */
+    if (altitude_m < -1000 || altitude_m > 9000)
+    {
+        return 1;
+    }
+    baro_lock();
+    /* 必须先收到手机海平面气压参考才能校准。 */
+    if (s_baro_data.reference_ready == 0)
+    {
+        baro_unlock();
+        return 1;
+    }
+    /* 记录目标海拔并置等待态，由sensor任务下一轮新采样计算压力偏差。 */
+    s_calibration_altitude_m = altitude_m;
+    s_baro_data.calibration_state = APP_BARO_CAL_PENDING;
+    baro_unlock();
+    return 0;
+}
+
+/* 锁内查询当前是否处于待校准状态(APP_BARO_CAL_PENDING)。 */
+uint8_t app_baro_calibration_pending(void)
+{
+    uint8_t pending;
+    baro_lock();
+    pending = s_baro_data.calibration_state == APP_BARO_CAL_PENDING;
+    baro_unlock();
+    return pending;
+}
+
+/* 清除本次开机的压力校准偏差与待处理请求，并按当前参考重新计算海拔。 */
+void app_baro_reset_calibration(void)
+{
+    baro_lock();
+    s_pressure_correction_pa = 0.0f;
+    s_baro_data.calibration_state = APP_BARO_CAL_NONE;
+    s_baro_data.alt_m = baro_altitude((float)s_baro_data.pressure_pa);
+    baro_unlock();
 }
 
 /* 加锁复制快照并返回在线位；NULL返回0，不访问器件。 */
@@ -258,7 +377,7 @@ uint8_t App_Baro_GetSnapshot(app_baro_struct *baro)
         return 0;
     }
 
-    /* 锁内复制四个快照字段并读在线位，保证返回值和数据对应同一时刻。 */
+    /* 锁内整体复制快照结构体并读在线位，保证返回值和数据对应同一时刻。 */
     baro_lock();
     *baro = s_baro_data;
     online = s_online;

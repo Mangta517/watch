@@ -14,8 +14,7 @@
 #include "mpu6050.h"
 #include "my_i2c.h"
 
-#include "FreeRTOS.h"
-#include "task.h"   /* 初始化重试与校准循环中的任务级延时 */
+#include "platform_delay.h"
 #include <stdlib.h> /* abs */
 #include <string.h>
 
@@ -23,23 +22,6 @@
 #define MPU6050_I2C_BUS MY_I2C_BUS_SENSOR
 
 static uint32_t mpu_sample_ms; /* 最近有效帧的读取开始时刻，非硬件采样时间戳。 */
-
-/* 毫秒级延时封装：ms 为请求等待的毫秒数，按调度器状态选择阻塞方式。 */
-static void mpu6050_delay_ms(uint32_t ms)
-{
-    /* 先确认调度器已经运行，只有这时才能调用 FreeRTOS 的阻塞延时。 */
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    {
-        /* 多等一拍，避免tick边界缩短硬件最小等待；等待期间让出CPU。 */
-        /* 把毫秒换算成 tick 后额外加 1 tick，再让当前任务进入阻塞。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
-    }
-    else
-    {
-        /* 调度器尚未启动（如初始化早期），改用 HAL 的忙等延时。 */
-        HAL_Delay(ms);
-    }
-}
 
 static volatile uint8_t mpu6050_int_flag;
 static volatile uint8_t mpu6050_int_status; /* sensor 任务读回的状态 */
@@ -286,12 +268,12 @@ uint8_t my_mpu6050_init(void)
         /* 探测阶段两次尝试之间等待 50ms，与 recover_step 内的间隔判断对应。 */
         if (mpu_recovery.phase == MPU_RECOVER_PROBE)
         {
-            mpu6050_delay_ms(50);
+            platform_delay_min_ms(50);
         }
         /* 复位等待阶段每 1ms 轮询一次复位是否完成。 */
         else if (mpu_recovery.phase == MPU_RECOVER_WAIT_RESET)
         {
-            mpu6050_delay_ms(1);
+            platform_delay_min_ms(1);
         }
     }
     /* 返回 0 表示已就绪；返回 1 表示失败冷却（或异常阶段）。 */
@@ -749,7 +731,7 @@ uint8_t my_mpu6050_zero_offset(void)
         /* 仍在校准过程中：按当前采样周期让出 CPU，等下一帧。 */
         if (state == MPU6050_CAL_WAIT_STILL || state == MPU6050_CAL_AVERAGING)
         {
-            vTaskDelay(pdMS_TO_TICKS(s_mpu_period_ms));
+            platform_delay_ms(s_mpu_period_ms);
         }
     }
     /* 直到状态机离开等待/平均阶段（成功、失败或已恢复）才退出循环。 */

@@ -4,10 +4,10 @@
 
 #include "main.h"
 
-#define BATTERY_LOG_START_ADDR   0x08060000
-#define BATTERY_LOG_END_ADDR     0x08080000
-#define BATTERY_LOG_RECORD_BYTES 8
-#define BATTERY_LOG_CAPACITY     ((BATTERY_LOG_END_ADDR - BATTERY_LOG_START_ADDR) / BATTERY_LOG_RECORD_BYTES)
+#include "boot_layout.h"
+
+/* 写入前绑定；Flash忙等结束后、恢复中断前递交暂存字节。未绑定时不轮询UART。 */
+void int_battery_log_set_rx_callbacks(uint8_t (*is_enabled)(void), void (*receive)(uint8_t byte, uint8_t errors));
 
 void int_battery_log_read(uint32_t slot, uint8_t record[BATTERY_LOG_RECORD_BYTES]);
 /* 0=写入并读回校验成功，1=参数、Flash操作或读回校验失败。 */

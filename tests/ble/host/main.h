@@ -34,7 +34,19 @@ typedef struct
 #define GPIOB                          ((void *)2)
 #define USART1                         ((void *)3)
 #define USART1_IRQn                    37
-#define BLE_EN_GPIO_Port               GPIOA
+typedef struct
+{
+    uint32_t ODR;
+} Host_BLE_GPIO_TypeDef;
+typedef struct
+{
+    uint32_t APB2ENR;
+} Host_BLE_RCC_TypeDef;
+extern Host_BLE_GPIO_TypeDef host_ble_gpio;
+extern Host_BLE_RCC_TypeDef host_ble_rcc;
+#define RCC (&host_ble_rcc)
+#define RCC_APB2ENR_USART1EN 0x10
+#define BLE_EN_GPIO_Port (&host_ble_gpio)
 #define BLE_EN_Pin                     (1U << 8)
 #define BLE_TX_Pin                     (1U << 9)
 #define BLE_RX_Pin                     (1U << 10)

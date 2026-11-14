@@ -73,6 +73,16 @@ extern "C"
         app_mag_persist_state mag_persist_state; /* RAM校准与掉电保存分别报告 */
     } app_imu_struct;
 
+    /* 仅sensor任务操作硬件；保持MPU、气压、磁、心率原有开机顺序。 */
+    void app_imu_init_hw(void);
+    void app_imu_init_mag_hw(void);
+    uint8_t app_imu_recover_step(uint32_t now_ms);
+    void app_imu_mag_recover_step(uint32_t now_ms);
+    void app_imu_calibration_begin(uint32_t now_ms);
+    mpu6050_cal_state app_imu_calibration_progress(uint16_t *stable, uint16_t *average);
+    void app_imu_restore_offset(const mpu6050_offset_struct *offset);
+    void app_imu_get_offset(mpu6050_offset_struct *offset);
+
     /**
  * @brief 创建数据锁 (须在任务上下文调用, 调度器已启动; 见 app_display 同理)
  */

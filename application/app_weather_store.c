@@ -211,7 +211,7 @@ uint8_t app_weather_store_service(uint8_t storage_available)
             s_store.loaded = weather_store_load() == 0;
             if (s_store.loaded == 0)
             {
-                return 0; /* 未读清两个副本时不写；下一手机帧再尝试。 */
+                return 0; /* 未读清三槽记录时不写；下一手机帧再尝试。 */
             }
         }
         /* 与已保存内容完全相同时不重复写EEPROM。 */

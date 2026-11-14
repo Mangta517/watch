@@ -4,7 +4,7 @@
  */
 #include "app_battery.h"
 #include "app_diag.h"
-#include "adc.h"
+#include "battery_adc.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include <string.h>
@@ -88,9 +88,8 @@ void app_battery_set_sleep_mode(uint8_t sleeping)
 void app_battery_service(void)
 {
     app_battery_struct sample = {0}; /* 本轮结果先攒在局部，末尾整体替换快照。 */
-    HAL_StatusTypeDef stop_result;   /* 停止 ADC 的返回码，转换成功时才并入结果。 */
     uint32_t now = HAL_GetTick();    /* 本轮进入时刻(ms)，用于周期判断与低通补步。 */
-    uint32_t raw = 0;                /* 本次 12 位 ADC 原始值，0~4095。 */
+    uint16_t raw = 0;                /* 本次 12 位 ADC 原始值，0~4095。 */
     uint32_t read_started;           /* 采样开始时刻，仅用于诊断耗时。 */
     uint32_t period_ms = APP_BATTERY_PERIOD_MS; /* 当轮周期，默认亮屏/启动档 1s。 */
     uint32_t filter_steps;           /* 本次需要推进的低通步数，按经过的秒数折算。 */
@@ -108,25 +107,7 @@ void app_battery_service(void)
     /* 记录本次尝试时刻，下一轮从这里起算周期。 */
     s_attempt_ms = now;
     read_started = app_diag_clock_count();
-    /* 启动 ADC1 单次转换，返回码先存入 sample.result。 */
-    sample.result = HAL_ADC_Start(&hadc1);
-    if (sample.result == HAL_OK)
-    {
-        /* 64MHz PCLK2/8=8MHz，480周期采样约60us；超时有限，不让故障卡住sensor任务。 */
-        sample.result = HAL_ADC_PollForConversion(&hadc1, APP_BATTERY_ADC_TIMEOUT_MS);
-        if (sample.result == HAL_OK)
-        {
-            /* 轮询成功才读取转换结果，范围 0~4095。 */
-            raw = HAL_ADC_GetValue(&hadc1);
-        }
-        /* 无论轮询成功与否都停止 ADC，释放本次转换。 */
-        stop_result = HAL_ADC_Stop(&hadc1);
-        if (sample.result == HAL_OK)
-        {
-            /* 前面都成功时，用停止结果作为本轮最终结果；前面已失败则保留原错误码。 */
-            sample.result = stop_result;
-        }
-    }
+    sample.result = battery_adc_read_raw(APP_BATTERY_ADC_TIMEOUT_MS, &raw);
     if (sample.result == HAL_OK)
     {
         /* 整条 ADC 流程成功：保存原始值供诊断显示。 */

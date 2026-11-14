@@ -305,6 +305,49 @@ static uint8_t mag_service(TickType_t now, float body_uT[3], uint8_t read_mag)
 /**********************
  *   GLOBAL FUNCTIONS
  **********************/
+void app_imu_init_hw(void)
+{
+    app_diag_sensor_init(APP_DIAG_MPU, my_mpu6050_init());
+}
+
+void app_imu_init_mag_hw(void)
+{
+    app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_init());
+}
+
+uint8_t app_imu_recover_step(uint32_t now_ms)
+{
+    uint8_t result = my_mpu6050_recover_step(now_ms);
+    app_diag_sensor_recovery(APP_DIAG_MPU, result);
+    return result;
+}
+
+void app_imu_mag_recover_step(uint32_t now_ms)
+{
+    app_diag_sensor_recovery(APP_DIAG_MAG, lsm303dlhc_mag_recover_step(now_ms));
+}
+
+void app_imu_calibration_begin(uint32_t now_ms)
+{
+    my_mpu6050_zero_offset_begin(now_ms);
+}
+
+mpu6050_cal_state app_imu_calibration_progress(uint16_t *stable, uint16_t *average)
+{
+    my_mpu6050_zero_offset_progress(stable, average);
+    return my_mpu6050_zero_offset_state();
+}
+
+void app_imu_restore_offset(const mpu6050_offset_struct *offset)
+{
+    my_mpu6050_restore_offset(offset);
+}
+
+void app_imu_get_offset(mpu6050_offset_struct *offset)
+{
+    my_mpu6050_get_offset(offset);
+}
+
 /* 建快照锁并复位姿态/活动状态；MPU6050、LSM303DLHC已由sensor启动流程初始化。
  * 磁校准记录在本函数内读取，成功则直接进入DONE/RESTORED，失败只记持久化状态。 */
 void App_IMU_Init(void)

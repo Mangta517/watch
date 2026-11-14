@@ -18,8 +18,13 @@
 #include "lcd.h"
 #include "spi.h"
 #include "tim.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "platform_delay.h"
+
+uint8_t lcd_is_stop_idle(void)
+{
+    return __HAL_TIM_GET_COMPARE(&htim3, TIM_CHANNEL_3) == 0 &&
+           (SPI1->SR & SPI_SR_BSY) == 0 && (hspi1.hdmatx->Instance->CR & DMA_SxCR_EN) == 0;
+}
 
 /* 引脚快捷宏 (全部来自 CubeMX 生成的 main.h) */
 #define LCD_CS_Clr()  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET)
@@ -33,21 +38,6 @@
 #define LCD_SPI_TMO 50
 /* 最大65534字节在32MHz下约16.4ms；100ms后仍无回调则按失败收尾。 */
 #define LCD_DMA_TIMEOUT_MS 100
-
-static void lcd_delay_ms(uint32_t ms)
-{
-    /* ms: 需要等待的毫秒数；调度器已运行时走 RTOS 延时，未启动时退回 HAL 忙等。 */
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    {
-        /* 多等一拍，避免调用落在tick末尾时缩短硬件最小等待时间。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
-    }
-    else
-    {
-        /* 调度器尚未运行（如初始化早期），只能用 HAL 的忙等延时。 */
-        HAL_Delay(ms);
-    }
-}
 
 /******************************************************************************
  * 底层: 硬件SPI 写 (SPI1 主模式, CubeMX 实配 CPOL=1/CPHA=1 即 Mode3, MSB first;
@@ -94,7 +84,7 @@ void LCD_WR_REG(uint8_t reg)
 }
 
 /******************************************************************************
- * 地址窗口 (自动加 Y 偏移; 0x2A 高16bit恒0, 0x2B 按16bit发)
+ * 地址窗口 (自动加 Y 偏移; 0x2A 高8bit恒0, 0x2B 按16bit发)
  *****************************************************************************/
 static uint8_t lcd_address_set(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
 {
@@ -431,13 +421,13 @@ void LCD_Init(void)
 
     /* 硬复位：RST 拉低保持 100ms，再释放并等待 100ms 让面板稳定。 */
     LCD_RES_Clr(); /* 硬复位 */
-    lcd_delay_ms(100);
+    platform_delay_min_ms(100);
     LCD_RES_Set();
-    lcd_delay_ms(100);
+    platform_delay_min_ms(100);
 
     /* 0x11 Sleep Out：退出睡眠后等待 120ms 再继续配置。 */
     LCD_WR_REG(0x11); /* Sleep Out */
-    lcd_delay_ms(120);
+    platform_delay_min_ms(120);
 
     /* 0x36 MADCTL 设扫描方向为竖屏，0x3A 设像素格式为 16bit RGB565。 */
     LCD_WR_REG(0x36);
@@ -555,7 +545,7 @@ uint8_t LCD_ST7789_SleepIn(void)
         return 1;
     }
     /* 命令发出后等 100ms，再停时钟、关外设。 */
-    lcd_delay_ms(100);
+    platform_delay_min_ms(100);
     /* 移植层已等DMA收尾；CCR=0保持PB0低电平，停计数并关闭显示外设时钟。 */
     htim3.Instance->CR1 &= ~TIM_CR1_CEN;
     __HAL_SPI_DISABLE(&hspi1);
@@ -578,7 +568,7 @@ uint8_t LCD_ST7789_SleepOut(void)
     {
         return 1;
     }
-    lcd_delay_ms(120); /* 与初始化Sleep Out相同，等待面板恢复后再绘图、开背光。 */
+    platform_delay_min_ms(120); /* 与初始化Sleep Out相同，等待面板恢复后再绘图、开背光。 */
     /* 0 表示唤醒命令已发送并等待了恢复时间。 */
     return 0;
 }

@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix="watch-bootloader-") as output:
         "-Wno-int-to-pointer-cast", "-Wno-missing-field-initializers", "-DF411_BOOTLOADER",
         "-I" + str(output), "-Iinterface", "-Iapplication", "-Icommon",
         "tests/bootloader/bootloader_harness.c", "interface/kt6368a.c",
-        "interface/int_bootloader.c", "application/app_bootloader.c", "application/app_boot_select.c", "interface/bl24c02.c", "-o", str(executable),
+        "interface/int_bootloader.c", "application/app_bootloader.c", "application/app_boot_select.c", "interface/bl24c02.c", "common/platform_delay.c", "-o", str(executable),
     ], cwd=root, check=True)
     subprocess.run([str(executable)], cwd=root, check=True)
 

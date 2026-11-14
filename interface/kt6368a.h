@@ -73,6 +73,10 @@ extern "C"
     /* 同一到达tick分块；遇空闲/错误边界另起一块，显示任务延迟不能切断消息。 */
     uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct *info);
     uint8_t kt6368a_rx_pending(void);
+    /* 非0表示事件已由接管者处理；启动接收前绑定，停止后解除，仅USART1回调使用。 */
+    typedef uint8_t (*kt6368a_rx_override_fn)(uint8_t is_error);
+    void kt6368a_set_rx_override(kt6368a_rx_override_fn callback);
+    uint8_t kt6368a_is_stop_idle(void);
     /* sensor写Flash时屏蔽中断轮询USART；errors为SR低4位，接收数据沿用原队列。 */
     uint8_t kt6368a_rx_is_enabled(void);
     void kt6368a_receive_polled(uint8_t byte, uint8_t errors);

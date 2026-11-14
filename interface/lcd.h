@@ -23,6 +23,8 @@ extern "C"
 #include "main.h"
 #include <stdint.h>
 
+uint8_t lcd_is_stop_idle(void);
+
 /* 面板参数: 竖屏 USE_HORIZONTAL=1, MADCTL=0xC0, ST7789 显存320行 -> 280行面板 Y 偏移20 */
 #define LCD_WIDTH    240
 #define LCD_HEIGHT   280

@@ -600,6 +600,11 @@
               <FileType>1</FileType>
               <FilePath>../common/my_i2c.c</FilePath>
             </File>
+            <File>
+              <FileName>platform_delay.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\common\platform_delay.c</FilePath>
+            </File>
           </Files>
         </Group>
       </Groups>

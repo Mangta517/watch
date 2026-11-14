@@ -154,12 +154,12 @@ HAL_StatusTypeDef HAL_FLASH_Program(uint32_t type, uint32_t address, uint64_t va
 }
 uint8_t kt6368a_rx_is_enabled(void)
 {
-    assert(irq_mask != 0);
+    assert(irq_mask != 0 && (FLASH->SR & FLASH_SR_BSY) == 0);
     return receive_during_flash;
 }
 void kt6368a_receive_polled(uint8_t byte, uint8_t errors)
 {
-    assert(irq_mask != 0 && errors == 0);
+    assert(irq_mask != 0 && errors == 0 && (FLASH->SR & FLASH_SR_BSY) == 0);
     assert(byte == (uint8_t)(polled_bytes % 3));
     ++polled_bytes;
 }
@@ -718,6 +718,23 @@ int main(int argc, char **argv)
     else if (strcmp(argv[1], "reset_full") == 0)
     {
         reset_full_tests();
+    }
+    else if (strcmp(argv[1], "unbound") == 0)
+    {
+        app_battery_log_init();
+        int_battery_log_set_rx_callbacks(NULL, NULL);
+        app_battery_log_service(60);
+        assert(status().samples == 1 && polled_bytes == 0);
+        int_battery_log_set_rx_callbacks(kt6368a_rx_is_enabled, NULL);
+        app_battery_log_service(120);
+        assert(status().samples == 2 && polled_bytes == 0);
+        int_battery_log_set_rx_callbacks(NULL, kt6368a_receive_polled);
+        app_battery_log_service(180);
+        assert(status().samples == 3 && polled_bytes == 0);
+        int_battery_log_set_rx_callbacks(kt6368a_rx_is_enabled, kt6368a_receive_polled);
+        app_battery_log_service(240);
+        assert(status().samples == 4 && polled_bytes == 12 && irq_mask == 0);
+        puts("PASS: optional RX hooks require a complete pair; rebinding resumes UART draining after Flash BSY clears.");
     }
     else if (strcmp(argv[1], "uart_off") == 0)
     {

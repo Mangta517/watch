@@ -20,6 +20,9 @@
 #include "app_task.h"
 #include "watch_rtc.h"
 #include "tps3823.h"
+#include "lcd.h"
+#include "kt6368a.h"
+#include "battery_adc.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -45,14 +48,8 @@ extern __IO uint32_t uwTick;
  * 这是软件侧的前提检查，不构成"STOP期间任何中断都能收到"的硬件保证。 */
 static uint8_t app_tickless_stop_allowed(void)
 {
-    /* F411 USART无法在STOP接收；屏灭后仍可能有LCD DMA安全收尾，必须等它完成。 */
-    /* 逐项与运算：全部条件为真才返回 1（允许 STOP），任一条不满足返回 0 退回 Sleep。 */
-    /* 条件依次为：总开关打开、屏幕已熄、背光 PWM 占空为 0、蓝牙使能脚为低、USART1 时钟关闭、
-     * SPI1 不忙、DMA2 Stream2 未使能、ADC1 未开启。 */
-    return APP_TICKLESS_ENABLE_STOP != 0 && app_task_is_screen_off() != 0 && TIM3->CCR3 == 0 &&
-           (BLE_EN_GPIO_Port->ODR & BLE_EN_Pin) == 0 && (RCC->APB2ENR & RCC_APB2ENR_USART1EN) == 0 &&
-           (SPI1->SR & SPI_SR_BSY) == 0 && (DMA2_Stream2->CR & DMA_SxCR_EN) == 0 &&
-           (ADC1->CR2 & ADC_CR2_ADON) == 0;
+    return APP_TICKLESS_ENABLE_STOP != 0 && app_task_is_screen_off() != 0 &&
+           lcd_is_stop_idle() != 0 && kt6368a_is_stop_idle() != 0 && battery_adc_is_stop_idle() != 0;
 }
 
 /* STOP醒来后把系统时钟切回64MHz PLL：STOP唤醒后硬件先以HSI运行，RCC配置保留。

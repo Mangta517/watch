@@ -4,30 +4,13 @@
  */
 #include "aht21.h"
 #include "my_i2c.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "platform_delay.h"
 #include <stddef.h>
 
 #define AHT21_STATUS_BUSY       0x80
 #define AHT21_STATUS_CALIBRATED 0x08
 /* 熄屏每100ms才推进一拍，五个恢复阶段及调度余量须落在1.6s环境窗口内。 */
 #define AHT21_RECOVERY_TIMEOUT_MS 1000
-
-/* 毫秒延时封装：调度器运行时让出 CPU，未运行时退回 HAL 忙等。 */
-static void aht21_delay_ms(uint32_t ms)
-{
-    /* 查询调度器状态，判断当前能否使用 FreeRTOS 的阻塞延时。 */
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    {
-        /* 多等一拍，避免tick边界缩短硬件最小等待；等待期间让出CPU。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
-    }
-    else
-    {
-        /* 调度器未启动，不能用 vTaskDelay，只能由 HAL 轮询等待。 */
-        HAL_Delay(ms);
-    }
-}
 
 /* 0x71 是读地址字节，不是寄存器号；不能使用先写寄存器的 read_bytes。 */
 static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
@@ -103,7 +86,7 @@ aht21_result aht21_init(void)
     /* 读回的状态字节，bit7 为忙、bit3 为已校准。 */
     uint8_t status;
     /* 上电后先等 40ms，让器件完成内部启动。 */
-    aht21_delay_ms(40);
+    platform_delay_min_ms(40);
     /* 读取当前状态，读失败按总线错误返回。 */
     if (aht21_read_bytes(&status, 1) != AHT21_OK)
     {
@@ -123,7 +106,7 @@ aht21_result aht21_init(void)
             return AHT21_I2C_ERROR;
         }
         /* 校准命令后等 10ms 再回读状态。 */
-        aht21_delay_ms(10);
+        platform_delay_min_ms(10);
         /* 回读状态，失败仍按总线错误处理。 */
         if (aht21_read_bytes(&status, 1) != AHT21_OK)
         {

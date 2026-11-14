@@ -4,6 +4,7 @@
 #define app_diag_take_imu_calibration startup_take_imu_calibration
 #include "../../application/app_task.c"
 #include "bl24c02.h"
+#include "spl006.h"
 #include "app_weather.h"
 
 static unsigned battery_log_calls;
@@ -63,6 +64,7 @@ static unsigned int baro_calls;
 static uint32_t sensor_elapsed_ms;
 static uint8_t low_rate_mask;
 static uint8_t baro_cadence;
+static uint8_t baro_boundary_test;
 static uint8_t power_profile, heart_enabled;
 static uint8_t battery_sleep_mode;
 static uint32_t aht_period_ms;
@@ -680,6 +682,21 @@ void vTaskDelay(TickType_t ticks)
 }
 void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
 {
+    if (baro_boundary_test != 0)
+    {
+        assert(ticks == APP_SENSOR_IDLE_PERIOD_MS);
+        assert(++sensor_rounds == app_sensor_watchdog_progress);
+        low_rate_mask = 0;
+        sensor_elapsed_ms += ticks;
+        tick += ticks;
+        *last = tick;
+        if (sensor_elapsed_ms >= 603000)
+        {
+            assert(baro_calls == 3);
+            longjmp(sensor_stop, 1);
+        }
+        return;
+    }
     if (reference_recovery_test != 0)
     {
         assert(ticks == 10 || ticks == 20);
@@ -1015,7 +1032,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     {
         heart_enabled = 0; /* 下一轮必须恢复原姿态/校准采样档位。 */
     }
-    if (sensor_rounds < 2 || (baro_cadence != 0 && sensor_rounds < 150))
+    if (sensor_rounds < 2 || (baro_cadence != 0 && sensor_rounds < 150 * baro_cadence))
     {
         tick += ticks;
         *last = tick;
@@ -1233,6 +1250,11 @@ em7028_result em7028_init(void)
 void App_IMU_Init(void)
 {
     assert(hardware_count == 5);
+}
+uint8_t app_baro_calibration_pending(void)
+{
+    return (baro_cadence == 2 && baro_calls == 1 && sensor_elapsed_ms >= 2000) ||
+           (baro_boundary_test != 0 && baro_calls == 1 && sensor_elapsed_ms >= 299000);
 }
 void App_Baro_Init(void)
 {
@@ -1618,6 +1640,15 @@ void app_heart_get_snapshot(app_heart_struct *heart)
 void App_Baro_Service(void)
 {
     assert(hardware_count == 5);
+    if (baro_boundary_test != 0)
+    {
+        static const uint32_t expected_ms[] = {1600, 300600, 601600};
+        assert(baro_calls < sizeof(expected_ms) / sizeof(expected_ms[0]));
+        assert(sensor_elapsed_ms >= expected_ms[baro_calls]);
+        assert(sensor_elapsed_ms < expected_ms[baro_calls] + APP_SENSOR_IDLE_PERIOD_MS);
+        ++baro_calls;
+        return;
+    }
     if (environment_test != 0)
     {
         assert(environment_bus_parked == 0);
@@ -1678,8 +1709,15 @@ void App_Baro_Service(void)
     assert(low_rate_mask == 0);
     low_rate_mask |= 2U;
     ++baro_calls;
-    assert(sensor_elapsed_ms >= 1600 + (baro_calls - 1) * 300000);
-    assert(sensor_elapsed_ms < 1640 + (baro_calls - 1) * 300000);
+    if (baro_cadence == 2 && baro_calls == 2)
+    {
+        assert(sensor_elapsed_ms >= 3600 && sensor_elapsed_ms < 3640);
+    }
+    else
+    {
+        assert(sensor_elapsed_ms >= 1600 + (baro_calls - 1) * 300000);
+        assert(sensor_elapsed_ms < 1640 + (baro_calls - 1) * 300000);
+    }
 }
 uint8_t app_heart_service(void)
 {
@@ -1805,6 +1843,24 @@ uint32_t app_touch_sleep_retry_ms(void)
 int main(int argc, char **argv)
 {
     int result;
+    if (argc > 1 && strncmp(argv[1], "baro_calibration_boundary", 25) == 0)
+    {
+        baro_boundary_test = restored_mode = displayed = 1;
+        tick = 1000;
+        if (strcmp(argv[1], "baro_calibration_boundary_wrap") == 0)
+        {
+            tick = UINT32_MAX - 299500;
+        }
+        app_watchdog_begin();
+        frame = 1;
+        app_task_set_power_state(0, 0, 0, 0);
+        if (setjmp(sensor_stop) == 0)
+        {
+            app_sensor_task(NULL);
+        }
+        puts("PASS: calibration spanning the five-minute deadline consumes that deadline and preserves the next periodic window, including tick wrap.");
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "reference_recovery") == 0)
     {
         reference_recovery_test = restored_mode = heart_enabled = displayed = 1;
@@ -2066,6 +2122,10 @@ int main(int argc, char **argv)
     {
         bluetooth_resume_test = strcmp(argv[1], "bluetooth_resume") == 0;
         baro_cadence = strcmp(argv[1], "baro_cadence") == 0;
+        if (strcmp(argv[1], "baro_calibration") == 0)
+        {
+            baro_cadence = 2;
+        }
         if (baro_cadence != 0)
         {
             app_task_set_power_state(0, 0, 0, 0);
@@ -2135,6 +2195,12 @@ int main(int argc, char **argv)
     }
     if (baro_cadence != 0)
     {
+        if (baro_cadence == 2)
+        {
+            assert(result == 5 && sensor_rounds == 300 && baro_calls == 2);
+            puts("PASS: an altitude calibration request opens a fresh barometer window before the regular five-minute deadline.");
+            return 0;
+        }
         assert(result == 5 && sensor_rounds == 150 && baro_calls == 1);
         assert(recovery_steps == 381 && baro_recovery_steps == 81 && app_sensor_watchdog_progress == 150);
         puts("Sensor cadence: initial 1.6s barometer window reads once, then sleeps without recovery polling while sensor/watchdog continue: PASS");
@@ -2303,4 +2369,68 @@ uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
         return 2; /* Recovering devices must not stop sensor progress. */
     }
     return 0;
+}
+
+/* 复用既有器件桩，模拟应用服务边界。 */
+void app_imu_init_hw(void)
+{
+    app_diag_sensor_init(APP_DIAG_MPU, my_mpu6050_init());
+}
+
+void app_imu_init_mag_hw(void)
+{
+    app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_init());
+}
+
+uint8_t app_imu_recover_step(uint32_t now_ms)
+{
+    uint8_t result = my_mpu6050_recover_step(now_ms);
+    app_diag_sensor_recovery(APP_DIAG_MPU, result);
+    return result;
+}
+
+void app_imu_mag_recover_step(uint32_t now_ms)
+{
+    app_diag_sensor_recovery(APP_DIAG_MAG, lsm303dlhc_mag_recover_step(now_ms));
+}
+
+void app_imu_calibration_begin(uint32_t now_ms)
+{
+    my_mpu6050_zero_offset_begin(now_ms);
+}
+
+mpu6050_cal_state app_imu_calibration_progress(uint16_t *stable, uint16_t *average)
+{
+    my_mpu6050_zero_offset_progress(stable, average);
+    return my_mpu6050_zero_offset_state();
+}
+
+void app_imu_restore_offset(const mpu6050_offset_struct *offset)
+{
+    my_mpu6050_restore_offset(offset);
+}
+
+void app_imu_get_offset(mpu6050_offset_struct *offset)
+{
+    my_mpu6050_get_offset(offset);
+}
+
+void app_baro_init_hw(void)
+{
+    app_diag_sensor_init(APP_DIAG_BARO, spl006_init());
+}
+
+uint8_t app_baro_set_sleep(uint8_t sleeping)
+{
+    return spl006_set_sleep(sleeping);
+}
+
+void app_baro_recover_step(uint32_t now_ms)
+{
+    app_diag_sensor_recovery(APP_DIAG_BARO, spl006_recover_step(now_ms));
+}
+
+void app_heart_init_hw(void)
+{
+    app_diag_sensor_init(APP_DIAG_HEART, em7028_init());
 }

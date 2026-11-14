@@ -1,12 +1,14 @@
 /* 编译真实电池服务，检查ADC生命周期、分压换算、故障重试与快照同步。 */
 #include "app_battery.h"
 #include "adc.h"
+#include "battery_adc.h"
 #include "semphr.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
 ADC_HandleTypeDef hadc1;
+Host_ADC_TypeDef host_adc1;
 static uint32_t now_ms;
 static uint32_t adc_value;
 static uint32_t starts, polls, reads, stops;
@@ -283,6 +285,12 @@ int main(int argc, char **argv)
         puts("PASS: battery mutex allocation failure follows Error_Handler.");
         return 0;
     }
+    host_adc1.CR2 = 0x100;
+    assert(battery_adc_is_stop_idle() != 0);
+    host_adc1.CR2 |= ADC_CR2_ADON;
+    assert(battery_adc_is_stop_idle() == 0 && host_adc1.CR2 == 0x101);
+    host_adc1.CR2 &= ~ADC_CR2_ADON;
+    assert(battery_adc_is_stop_idle() != 0);
     app_battery_init();
     app_battery_get_snapshot(&snapshot);
     assert(!snapshot.valid && snapshot.result == HAL_OK);

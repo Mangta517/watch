@@ -39,7 +39,7 @@ subprocess.run([gcc, "-std=c99", "-O0", "-Wall", "-Wextra", "-Werror",
                "-include", "tests/sensors/host/i2c_platform.h",
                "-Itests/sensors/host", "-ICore/Inc", "-Iapplication", "-Iinterface", "-Icommon",
                "-IMiddlewares/LVGL", "-IMiddlewares/LVGL/lvgl",
-               "tests/ui/dma_timeout_harness.c", "interface/lcd.c", "interface/touch.c", "common/my_i2c.c",
+               "tests/ui/dma_timeout_harness.c", "interface/lcd.c", "common/platform_delay.c", "interface/touch.c", "common/my_i2c.c",
                str(library), "-lm", "-o", str(timeout_exe)], cwd=ROOT, check=True)
 subprocess.run([str(timeout_exe)], cwd=ROOT, check=True)
 subprocess.run([str(timeout_exe), "wrap"], cwd=ROOT, check=True)
@@ -47,14 +47,19 @@ subprocess.run([str(timeout_exe), "slow"], cwd=ROOT, check=True)
 subprocess.run([str(timeout_exe), "slow_wrap"], cwd=ROOT, check=True)
 touch_sources = ["application/app_touch.c", "application/app_reset_ble.c",
                  "Middlewares/LVGL/lvgl/examples/porting/lv_port_indev_template.c"]
-subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-DAPP_DEBUG_TELEMETRY=1", "-Wall", "-Wextra", "-Werror", "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c", str(library), "-lm", "-o", str(exe)], cwd=ROOT, check=True)
+ui_sources = ["interface/watch_key.c", "tests/ui/ui_harness.c", "application/ui_widgets.c", "application/ui_sydney_font.c",
+              "application/app_clock.c", "application/app_weather.c", "application/app_ble_service.c"]
+ui_args = [gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-Wall", "-Wextra", "-Werror"]
+subprocess.run(ui_args + ["-DAPP_DEBUG_TELEMETRY=1"] + ui_sources + [str(library), "-lm", "-o", str(exe)],
+               cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe), "cached_weather"], cwd=ROOT, check=True)
+subprocess.run([str(exe), "page_lifecycle"], cwd=ROOT, check=True)
 quiet_exe = OUT / "ui_quiet.exe"
-subprocess.run([gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-DAPP_DEBUG_TELEMETRY=0", "-Wall", "-Wextra", "-Werror",
-               "tests/ui/ui_harness.c", "application/ui_sydney_font.c", "application/app_clock.c", "application/app_weather.c",
-               str(library), "-lm", "-o", str(quiet_exe)], cwd=ROOT, check=True)
+subprocess.run(ui_args + ["-DAPP_DEBUG_TELEMETRY=0"] + ui_sources + [str(library), "-lm", "-o", str(quiet_exe)],
+               cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe)], cwd=ROOT, check=True)
+subprocess.run([str(quiet_exe), "page_lifecycle"], cwd=ROOT, check=True)
 from PIL import Image, ImageDraw, ImageFont
 
 try:

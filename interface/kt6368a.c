@@ -7,9 +7,6 @@
 #include "kt6368a.h"
 #include "usart.h"
 #include <string.h>
-#if defined(F411_BOOTLOADER)
-#include "int_bootloader.h"
-#endif
 
 /* 普通APP与保底恢复均开启BLE；仅保底恢复额外开启SPP，日常APP关闭SPP。 */
 #if defined(F411_BOOTLOADER)
@@ -40,6 +37,18 @@ typedef struct
 static kt6368a_t ble;
 static HAL_StatusTypeDef init_status = HAL_ERROR;
 static void (*s_rx_callback)(void);
+static kt6368a_rx_override_fn s_rx_override;
+
+void kt6368a_set_rx_override(kt6368a_rx_override_fn callback)
+{
+    s_rx_override = callback;
+}
+
+uint8_t kt6368a_is_stop_idle(void)
+{
+    return (BLE_EN_GPIO_Port->ODR & BLE_EN_Pin) == 0 &&
+           (RCC->APB2ENR & RCC_APB2ENR_USART1EN) == 0;
+}
 
 enum
 {
@@ -1133,14 +1142,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         /* 非USART1句柄或模块未供电：忽略本次回调。 */
         return;
     }
-#if defined(F411_BOOTLOADER)
-    if (int_bootloader_rx_dma_active() != 0)
+    if (s_rx_override != NULL && s_rx_override(0) != 0)
     {
-        /* Bootloader升级期间DMA接收生效：把完成事件交给升级模块处理。 */
-        int_bootloader_rx_complete();
         return;
     }
-#endif
     if (huart->ErrorCode != HAL_UART_ERROR_NONE)
     {
         /* 带错误码的完成事件不当作正常字节，留给错误回调处理。 */
@@ -1164,20 +1169,16 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         /* 非USART1句柄或模块未供电：忽略本次错误。 */
         return;
     }
-#if defined(F411_BOOTLOADER)
-    if (int_bootloader_rx_dma_active() != 0)
+    if (s_rx_override != NULL && s_rx_override(1) != 0)
     {
-        /* Bootloader升级期间DMA接收生效：把错误事件交给升级模块处理。 */
-        int_bootloader_rx_error();
         return;
     }
-#endif
     /* 累计错误次数，并记录一次活动、标记丢字节边界。 */
     ble.rx_errors++;
     ble.rx_activity_ms = HAL_GetTick();
     ble.rx_have_byte = 1;
     ble.rx_loss_pending = 1;
-    /* 本工程没有UART RX DMA；AbortReceive仅关闭接收中断，不在ISR等待DMA。 */
+    /* 此路径未启用UART RX DMA（Bootloader DMA激活时已在上方返回）；AbortReceive仅关闭接收中断，不在ISR等待DMA。 */
     (void)HAL_UART_AbortReceive(huart);
     /* 清除溢出错误标志，避免下一次接收立刻再次报错。 */
     __HAL_UART_CLEAR_OREFLAG(huart);

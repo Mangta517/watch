@@ -14,8 +14,8 @@ with tempfile.TemporaryDirectory(prefix="watch-watchdog-") as out:
     subprocess.run([
         gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
         "-include", "tests/sensors/host/i2c_platform.h",
-        "-Itests/sensors/host", "-ICore/Inc", "-Iinterface",
-        "tests/watchdog/watchdog_harness.c", "interface/tps3823.c", "-o", exe,
+        "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Icommon",
+        "tests/watchdog/watchdog_harness.c", "interface/tps3823.c", "common/platform_delay.c", "-o", exe,
     ], cwd=root, check=True)
     for mode in ["running", "before_scheduler", "suspended"]:
         subprocess.run([exe, mode], cwd=root, check=True)

@@ -1096,6 +1096,26 @@
               <FilePath>..\application\app_ui.h</FilePath>
             </File>
             <File>
+              <FileName>app_ble_service.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\app_ble_service.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_ble_service.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\application\app_ble_service.h</FilePath>
+            </File>
+            <File>
+              <FileName>ui_widgets.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\ui_widgets.c</FilePath>
+            </File>
+            <File>
+              <FileName>ui_widgets.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\application\ui_widgets.h</FilePath>
+            </File>
+            <File>
               <FileName>ui_sydney_font.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\application\ui_sydney_font.c</FilePath>
@@ -1269,6 +1289,16 @@
               <FileName>bl24c02.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\interface\bl24c02.c</FilePath>
+            </File>
+            <File>
+              <FileName>battery_adc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\interface\battery_adc.c</FilePath>
+            </File>
+            <File>
+              <FileName>watch_key.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\interface\watch_key.c</FilePath>
             </File>
             <File>
               <FileName>int_battery_log.c</FileName>
@@ -2264,6 +2294,11 @@
               <FileName>my_i2c.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\common\my_i2c.c</FilePath>
+            </File>
+            <File>
+              <FileName>platform_delay.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\common\platform_delay.c</FilePath>
             </File>
             <File>
               <FileName>my_i2c.h</FileName>

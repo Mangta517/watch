@@ -17,10 +17,10 @@ for name, size in [("f411ceu6", 0x60000), ("f411ceu6_upgrade_app", 0x50000)]:
 with tempfile.TemporaryDirectory(prefix="watch-battery-log-") as output:
     exe = str(Path(output) / "battery-log.exe")
     subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-int-to-pointer-cast",
-                    "-Itests/battery_log/host", "-Itests/sensors/host", "-Iapplication", "-Iinterface",
+                    "-Itests/battery_log/host", "-Itests/sensors/host", "-Iapplication", "-Iinterface", "-Icommon",
                     "tests/battery_log/battery_log_harness.c", "application/app_battery_log.c",
                     "application/app_battery_log_ble.c", "application/app_reset_ble.c",
                     "interface/int_battery_log.c", "-o", exe], cwd=root, check=True)
-    for mode in ["record", "uart_off", "full", "faults", "unknown", "allocation", "ble", "clear", "erase_error",
+    for mode in ["record", "uart_off", "unbound", "full", "faults", "unknown", "allocation", "ble", "clear", "erase_error",
                  "reset", "reset_torn", "reset_full", "reset_history"]:
         subprocess.run([exe, mode], cwd=root, check=True)

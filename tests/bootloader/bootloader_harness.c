@@ -488,6 +488,11 @@ static void receive_error_tests(void)
     for (dma_fail = HAL_ERROR; dma_fail <= HAL_TIMEOUT; ++dma_fail)
     {
         assert(bootloader_start_dma(100) == 1 && !int_bootloader_rx_dma_active());
+        {
+            uint32_t errors_before = uart1_rx_error_count;
+            HAL_UART_ErrorCallback(&huart1);
+            assert(uart1_rx_error_count == errors_before && rx_armed);
+        }
     }
     dma_fail = 0;
     puts("PASS: overflow, extra/missing bytes, UART/DMA failure, programming/readback failure and delayed TC snapshot");

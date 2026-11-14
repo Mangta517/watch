@@ -2,7 +2,9 @@
 
 在旧波形App上增加“一键升级”：日常仍用BLE连接手表，OTA时APK自动经BLE请求进入保底，再关闭BLE、改用同一模块的SPP地址发送APP BIN。保留原波形、诊断、导出、时间与天气功能。
 
-本版产物为`work/spp-oneclick-20261104/delivery/Bluetooth-Wave-SPP-OTA-OneClick.apk`，版本`1.95-wave.19-spp-oneclick` / code24，包名`xnj.lazydog.btcontroller.wave.ota`，签名与上一版`1.95-wave.18-oneclick` / code23相同，可直接覆盖安装。原波形App的签名不同，两者仍并存。
+本版产物为`work/baro-sync-20261111/delivery/Bluetooth-Wave-Baro-Sync.apk`，版本`1.95-wave.20-baro-sync` / code25，包名`xnj.lazydog.btcontroller.wave.ota`，沿用code24签名，可直接覆盖安装。
+
+2026-11-11增加海拔气压参考同步。App沿用手机定位与Open-Meteo天气请求，读取`current.pressure_msl`（hPa），换算为整数Pa后发送独立`BARO,REF,102125\n`帧。连接后自动同步、原按钮手动重发，App同步监视器运行且BLE保持连接时每15分钟刷新。气压字段缺失或无效时仍发送原天气帧；断连会话的异步结果沿用原令牌校验。手表需升级配套`F411-OTA-Baro-Sync.bin`，收到参考后立即重算最近海拔，并继续用于后续采样。气压参考仅在本次开机RAM中保留，重启后连接App重新同步。已知110m作为核对值，网络参考误差与传感器残余误差仍需实板对照。
 
 仓库包含扩充模块与脚本（`src/`、`tests/`、`build.py`等），不含原始波形App、其Java工程和原签名密钥。构建通过Apktool复用已解码工程，把本目录Java模块编译到`classes3.dex`并接入原主界面。
 
@@ -20,13 +22,15 @@
 
 复用本机Android SDK/JDK，无Gradle或新增运行库。Apktool来自[官方发布](https://github.com/iBotPeaches/Apktool/releases/tag/v2.12.1)。
 
-本版沿用本机已准备的本地缓存解码构建：`work/spp-oneclick-20261104/android-build/decoded/`目录已存在，不要重新解包；签名密钥`ota-signing.p12`在它的同级`work/spp-oneclick-20261104/android-build/`下，不在`decoded/`里面。`--base-apk`只在`decoded/`不存在时供Apktool解包，并用于防止输出覆盖输入；不要删除`decoded/`后用旧APK重新解包，否则会把旧`classes3.dex`带回。`build.py`已把版本号写成code24 / `1.95-wave.19-spp-oneclick`，并在打包前把BleMode的`DUAL`路由固定到BLE（纯经典设备仍按经典处理）。
+原code25使用`work/baro-sync-20261111/android-build/decoded/`缓存，由code24构建缓存复制而来。构建也支持从code24 APK在空目录解包，打包时替换`classes3.dex`条目。覆盖安装时将code24的`ota-signing.p12`复制到新构建目录，沿用同一密钥。`--base-apk`仅在`decoded/`不存在时用于解包。`build.py`写入code25 / `1.95-wave.20-baro-sync`，并可重复应用BLE路由和天气气压同步补丁。
 
 ```powershell
-python tools/android-ota/build.py --base-apk work/ota-oneclick-20261104/delivery/Bluetooth-Wave-BLE-OTA-OneClick.apk --work-dir work/spp-oneclick-20261104/android-build --apktool E:/Downloads/bluetooth-wave-ota-work/tools/apktool.jar --jdk D:/STM32CubeMX/jre --android-tools E:/Codex/2026-10-25/LocalLedger/work/android-tools --output work/spp-oneclick-20261104/delivery/Bluetooth-Wave-SPP-OTA-OneClick.apk
+python tools/android-ota/build.py --base-apk work/spp-oneclick-20261104/delivery/Bluetooth-Wave-SPP-OTA-OneClick.apk --work-dir work/baro-sync-20261111/android-build --apktool work/baro-sync-20261111/tools/apktool.jar --jdk D:/STM32CubeMX/jre --android-tools E:/Codex/2026-10-25/LocalLedger/work/android-tools --output work/baro-sync-20261111/delivery/Bluetooth-Wave-Baro-Sync.apk
 ```
 
-脚本复用`android-build/ota-signing.p12`（PKCS12，别名`ota`，密码`android`）签名，该密钥与code23相同，是本地开发签名，不用于商店发布。构建产物和中间文件留在`work/spp-oneclick-20261104/android-build`，原APK不会被覆盖。
+本轮配套固件在气压页增加已知海拔校准，并利用现有天气温度进行高度修正。手机沿用code25协议和签名，交付位于`work/altitude-calibration-20261111/delivery/`。
+
+脚本复用`android-build/ota-signing.p12`（PKCS12，别名`ota`，密码`android`）签名，是本地开发签名。构建产物和中间文件位于`work/baro-sync-20261111/android-build`。
 
 ## 主机测试
 

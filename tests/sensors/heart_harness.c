@@ -30,6 +30,11 @@ void em7028_get_fault(em7028_fault *fault)
     *fault = read_fault;
 }
 
+em7028_result em7028_init(void)
+{
+    return EM7028_OK;
+}
+
 uint32_t HAL_GetTick(void)
 {
     return tick;
@@ -494,7 +499,7 @@ static void sleep_tests(void)
     uint32_t elapsed, cycle_ms;
     unsigned before;
     stop_result = start_result = read_result = EM7028_OK;
-    app_heart_set_auto_enabled(1); /* 本用例验证后台自动心率，先打开独立开关（默认关闭省电）。 */
+    app_heart_set_auto_enabled(1); /* 前序用例会切换开关，本用例重新开启后台自动心率。 */
     app_heart_set_enabled(1);
     app_heart_service();
     tick = UINT32_MAX - 1000;
@@ -639,7 +644,7 @@ static void auto_toggle_tests(void)
     app_heart_set_sport_mode(0);
     app_heart_service();
     assert(running == 0);
-    puts("PASS: background auto heart default off, independent switch, 10min deadline from enable/tick-wrap without per-service reset, mid-window disable stops LED and retains value, manual and SPORT unaffected.");
+    puts("PASS: background auto heart independent switch, 10min deadline from enable/tick-wrap without per-service reset, mid-window disable stops LED and retains value, manual and SPORT unaffected.");
 }
 
 int main(void)
@@ -660,11 +665,25 @@ int main(void)
     assert(heart.fault.kind == EM7028_FAULT_CONFIG && heart.fault.reg == 0x0D && heart.fault.value == 0xFF);
     assert(host_heart_fault_diag == 0xFF0D0402);
     puts("PASS: startup fault is available to the BLE snapshot and existing diagnostic result before manual START.");
-    assert(app_heart_get_auto_enabled() == 0); /* 后台自动心率默认关闭以省电。 */
+    assert(app_heart_get_auto_enabled() != 0); /* 开机默认开启后台每10分钟测量。 */
     app_heart_set_enabled(1);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_MEASURING && running == 0);
     app_heart_set_enabled(0);
+
+    /* 默认开关无需手动启用，首次熄屏满10分钟起测，10秒超时后停止。 */
+    app_heart_set_sleep_mode(1);
+    tick += 599999;
+    app_heart_service();
+    assert(running == 0 && app_heart_sleep_pending() == 0);
+    tick += 1;
+    app_heart_service();
+    assert(running != 0 && chip_sampling != 0);
+    tick += 10000;
+    app_heart_service();
+    assert(running == 0 && chip_sampling == 0 && app_heart_sleep_pending() == 0);
+    app_heart_set_sleep_mode(0);
+    puts("PASS: default auto heart starts after 10min screen-off without toggling AUTO and stops after 10s.");
 
     /* 原始样本按成功读取顺序发送，溢出保留最新32帧，失败读数不得入队。 */
     assert(app_heart_read_samples(NULL, 1) == 0);

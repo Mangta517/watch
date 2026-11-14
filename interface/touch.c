@@ -20,8 +20,7 @@
 #include "touch.h"
 #include "my_i2c.h"
 #include "stm32f4xx_hal.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "platform_delay.h"
 
 /*--- CST816 寄存器 (同 OV_Watch CST816.h) ---*/
 #define REG_GestureID     0x01
@@ -53,21 +52,6 @@ static uint8_t s_tp_addr8 = CST816_ADDR_1; /* 当前在用的 8bit 写地址 */
 #define TP_SDA_RD() (HAL_GPIO_ReadPin(TP_SDA_GPIO_Port, TP_SDA_Pin) == GPIO_PIN_SET)
 
 volatile uint8_t g_tp_chip_id = 0; /* 诊断: 最近一次读到的 CST816 ChipID (0xB5/0xB7=正常) */
-
-static void tp_delay_ms(uint32_t ms)
-{
-    /* 先确认调度器已启动：只有运行中才能调用 FreeRTOS 的阻塞延时 */
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    {
-        /* 多等一拍，避免调用落在tick末尾时缩短复位/引导等待时间。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
-    }
-    else
-    {
-        /* 调度器未启动（如 main 初始化阶段）时改用 HAL 忙等，参数单位为 ms */
-        HAL_Delay(ms);
-    }
-}
 
 /******************************************************************************
  * APP使用64MHz的51次位延时；volatile防止优化掉，实际总线频率需实测。
@@ -388,11 +372,11 @@ void Touch_Reset(void)
     /* 拉低 RST，让 CST816 进入复位状态 */
     TP_RST_0();
     /* 保持复位低电平 10ms */
-    tp_delay_ms(10);
+    platform_delay_min_ms(10);
     /* 释放 RST，芯片开始重新引导 */
     TP_RST_1();
     /* 再等 300ms，给芯片固件引导留出时间，之后才尝试 I2C 访问 */
-    tp_delay_ms(300);
+    platform_delay_min_ms(300);
 }
 
 uint8_t Touch_GetChipID(void)
@@ -431,7 +415,7 @@ static uint8_t tp_probe(uint8_t retries_per_addr)
                 return id;
             }
             /* 本次失败，等 100ms 再试，给芯片上电/复位后的引导留时间 */
-            tp_delay_ms(100);
+            platform_delay_min_ms(100);
         }
     }
     /* 两个地址都没探到有效 ID，清掉诊断值 */
@@ -454,7 +438,7 @@ uint8_t Touch_Init(void)
     /* 把 SDA 也拉高，完成空闲态建立 */
     TP_SDA_1();
     /* 等 2ms 让两条线的电平稳定后再发起复位 */
-    tp_delay_ms(2);
+    platform_delay_min_ms(2);
 
     /* 硬复位触摸芯片，并等待其固件引导完成 */
     Touch_Reset();

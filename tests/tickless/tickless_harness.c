@@ -33,6 +33,19 @@ static uint32_t wd_pause_count; /* 本轮累计暂停次数。 */
 static uint32_t wd_resume_count; /* 本轮累计恢复次数。 */
 static uint32_t wd_resume_rtc; /* 每次硬件恢复瞬间的一分钟内计数快照，用于度量硬件侧间隔。 */
 
+uint8_t lcd_is_stop_idle(void)
+{
+    return TIM3->CCR3 == 0 && (SPI1->SR & SPI_SR_BSY) == 0 && (DMA2_Stream2->CR & DMA_SxCR_EN) == 0;
+}
+uint8_t kt6368a_is_stop_idle(void)
+{
+    return (BLE_EN_GPIO_Port->ODR & BLE_EN_Pin) == 0 && (RCC->APB2ENR & RCC_APB2ENR_USART1EN) == 0;
+}
+uint8_t battery_adc_is_stop_idle(void)
+{
+    return (ADC1->CR2 & ADC_CR2_ADON) == 0;
+}
+
 uint8_t app_task_is_screen_off(void)
 {
     return screen_off;

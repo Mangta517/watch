@@ -138,6 +138,58 @@ def ensure_ble_permissions(manifest):
     return manifest
 
 
+def patch_weather_pressure(decoded):
+    """沿用原定位、网络和会话校验，追加pressure_msl，并在连接期间每15分钟刷新。"""
+    folder = decoded / "smali_classes2/dev/mangta/wave"
+    humidity = '    const-string v7, "relative_humidity_2m"'
+    pressure = ('    const-string v7, "pressure_msl"\n\n'
+                '    invoke-virtual {v0, v7}, Lorg/json/JSONObject;->optDouble(Ljava/lang/String;)D\n\n'
+                '    move-result-wide v8\n\n' + humidity)
+    frame = ('    invoke-static {v4, v2, v3, v0}, Ldev/mangta/wave/WatchSyncProtocol;->weather_frame(IDI)Ljava/lang/String;\n\n'
+             '    move-result-object v0')
+    appended_frame = (frame + '\n\n'
+                      '    invoke-static {v0, v8, v9}, Ldev/mangta/wave/WeatherPressure;->append_reference(Ljava/lang/String;D)Ljava/lang/String;\n\n'
+                      '    move-result-object v0')
+    session = ('    invoke-virtual {v2, v0, v1}, Ldev/mangta/wave/WatchSyncSession;->update(Ljava/lang/Object;Z)I\n\n'
+               '    move-result v2')
+    refresh = (session + '\n\n'
+               '    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J\n\n'
+               '    move-result-wide v3\n\n'
+               '    invoke-static {v0, v1, v2, v3, v4}, Ldev/mangta/wave/WeatherPressure;->refresh_token(Ljava/lang/Object;ZIJ)I\n\n'
+               '    move-result v2')
+    patches = [
+        (folder / 'WatchSync$8.smali', [
+            ('&current=temperature_2m,relative_humidity_2m,weather_code"',
+             '&current=temperature_2m,relative_humidity_2m,weather_code,pressure_msl"'),
+            (humidity, pressure), (frame, appended_frame)]),
+        (folder / 'WatchSync$3.smali', [
+            ('.method public run()V\n    .locals 4', '.method public run()V\n    .locals 6'),
+            (session, refresh)]),
+    ]
+    for path, replacements in patches:
+        original = path.read_text(encoding='utf-8')
+        text = original
+        for old, new in replacements:
+            if new in text:
+                continue
+            if text.count(old) != 1:
+                raise RuntimeError('Weather sync patch does not match ' + str(path))
+            text = text.replace(old, new, 1)
+        if text != original:
+            path.write_text(text, encoding='utf-8')
+
+
+def replace_ota_dex(apk, dex):
+    """替换OTA字节码，兼容基础APK已经包含classes3.dex的重建。"""
+    repacked = apk.with_name("repacked.apk")
+    with zipfile.ZipFile(apk) as original, zipfile.ZipFile(repacked, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item in original.infolist():
+            if item.filename != "classes3.dex":
+                archive.writestr(item, original.read(item))
+        archive.write(dex, "classes3.dex")
+    repacked.replace(apk)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-apk", type=Path, required=True)
@@ -185,10 +237,11 @@ def main():
     manifest_path.write_text(manifest, encoding="utf-8")
     yaml_path = decoded / "apktool.yml"
     yaml = yaml_path.read_text(encoding="utf-8")
-    yaml = re.sub(r"(?m)^  versionCode:.*$", "  versionCode: 24", yaml)
-    yaml = re.sub(r"(?m)^  versionName:.*$", "  versionName: 1.95-wave.19-spp-oneclick", yaml)
+    yaml = re.sub(r"(?m)^  versionCode:.*$", "  versionCode: 25", yaml)
+    yaml = re.sub(r"(?m)^  versionName:.*$", "  versionName: 1.95-wave.20-baro-sync", yaml)
     yaml_path.write_text(yaml, encoding="utf-8")
     patch_ble_mode(decoded)
+    patch_weather_pressure(decoded)
     hook = decoded / "smali_classes2/dev/mangta/wave/WaveBridge.smali"
     text = hook.read_text(encoding="utf-8")
     anchor = "    invoke-static {p0, v0}, Ldev/mangta/wave/WatchSync;->attach(Landroid/app/Activity;Landroid/widget/LinearLayout;)V"
@@ -217,8 +270,7 @@ def main():
          "--min-api", "21", "--output", dex, class_jar], work)
     unsigned = work / "unsigned.apk"
     run([java, "-jar", args.apktool.resolve(), "b", decoded, "-o", unsigned], work)
-    with zipfile.ZipFile(unsigned, "a", zipfile.ZIP_DEFLATED) as archive:
-        archive.write(dex / "classes.dex", "classes3.dex")
+    replace_ota_dex(unsigned, dex / "classes.dex")
     aligned = work / "aligned.apk"
     run([sdk / "zipalign.exe", "-f", "-p", "4", unsigned, aligned], work)
     keystore = work / "ota-signing.p12"

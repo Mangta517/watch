@@ -8,6 +8,7 @@
 #include "app_battery_log.h"
 #include "app_battery.h"
 #include "int_battery_log.h"
+#include "kt6368a.h"
 #include "tps3823.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -86,6 +87,7 @@ void app_battery_log_init(void)
     uint32_t slot, i;
     uint8_t data[BATTERY_LOG_RECORD_BYTES], occupied;
     app_battery_log_record_struct record;
+    int_battery_log_set_rx_callbacks(kt6368a_rx_is_enabled, kt6368a_receive_polled);
     /* 首次调用时创建互斥锁；后续调用直接复用已建好的锁。 */
     if (s_log_mutex == NULL)
     {

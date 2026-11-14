@@ -876,6 +876,21 @@ static void touch_async_absent_tests(void)
 
 int main(void)
 {
+    htim3.compare = 0;
+    host_spi.SR = 0;
+    host_dma_stream.CR = 0;
+    assert(lcd_is_stop_idle() != 0);
+    htim3.compare = 1;
+    assert(lcd_is_stop_idle() == 0);
+    htim3.compare = 0;
+    host_spi.SR = SPI_SR_BSY;
+    assert(lcd_is_stop_idle() == 0);
+    host_spi.SR = 0;
+    host_dma_stream.CR = DMA_SxCR_EN;
+    assert(lcd_is_stop_idle() == 0);
+    host_dma_stream.CR = 0;
+    assert(lcd_is_stop_idle() != 0);
+    puts("PASS: real LCD STOP query independently vetoes backlight, SPI busy and enabled TX DMA.");
     lcd_address_tests();
     lcd_fill_tests();
     lcd_dma_error_tests();

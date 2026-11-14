@@ -9,26 +9,9 @@
 #include "spl006.h"
 
 #include "my_i2c.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "platform_delay.h"
 
 #define SPL006_I2C_BUS MY_I2C_BUS_SENSOR
-
-/* 毫秒延时封装：调度器运行时让出 CPU，未运行时退回 HAL 忙等。 */
-static void spl006_delay_ms(uint32_t ms)
-{
-    /* 查询调度器状态，判断当前能否使用 FreeRTOS 的阻塞延时。 */
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    {
-        /* 多等一拍，避免tick边界缩短硬件最小等待；等待期间让出CPU。 */
-        vTaskDelay(pdMS_TO_TICKS(ms) + 1);
-    }
-    else
-    {
-        /* 调度器未启动，不能用 vTaskDelay，只能由 HAL 轮询等待。 */
-        HAL_Delay(ms);
-    }
-}
 
 /* ---------------------------------------------------------- 出厂校准系数 */
 static int32_t spl006_c00;
@@ -347,12 +330,12 @@ uint8_t spl006_init(void)
         /* 传感器等待阶段每次让出 20ms，对应最小上电稳定时间。 */
         if (spl_recovery.phase == SPL_RECOVER_SENSOR)
         {
-            spl006_delay_ms(20);
+            platform_delay_min_ms(20);
         }
         /* 系数等待阶段每次让出 50ms，给器件准备系数的时间。 */
         else if (spl_recovery.phase == SPL_RECOVER_COEF_READY)
         {
-            spl006_delay_ms(50);
+            platform_delay_min_ms(50);
         }
     }
     return result;

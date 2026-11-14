@@ -11,10 +11,11 @@ typedef struct
     uint8_t valid;
     uint8_t cached;       /* EEPROM恢复的旧天气，更新时间未知；新手机帧清除此标记。 */
     uint32_t received_ms; /* 最近有效帧的LVGL毫秒tick；所有读写归显示任务。 */
+    uint32_t sea_level_pa; /* 手机同步的海平面气压，Pa；0表示尚未同步，仅本次开机有效。 */
 } app_weather_struct;
 
 /* 与蓝牙日志/校时共用接收数据，仅由LVGL任务调用，不另行读取UART。
- * ASCII协议：WEATHER,WMO天气码,摄氏温度乘10,相对湿度百分比\n；CR/LF或200ms空闲收尾。 */
+ * ASCII协议：WEATHER,WMO天气码,摄氏温度乘10,相对湿度百分比\n；BARO,REF,海平面气压Pa\n。 */
 void app_weather_receive(const uint8_t *data, uint16_t size, uint32_t now_ms);
 /* LVGL每轮调用：仅收尾超过200ms无新字节的残帧，有换行时由receive直接解析。 */
 void app_weather_service(uint32_t now_ms);

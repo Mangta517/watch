@@ -1,6 +1,6 @@
 /**
  * @file app_weather.c
- * @brief 手机下发的天气帧解析(WEATHER,WMO码,温度x10,湿度\n)，全部在LVGL任务读写。
+ * @brief 手机天气与海平面气压帧解析，全部在LVGL任务读写。
  *        天气来自手机而非本地AHT传感器；CR/LF与200ms接收空闲都可收尾，非法帧保留旧快照。
  */
 #include "app_weather.h"
@@ -21,14 +21,14 @@ void app_weather_reset_receive(void)
     s_overflow = 0;
 }
 
-/* 解析一个可选负号、至多4位十进制数；游标停在结束处。无数字或位数超限返回1，0=已取value。 */
-static uint8_t parse_number(const char **cursor, int32_t *value)
+/* 解析可选负号与限定宽度的十进制数；游标停在结束处，0=已取value。 */
+static uint8_t parse_number(const char **cursor, int32_t *value, uint8_t max_digits)
 {
     /* magnitude暂存按十进制累加出的绝对值，最后按符号写入value。 */
     int32_t magnitude = 0;
     /* 先看游标处是否为负号，决定是否跳过符号并按负值输出。 */
     uint8_t negative = **cursor == '-';
-    /* 记录本数字已收的位数，用于限制至多4位。 */
+    /* 记录本数字已收的位数，用于限制至多max_digits位。 */
     uint8_t digits = 0;
     if (negative)
     {
@@ -38,8 +38,8 @@ static uint8_t parse_number(const char **cursor, int32_t *value)
     /* 连续读取十进制数字，直到遇到非数字字符。 */
     while (**cursor >= '0' && **cursor <= '9')
     {
-        /* 第5位数字即超限：返回1表示解析失败，游标停在超限位。 */
-        if (++digits > 4)
+        /* 数字位数超限时拒绝本字段。 */
+        if (++digits > max_digits)
         {
             return 1;
         }
@@ -62,20 +62,31 @@ static uint8_t parse_number(const char **cursor, int32_t *value)
     return digits == 0;
 }
 
-/* 校验整帧：三段数字以逗号分隔且游标恰在末尾，码0..99、温度±1000、湿度0..100才更新快照。 */
+/* 校验整帧：支持BARO,REF,<Pa>(80000..120000)或WEATHER,<码>,<温度x10>,<湿度>(0..99/±1000/0..100)。 */
 static void finish_frame(void)
 {
     /* 游标从"WEATHER,"之后的第8字节开始，依次读取三个数字字段。 */
     const char *cursor = s_frame + 8;
     /* code为WMO天气码，temperature为摄氏温度乘10的整数，humidity为相对湿度百分比。 */
-    int32_t code, temperature, humidity;
+    int32_t code, temperature, humidity, sea_level_pa;
     /* 在有效长度处补字符串结束符，供memcmp与游标判断使用。 */
     s_frame[s_length] = '\0';
     /* 整帧条件：未溢出且长度至少8；前缀为"WEATHER,"；依次解析码/温度/湿度且逗号位置正确；
      * 游标恰停在帧尾且该处为结束符；码0..99、温度-1000..1000、湿度0..100 才接受。 */
-    if (!s_overflow && s_length >= 8 && memcmp(s_frame, "WEATHER,", 8) == 0 && parse_number(&cursor, &code) == 0 && *cursor++ == ',' &&
-        parse_number(&cursor, &temperature) == 0 && *cursor++ == ',' && parse_number(&cursor, &humidity) == 0 && cursor == s_frame + s_length &&
-        *cursor == '\0' && code >= 0 && code <= 99 && temperature >= -1000 && temperature <= 1000 && humidity >= 0 && humidity <= 100)
+    if (!s_overflow && s_length >= 9 && memcmp(s_frame, "BARO,REF,", 9) == 0)
+    {
+        /* 独立气压帧保持旧天气协议兼容；单位Pa，整帧完整且在800..1200hPa内才更新。 */
+        cursor = s_frame + 9;
+        if (parse_number(&cursor, &sea_level_pa, 6) == 0 && cursor == s_frame + s_length && *cursor == '\0' &&
+            sea_level_pa >= 80000 && sea_level_pa <= 120000)
+        {
+            s_weather.sea_level_pa = (uint32_t)sea_level_pa;
+        }
+    }
+    else if (!s_overflow && s_length >= 8 && memcmp(s_frame, "WEATHER,", 8) == 0 && parse_number(&cursor, &code, 4) == 0 && *cursor++ == ',' &&
+             parse_number(&cursor, &temperature, 4) == 0 && *cursor++ == ',' && parse_number(&cursor, &humidity, 4) == 0 &&
+             cursor == s_frame + s_length && *cursor == '\0' && code >= 0 && code <= 99 &&
+             temperature >= -1000 && temperature <= 1000 && humidity >= 0 && humidity <= 100)
     {
         /* 天气码收窄为8位存入快照。 */
         s_weather.code = (uint8_t)code;
@@ -159,8 +170,10 @@ void app_weather_restore(const app_weather_struct *snapshot)
     /* 仅在当前天气快照无效、且待恢复记录本身有效时执行恢复。 */
     if (s_weather.valid == 0 && snapshot->valid != 0)
     {
+        uint32_t sea_level_pa = s_weather.sea_level_pa; /* 保留本次开机已收到的手机气压参考。 */
         /* 整体复制EEPROM恢复的天气字段。 */
         s_weather = *snapshot;
+        s_weather.sea_level_pa = sea_level_pa;
         /* 标记这份天气来自缓存，更新时间未知。 */
         s_weather.cached = 1;
         /* 旧tick属于上次开机，清零避免被当作本次运行的新鲜时间。 */

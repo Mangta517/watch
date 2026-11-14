@@ -30,10 +30,6 @@
 #include "lvgl.h"
 #include "lv_port_disp_template.h"
 #include "my_i2c.h"
-#include "mpu6050.h"
-#include "spl006.h"
-#include "lsm303dlhc.h"
-#include "em7028.h"
 #include "kt6368a.h"
 #include "watch_rtc.h"
 #include "tps3823.h"
@@ -518,10 +514,10 @@ static void app_sensor_task(void *pvParameters)
     /* SENSOR总线从初始化到采样均由本任务独占；失败仍进入原有故障处理。 */
     my_i2c_init(MY_I2C_BUS_SENSOR);
     /* 依次初始化MPU6050、气压计、磁力计、心率传感器，并把各自结果记入诊断。 */
-    app_diag_sensor_init(APP_DIAG_MPU, my_mpu6050_init());
-    app_diag_sensor_init(APP_DIAG_BARO, spl006_init());
-    app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_init());
-    app_diag_sensor_init(APP_DIAG_HEART, em7028_init()); /* 配置为待机，原有服务负责启动采样及照明。 */
+    app_imu_init_hw();
+    app_baro_init_hw();
+    app_imu_init_mag_hw();
+    app_heart_init_hw(); /* 配置为待机，原有服务负责启动采样及照明。 */
 
     /* 数据锁须在任务上下文创建 (调度器已运行, 见 app_display 同款注释) */
     App_IMU_Init();
@@ -544,7 +540,7 @@ static void app_sensor_task(void *pvParameters)
     /* EEPROM里有有效零偏记录：直接恢复到驱动，跳过本次静止校准。 */
     if (store_result == APP_IMU_STORE_OK)
     {
-        my_mpu6050_restore_offset(&offset);
+        app_imu_restore_offset(&offset);
         cal_finished = 1;
         app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_RESTORED);
         app_diag_boot_set(APP_BOOT_CAL_END_MS, HAL_GetTick());
@@ -553,7 +549,7 @@ static void app_sensor_task(void *pvParameters)
     else
     {
         /* EEPROM空白/无有效记录时才使用原校准，失败不写入。 */
-        my_mpu6050_zero_offset_begin(HAL_GetTick());
+        app_imu_calibration_begin(HAL_GetTick());
         app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_WAIT_STILL);
     }
     /* 校准与各周期起点统一以当前tick为基准。 */
@@ -591,7 +587,7 @@ static void app_sensor_task(void *pvParameters)
             /* 丢弃旧的保存记录，并把校准结束时刻/结果置为无效值(UINT32_MAX)。 */
             app_diag_imu_save_record(APP_IMU_SAVE_NONE, 0, UINT32_MAX, UINT32_MAX);
             /* 启动驱动内零偏校准状态机，从"等待静止"开始。 */
-            my_mpu6050_zero_offset_begin(HAL_GetTick());
+            app_imu_calibration_begin(HAL_GetTick());
             /* 诊断中记录校准开始时刻，并清空上一轮的结束时刻与结果。 */
             app_diag_boot_set(APP_BOOT_CAL_BEGIN_MS, HAL_GetTick());
             app_diag_boot_set(APP_BOOT_CAL_END_MS, UINT32_MAX);
@@ -647,8 +643,9 @@ static void app_sensor_task(void *pvParameters)
             baro_active = 0;
         }
         now_ms = HAL_GetTick(); /* 周期切换可能跨过毫秒，不能用更早的时间戳与新起点做无符号减法。 */
-        /* 非运动且气压未激活，距上次周期起点已满5分钟：重新起一轮气压采样。 */
-        if (sporting == 0 && baro_active == 0 && (uint32_t)(now_ms - baro_ms) >= APP_SENSOR_BARO_PERIOD_MS)
+        /* 非运动且气压未激活，距上次周期起点已满5分钟或有待处理校准请求时：起一轮气压采样。 */
+        if (sporting == 0 && baro_active == 0 &&
+            ((uint32_t)(now_ms - baro_ms) >= APP_SENSOR_BARO_PERIOD_MS || app_baro_calibration_pending() != 0))
         {
             /* 起点按5分钟整数倍向前推进，保持相位不随本轮耗时漂移。 */
             baro_ms += (uint32_t)(now_ms - baro_ms) / APP_SENSOR_BARO_PERIOD_MS * APP_SENSOR_BARO_PERIOD_MS;
@@ -663,7 +660,7 @@ static void app_sensor_task(void *pvParameters)
                 bus_parked = 0;
             }
             /* 唤醒气压计，开始本轮转换。 */
-            spl006_set_sleep(0);
+            app_baro_set_sleep(0);
         }
         /* 睡眠中且温湿度窗口未激活，距上次窗口起点已满休眠周期：开一个新窗口。 */
         if (sleeping != 0 && environment_active == 0 && (uint32_t)(now_ms - environment_ms) >= APP_AHT21_SLEEP_PERIOD_MS)
@@ -744,7 +741,6 @@ static void app_sensor_task(void *pvParameters)
             imu_cycle_ms = now_ms; /* 超期只取最新一帧，不补跑休眠期间的旧采样。 */
             imu_sample_pending = 1;
         }
-        /* 心率服务只在sensor任务操作硬件；准备到期的自动测量前先恢复总线。 */
         /* 本轮是否真的需要IMU：连续采样或存在待取帧。 */
         imu_active = imu_continuous != 0 || imu_sample_pending != 0;
         /* 总线需求：未睡眠，或温湿度/气压窗口激活，或气压休眠待写，或本轮要用IMU。 */
@@ -760,14 +756,13 @@ static void app_sensor_task(void *pvParameters)
             /* 有气压休眠待写时，尝试写一次；失败则保留标志，下一拍继续重试。 */
             if (baro_sleep_pending != 0)
             {
-                baro_sleep_pending = spl006_set_sleep(1); /* 待机写失败只重试关转换，不重复采样或重排5分钟周期。 */
+                baro_sleep_pending = app_baro_set_sleep(1); /* 待机写失败只重试关转换，不重复采样或重排5分钟周期。 */
             }
             /* 非阻塞恢复：每个器件每拍至多推进一笔事务，失败冷却期间仍完成其他服务。 */
             if (imu_active != 0)
             {
                 /* 推进一步MPU恢复流程，0=就绪、1=失败冷却、2=推进中。 */
-                mpu_recovery = my_mpu6050_recover_step(HAL_GetTick());
-                app_diag_sensor_recovery(APP_DIAG_MPU, mpu_recovery);
+                mpu_recovery = app_imu_recover_step(HAL_GetTick());
                 /* 非0说明恢复尚未结束，记下恢复进行中标志。 */
                 if (mpu_recovery != 0)
                 {
@@ -792,13 +787,13 @@ static void app_sensor_task(void *pvParameters)
                 /* 连续采样且不需要加速度参考时，顺带推进磁力计恢复一笔。 */
                 if (imu_continuous != 0 && imu_reference == 0)
                 {
-                    app_diag_sensor_recovery(APP_DIAG_MAG, lsm303dlhc_mag_recover_step(HAL_GetTick()));
+                    app_imu_mag_recover_step(HAL_GetTick());
                 }
             }
             /* 气压窗口激活时，每拍推进一步气压计恢复。 */
             if (baro_active != 0)
             {
-                app_diag_sensor_recovery(APP_DIAG_BARO, spl006_recover_step(HAL_GetTick()));
+                app_baro_recover_step(HAL_GetTick());
             }
         }
         /* PPG先服务，沿用上一拍的新鲜运动参考；有事务时磁读取延后一拍。 */
@@ -867,9 +862,8 @@ static void app_sensor_task(void *pvParameters)
         /* 校准尚未完成时，每拍查询一次状态机进度并刷新诊断。 */
         if (cal_finished == 0)
         {
-            cal_state = my_mpu6050_zero_offset_state();
-            /* 取稳定帧数与已采集帧数，写入启动诊断。 */
-            my_mpu6050_zero_offset_progress(&cal_stable, &cal_frames);
+            /* 取校准状态、稳定帧数与已采集帧数，写入启动诊断。 */
+            cal_state = app_imu_calibration_progress(&cal_stable, &cal_frames);
             app_diag_boot_set(APP_BOOT_CAL_STATE, (uint32_t)cal_state);
             app_diag_boot_set(APP_BOOT_CAL_FRAMES, cal_frames);
             app_diag_boot_set(APP_BOOT_CAL_STABLE_FRAMES, cal_stable);
@@ -881,7 +875,7 @@ static void app_sensor_task(void *pvParameters)
                 /* 成功：取回零偏值并置保存请求，EEPROM写入放到后续各拍。 */
                 if (cal_state == MPU6050_CAL_DONE)
                 {
-                    my_mpu6050_get_offset(&offset);
+                    app_imu_get_offset(&offset);
                     imu_saving = 1; /* 已提交RAM偏移，EEPROM在后续各拍推进。 */
                 }
                 /* 失败：诊断结果记为1，不保存。 */
@@ -900,7 +894,10 @@ static void app_sensor_task(void *pvParameters)
             /* 读一次气压并写入历史，然后把气压计切到休眠，结束本轮窗口。 */
             App_Baro_Service();
             app_baro_record_history();
-            baro_sleep_pending = spl006_set_sleep(1);
+            /* 本窗口覆盖的周期边界一并消费，避免校准跨界后紧接着重复采样。 */
+            now_ms = HAL_GetTick();
+            baro_ms += (uint32_t)(now_ms - baro_ms) / APP_SENSOR_BARO_PERIOD_MS * APP_SENSOR_BARO_PERIOD_MS;
+            baro_sleep_pending = app_baro_set_sleep(1);
             baro_active = 0;
         }
         if (sleeping != 0)

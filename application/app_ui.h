@@ -4,6 +4,8 @@
  *
  * 线程归属：UI创建、刷新和业务服务由LVGL显示任务执行；App_UI_Back也允许在持有
  * App_Display_Lock时提交返回请求。sensor任务维护业务快照，UI通过各模块的读取接口取数。
+ * 内部页面状态和创建/刷新入口集中在app_ui.c，通用控件与趋势图由ui_widgets.c实现；
+ * 蓝牙字节分发、发送协调、日志和ECO策略由app_ble_service.c维护。
  *
  * 页面模型：表盘(PAGE_WATCH)与设置(PAGE_SETTINGS)两张主页在切换时保留控件、只恢复
  * 指针；详情页每次重建，返回时按s_history恢复原页面与垂直滚动位置。切页请求先挂起，
