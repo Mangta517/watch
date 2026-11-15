@@ -1085,6 +1085,7 @@ static void activity_ui_tests(void)
     host_steps = 12345;
     refresh_battery();
     assert(strcmp(lv_label_get_text(s_view.watch.steps), "12345") == 0);
+    assert(s_view.watch.steps_ring != NULL && lv_bar_get_value(s_view.watch.steps_ring) == 77);
     screenshot("watch_activity");
     set_screen_on(0);
     host_wrist_ms = HAL_GetTick();
@@ -1644,17 +1645,17 @@ int main(int argc, char **argv)
     assert(s_screen_on && host_light == 35); /* 开机按键松开不熄屏。 */
     screenshot("watch");
     /* 三针来自同一RTC快照，秒针在0/15/30秒及分钟进位时跳格。 */
-    assert(s_second_points[1].x == 100 && s_second_points[1].y == 18);
-    assert(s_hour_points[1].x < 100 && s_hour_points[1].y < 100);
-    assert(s_minute_points[1].x > 100 && s_minute_points[1].y < 100);
+    assert(s_second_points[1].x == 120 && s_second_points[1].y == 48);
+    assert(s_hour_points[1].x < 120 && s_hour_points[1].y < 140);
+    assert(s_minute_points[1].x > 120 && s_minute_points[1].y < 140);
     assert_rtc_seconds(0);
     advance_active(15000);
     assert_rtc_seconds(15);
-    assert(s_second_points[1].x == 182 && s_second_points[1].y == 100);
+    assert(s_second_points[1].x == 212 && s_second_points[1].y == 140);
     screenshot("watch_seconds");
     advance_active(15000);
     assert_rtc_seconds(30);
-    assert(s_second_points[1].x == 100 && s_second_points[1].y == 182);
+    assert(s_second_points[1].x == 120 && s_second_points[1].y == 232);
     advance_active(30000);
     assert_rtc_seconds(0);
     assert(strcmp(clock_text(), "10:11") == 0);
@@ -1728,8 +1729,8 @@ int main(int argc, char **argv)
     {
         lv_area_t area;
         lv_obj_get_coords(s_view.battery.bar, &area);
-        assert(framebuffer[(area.y1 + 6) * 240 + area.x1 + 6].full == lv_color_hex(UI_BATTERY_GREEN).full);
-        assert(framebuffer[(area.y1 + 6) * 240 + area.x2 - 5].full == lv_color_hex(UI_CARD).full);
+        assert(framebuffer[(area.y1 + 22) * 240 + area.x2 - 3].full == lv_color_hex(UI_BATTERY_GREEN).full);
+        assert(framebuffer[(area.y1 + 22) * 240 + area.x1 + 3].full == lv_color_hex(UI_TRACK_GREEN).full);
     }
     /* 百分比变化必须刷新；0/100%单行显示，低电量及恢复使用正确颜色。 */
     {
@@ -1762,13 +1763,14 @@ int main(int argc, char **argv)
         refresh_battery();
         lv_refr_now(NULL);
     }
-    /* 真实按下及拖动刻度盘：背景保持透明，纵向滑动不误入校时页。 */
-    host_point.x = 120;
-    host_point.y = 80;
+    /* 真实按下及拖动全屏表盘：表盘底色及外角背景保持不变，纵向滑动不误入其他页。 */
+    host_point.x = 63;
+    host_point.y = 98;
     host_touch = LV_INDEV_STATE_PRESSED;
     advance(40);
     lv_refr_now(NULL);
-    assert(framebuffer[19 * 240 + 38].full == lv_color_hex(UI_BG).full);
+    assert(framebuffer[0].full == lv_color_hex(UI_BG).full);
+    assert(framebuffer[120 * 240 + 40].full == lv_color_hex(0x06192D).full);
     host_point.y = 160;
     advance(60);
     host_touch = LV_INDEV_STATE_RELEASED;
@@ -2307,6 +2309,7 @@ int main(int argc, char **argv)
     host_aht21.sample_count = 12;
     advance(120);
     assert(strcmp(lv_label_get_text(s_view.climate.humidity), "50.0") == 0);
+    assert(s_view.climate.humidity_ring != NULL && lv_bar_get_value(s_view.climate.humidity_ring) == 50);
     assert(strcmp(lv_label_get_text(s_view.climate.temperature), "25.0") == 0);
     assert(strcmp(lv_label_get_text(s_view.climate.status), "ONLINE / CRC OK") == 0);
     assert(strcmp(lv_label_get_text(s_view.climate.samples), "SAMPLES 12 / 1s") == 0);
@@ -2337,6 +2340,7 @@ int main(int argc, char **argv)
     host_aht21.result = AHT21_CRC_ERROR;
     advance(120);
     assert(strcmp(lv_label_get_text(s_view.climate.humidity), "--") == 0);
+    assert(lv_bar_get_value(s_view.climate.humidity_ring) == 0);
     assert(strcmp(lv_label_get_text(s_view.climate.temperature), "--") == 0);
     assert(strcmp(lv_label_get_text(s_view.climate.status), "CRC ERROR") == 0);
     screenshot("aht21_crc_error");
@@ -2637,6 +2641,7 @@ int main(int argc, char **argv)
     advance_active(1100);
     assert(strcmp(lv_label_get_text(s_view.watch.hint), "RTC / LSE") == 0);
     assert(strcmp(lv_label_get_text(s_view.watch.temperature), "25.0C\n50.0%") == 0);
+    assert(s_view.watch.humidity_ring != NULL && lv_bar_get_value(s_view.watch.humidity_ring) == 50);
     assert_static_refresh();
     screenshot("watch_climate");
     activity_ui_tests();
@@ -2645,14 +2650,17 @@ int main(int argc, char **argv)
     host_aht21.sample.humidity_rh = 100.0f;
     advance_active(1100);
     assert(strcmp(lv_label_get_text(s_view.watch.temperature), "-5.0C\n100.0%") == 0);
+    assert(lv_bar_get_value(s_view.watch.humidity_ring) == 100);
     host_aht21.valid = 0;
     advance_active(1100);
     assert(strcmp(lv_label_get_text(s_view.watch.temperature), "--C\n--%") == 0);
+    assert(lv_bar_get_value(s_view.watch.humidity_ring) == 0);
     host_aht21.valid = 1;
     host_aht21.sample.temperature_c = 25.0f;
     host_aht21.sample.humidity_rh = 50.0f;
     advance_active(1100);
     assert(strcmp(lv_label_get_text(s_view.watch.temperature), "25.0C\n50.0%") == 0);
+    assert(lv_bar_get_value(s_view.watch.humidity_ring) == 50);
     drag(180, 140, -120, 0);
     assert(s_page == PAGE_SETTINGS);
     open_feature(PAGE_WEATHER);
@@ -2767,45 +2775,45 @@ int main(int argc, char **argv)
     advance(60); /* 一小时无操作后，按PA4恢复亮度及当前RTC表盘。 */
     assert(strcmp(lv_label_get_text(s_view.watch.hint), "RTC / LSE") == 0);
     assert(strcmp(lv_label_get_text(s_view.watch.temperature), "25.0C\n50.0%") == 0);
-    /* 刻度盘和数字时间不再进入蓝牙；短拖动也不能误触心率入口。 */
+    /* 刻度盘、数字时间和电量圆环不进入蓝牙或其他页；短拖动也不能误触心率入口。 */
     tap(120, 100);
     assert(s_page == PAGE_WATCH);
-    tap(120, 235);
+    tap(120, 128);
     assert(s_page == PAGE_WATCH);
     drag(80, 100, 20, 0);
     assert(s_page == PAGE_WATCH);
     drag(80, 100, 120, 0);
     assert(s_page == PAGE_WATCH);
-    drag(40, 236, 20, 0);
+    drag(60, 51, 20, 0);
     assert(s_page == PAGE_WATCH);
-    drag(40, 236, 0, 20);
+    drag(60, 51, 0, 20);
     assert(s_page == PAGE_WATCH);
     /* 移出后又回到按下点，仍按拖动处理。 */
-    host_point.x = 40;
-    host_point.y = 236;
+    host_point.x = 60;
+    host_point.y = 51;
     host_touch = LV_INDEV_STATE_PRESSED;
     advance(40);
-    host_point.x = 60;
+    host_point.x = 80;
     advance(40);
-    host_point.x = 40;
+    host_point.x = 60;
     advance(40);
     host_touch = LV_INDEV_STATE_RELEASED;
     advance(230);
     assert(s_page == PAGE_WATCH);
     /* 表盘快捷入口的详情右滑固定回功能页，实体键仍按历史返回。 */
-    tap(174, 230);
+    tap(120, 190);
     assert(s_page == PAGE_AHT21);
     drag(60, 140, 120, 0);
     assert(s_page == PAGE_SETTINGS);
     key_back();
     assert(s_page == PAGE_WATCH);
-    tap(64, 230);
+    tap(72, 51);
     assert(s_page == PAGE_HEART);
     drag(60, 140, 120, 0);
     assert(s_page == PAGE_SETTINGS);
     key_back();
     assert(s_page == PAGE_WATCH);
-    tap(42, 266);
+    tap(184, 178);
     assert(s_page == PAGE_WATCH);
     drag(180, 140, -120, 0);
     assert(s_page == PAGE_SETTINGS);

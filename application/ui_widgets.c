@@ -6,6 +6,7 @@
 
 #include <math.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <string.h>
 
 /* 直接比较控件中的最终显示值，切页重建后无需维护额外缓存。 */
@@ -69,6 +70,154 @@ lv_obj_t *ui_panel(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
     return obj;
 }
 
+lv_obj_t *ui_card(lv_obj_t *parent, int x, int y, int w, int h, uint32_t bg_color, uint32_t border_color, lv_coord_t radius)
+{
+    /* 在ui_panel基础上添加圆角和1像素描边，适配方形屏卡片网格风格。 */
+    lv_obj_t *obj = ui_panel(parent, x, y, w, h, bg_color);
+    lv_obj_set_style_radius(obj, radius, 0);
+    lv_obj_set_style_border_width(obj, 1, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(border_color), 0);
+    lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+    return obj;
+}
+
+/* LV_USE_ARC已关闭以节省Flash；借用lv_bar保存百分比/颜色并在DRAW_MAIN自绘圆环。 */
+static void ring_gauge_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_DRAW_PART_BEGIN)
+    {
+        lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(event);
+        /* 屏蔽lv_bar默认的矩形指示器绘制，但保留控件样式值供外部读取与静态刷新比对。 */
+        if (dsc != NULL && dsc->part == LV_PART_INDICATOR && dsc->rect_dsc != NULL)
+        {
+            dsc->rect_dsc->bg_opa = LV_OPA_TRANSP;
+            dsc->rect_dsc->bg_img_opa = LV_OPA_TRANSP;
+            dsc->rect_dsc->border_opa = LV_OPA_TRANSP;
+            dsc->rect_dsc->outline_opa = LV_OPA_TRANSP;
+            dsc->rect_dsc->shadow_opa = LV_OPA_TRANSP;
+        }
+        return;
+    }
+    if (code == LV_EVENT_DRAW_MAIN)
+    {
+        lv_obj_t *obj = lv_event_get_target(event);
+        lv_draw_ctx_t *draw_ctx = lv_event_get_draw_ctx(event);
+        uint16_t arc_width = (uint16_t)(uintptr_t)lv_event_get_user_data(event);
+        lv_area_t coords;
+        lv_coord_t w, h, radius;
+        lv_point_t center;
+        lv_draw_arc_dsc_t arc;
+        int32_t value;
+        lv_opa_t indic_opa;
+
+        lv_obj_get_coords(obj, &coords);
+        w = lv_area_get_width(&coords);
+        h = lv_area_get_height(&coords);
+        radius = (w < h ? w : h) / 2 - 1;
+        if (draw_ctx == NULL || radius <= 2)
+        {
+            return;
+        }
+        center.x = coords.x1 + w / 2;
+        center.y = coords.y1 + h / 2;
+
+        /* 先画整圈底层轨道（边框色保存在PART_MAIN.border_color）。 */
+        lv_draw_arc_dsc_init(&arc);
+        arc.width = (lv_coord_t)arc_width;
+        arc.color = lv_obj_get_style_border_color(obj, LV_PART_MAIN);
+        arc.opa = LV_OPA_COVER;
+        arc.rounded = 0;
+        lv_draw_arc(draw_ctx, &arc, &center, (uint16_t)radius, 0U, 360U);
+
+        /* 再从12点方向(270度)顺时针画有效进度弧。 */
+        indic_opa = lv_obj_get_style_bg_opa(obj, LV_PART_INDICATOR);
+        value = lv_bar_get_value(obj);
+        if (indic_opa > LV_OPA_MIN && value > 0)
+        {
+            arc.color = lv_obj_get_style_bg_color(obj, LV_PART_INDICATOR);
+            arc.opa = indic_opa;
+            if (value >= 100)
+            {
+                arc.rounded = 0;
+                lv_draw_arc(draw_ctx, &arc, &center, (uint16_t)radius, 0U, 360U);
+            }
+            else
+            {
+                uint16_t sweep = (uint16_t)((value * 360 + 50) / 100);
+                if (sweep < 4U)
+                {
+                    sweep = 4U;
+                }
+                if (sweep > 356U)
+                {
+                    sweep = 356U;
+                }
+                arc.rounded = (arc_width >= 4U) ? 1U : 0U;
+                lv_draw_arc(draw_ctx, &arc, &center, (uint16_t)radius, 270U, (uint16_t)((270U + sweep) % 360U));
+            }
+        }
+    }
+}
+
+lv_obj_t *ui_create_ring_gauge(lv_obj_t *parent, lv_coord_t size, uint32_t track_color, uint32_t arc_color, uint16_t arc_width)
+{
+    lv_obj_t *ring = lv_bar_create(parent);
+    lv_obj_remove_style_all(ring);
+    lv_obj_set_size(ring, size, size);
+    lv_bar_set_range(ring, 0, 100);
+    lv_bar_set_value(ring, 0, LV_ANIM_OFF);
+    /* PART_MAIN底色与边框全部透明；track_color仅借用border_color字段保存。 */
+    lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(ring, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(ring, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_color(ring, lv_color_hex(track_color), LV_PART_MAIN);
+    /* PART_INDICATOR保存当前进度色与显示不透明度。 */
+    lv_obj_set_style_bg_color(ring, lv_color_hex(arc_color), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(ring, ring_gauge_event_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+    lv_obj_add_event_cb(ring, ring_gauge_event_cb, LV_EVENT_DRAW_MAIN, (void *)(uintptr_t)arc_width);
+    return ring;
+}
+
+void ui_update_ring_gauge(lv_obj_t *ring, int32_t percent, uint8_t valid, uint32_t arc_color)
+{
+    int32_t target_value;
+    lv_opa_t target_opa;
+    lv_color_t target_color;
+    uint8_t changed = 0;
+
+    if (ring == NULL)
+    {
+        return;
+    }
+    target_value = valid ? LV_CLAMP(0, percent, 100) : 0;
+    target_opa = (valid != 0 && target_value > 0) ? LV_OPA_COVER : LV_OPA_TRANSP;
+    target_color = lv_color_hex(arc_color);
+
+    if (lv_bar_get_value(ring) != target_value)
+    {
+        lv_bar_set_value(ring, target_value, LV_ANIM_OFF);
+        changed = 1;
+    }
+    if (lv_obj_get_style_bg_opa(ring, LV_PART_INDICATOR) != target_opa)
+    {
+        lv_obj_set_style_bg_opa(ring, target_opa, LV_PART_INDICATOR);
+        changed = 1;
+    }
+    if (lv_obj_get_style_bg_color(ring, LV_PART_INDICATOR).full != target_color.full)
+    {
+        lv_obj_set_style_bg_color(ring, target_color, LV_PART_INDICATOR);
+        changed = 1;
+    }
+    /* lv_bar仅按水平区间标脏，圆环数值或颜色变化时需整块标脏一次；静止时跳过，保持零冗余刷屏。 */
+    if (changed != 0)
+    {
+        lv_obj_invalidate(ring);
+    }
+}
+
 lv_obj_t *ui_label(lv_obj_t *parent, const char *text, int x, int y, const lv_font_t *font, uint32_t color)
 {
     /* 在parent下创建标签对象。 */
@@ -102,8 +251,8 @@ lv_obj_t *ui_note(lv_obj_t *parent, const char *text, int y)
 /* 心率每秒、海拔每10分钟记录，最右为最新值；海拔历史由sensor持续维护。 */
 void ui_trend_create(ui_trend_struct *trend, lv_obj_t *parent, const char *title, int y, int height, uint32_t color, uint32_t sample_ms)
 {
-    /* 在parent的y位置建高度为height的卡片，承载标题、刻度和图表。 */
-    lv_obj_t *card = ui_panel(parent, 0, y, 212, height, UI_CARD);
+    /* 在parent的y位置建高度为height的带描边卡片，承载标题、刻度和图表。 */
+    lv_obj_t *card = ui_card(parent, 0, y, 212, height, UI_CARD, UI_BORDER, 16);
     /* 图表下方采样间隔说明标签。 */
     lv_obj_t *caption;
     /* 卡片左上角写曲线标题，使用该曲线的主题色。 */
