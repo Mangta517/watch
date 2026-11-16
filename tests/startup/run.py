@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
         "tests/startup/startup_harness.c", "application/app_uptime.c", "application/app_weather.c",
         "application/app_weather_store.c", "tests/diagnostics/diag_stub.c", "-o", exe,
     ], cwd=root, check=True)
-    for mode in ["ok", "devices_failed", "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
+    for mode in ["sample_retry", "sample_retry_sleep", "sample_retry_success", "sample_retry_success_sleep", "sample_retry_wrap", "ok", "devices_failed", "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
                  "cal_success", "cal_failed", "save_error", "manual_cal", "watchdog_progress", "watchdog_wrap",
                  "watchdog_startup", "watchdog_startup_wrap", "watchdog_sleep_stall", "watchdog_sleep_stall_wrap",
                  "first_frame_stall", "first_frame_slow",

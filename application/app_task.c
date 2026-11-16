@@ -10,7 +10,7 @@
 #include "app_task.h"
 #include "app_diag.h"
 #include "app_reset.h"
-#include "app_imu_store.h"
+#include "mpu6050.h"
 #include "app_uptime.h"
 #include "app_weather_store.h"
 #include "app_battery_log.h"
@@ -43,10 +43,10 @@
 #define APP_LVGL_TASK_PERIOD 10   /* LVGL服务周期10ms，与LV_DISP_DEF_REFR_PERIOD共用同一节拍 */
 
 #define APP_SENSOR_TASK_PRIO                2   /* 低于LVGL，优先响应触摸和显示 */
-#define APP_SENSOR_TASK_STK                 512 /* 字 = 2KB (IMU 读 + 零偏校准 + 气压读路径) */
-#define APP_SENSOR_TASK_PERIOD              20  /* 姿态和校准均为50Hz。 */
+#define APP_SENSOR_TASK_STK                 512 /* 字 = 2KB，传感器采样和持久化路径。 */
+#define APP_SENSOR_TASK_PERIOD              40  /* 指南针按25Hz服务。 */
 #define APP_SENSOR_HEART_PERIOD_MS          10  /* 服务周期整除30ms心率读取下限，避免量化为40ms。 */
-#define APP_SENSOR_IDLE_PERIOD_MS           40  /* 普通亮屏后台服务；加速度另按200ms读取。 */
+#define APP_SENSOR_IDLE_PERIOD_MS           40  /* 普通亮屏后台服务；MPU另按200ms读取。 */
 #define APP_IDLE_POLL_MS                    20
 #define APP_POWER_IDLE                      1
 #define APP_POWER_MOTION                    2
@@ -297,6 +297,9 @@ static void app_lvgl_task(void *pvParameters)
     uint8_t rtc_finished = 0; /* RTC初始化是否已结束的标志。 */
     uint8_t bt_finished = 0; /* 蓝牙初始化是否已结束的标志。 */
     uint32_t period_ms; /* 本拍LVGL主循环的等待周期(ms)。 */
+    uint16_t day_key;
+    uint8_t calendar_restored = 0;
+    uint32_t calendar_ms = HAL_GetTick() - 1000;
     (void)pvParameters; /* 未使用任务参数。 */
 
     /* 硬件拉起 + LVGL 注册 + 建表盘界面, 在本任务上下文一次性完成 */
@@ -345,8 +348,17 @@ static void app_lvgl_task(void *pvParameters)
             if (watch_rtc_init_is_pending() == 0)
             {
                 rtc_finished = 1;
+                calendar_restored = watch_rtc_is_synced();
                 app_diag_boot_set(APP_BOOT_RTC_END_MS, HAL_GetTick());
                 app_diag_boot_set(APP_BOOT_RTC_RESULT, (uint32_t)status);
+            }
+        }
+        if (rtc_finished != 0 && (uint32_t)(HAL_GetTick() - calendar_ms) >= 1000)
+        {
+            calendar_ms = HAL_GetTick();
+            if (watch_rtc_get_day_key(&day_key) == 0)
+            {
+                app_imu_set_day(day_key, calendar_restored);
             }
         }
         /* 蓝牙未完成，或已完成但驱动又报告有待处理步骤时，继续推进初始化。 */
@@ -442,7 +454,7 @@ static void app_touch_task(void *pvParameters)
 
 /* 传感器采样任务: SENSOR 总线 (PB13/PB14) 唯一 owner, MPU6050+SPL006+LSM303DLHC+EM7028+AHT21
  * 都只在本任务读写 —— 与 flight 端 flight_task 独占 I2C1 的约定同构。
- * 每轮顺序: 读UI发布的电源标志→按运动/心率/校准/熄屏决定采样模式→逐器件推进恢复与
+ * 每轮顺序: 读UI发布的电源标志→按运动/心率/指南针/熄屏决定采样模式→逐器件推进恢复与
  * 事务→按需读气压/电池/温湿度→串行推进EEPROM保存→按本轮活动重定周期并发布节拍。
  * 低频器件不新建任务，按墙钟错峰；校准、开机秒数、天气与OTA标志共用EEPROM，页写按拍推进。
  * EXTI 只记标志；GPIOB 的方向寄存器 RMW 保留短 PRIMASK 临界区。 */
@@ -450,21 +462,18 @@ static void app_sensor_task(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount(); /* 本任务周期调度的tick基准。 */
     TickType_t now_tick; /* 本轮结束前的当前tick，用于判断是否超期。 */
-    mpu6050_cal_state cal_state; /* 零偏校准状态机的当前状态。 */
-    mpu6050_offset_struct offset; /* EEPROM读出或校准得到的零偏值。 */
-    app_imu_store_result store_result; /* EEPROM读写步骤的返回结果。 */
-    uint16_t cal_stable, cal_frames; /* 校准的稳定帧数与已采集帧数。 */
-    uint8_t cal_finished = 0; /* 零偏已恢复，或本轮校准流程已结束（成功/失败）。 */
-    uint8_t imu_saving = 0, mag_saving = 0; /* IMU零偏/磁校准的EEPROM保存进度。 */
+    uint8_t mag_saving = 0; /* 磁校准EEPROM保存进度。 */
     uint8_t uptime_saving = 0, weather_saving = 0; /* 开机秒数/天气的保存进度。 */
     uint8_t heart_saving = 0; /* 心率周期EEPROM保存进度。 */
     uint8_t ota_saving = 0; /* OTA标志保存进度；非0时其他保存让路。 */
     uint32_t baro_ms, baro_window_ms, battery_ms, now_ms, power_state; /* 气压周期起点、气压窗口起点、电池节拍、当前毫秒、电源状态快照。 */
-    uint32_t period_ms = APP_SENSOR_TASK_PERIOD; /* 本轮调度周期，初值20ms。 */
+    uint32_t period_ms = APP_SENSOR_TASK_PERIOD; /* 本轮调度周期，初值40ms。 */
     app_heart_struct heart; /* 心率快照，供本任务做调度判断。 */
     uint8_t sleeping = 0, bus_parked = 0, environment_active = 0; /* 熄屏睡眠、总线已挂起、温湿度窗口激活标志。 */
     uint8_t sleep_requested, imu_active, bus_needed, imu_warming = 0; /* 睡眠请求、本轮是否用IMU、是否需要总线、IMU预热中。 */
     uint8_t imu_sample_pending = 0, heart_pending, mpu_recovery, mpu_recovering = 0; /* 待取IMU帧、心率待处理、MPU恢复步骤结果、恢复进行中。 */
+    uint8_t compass_active = 0, compass_requested, compass_pending = 1;
+    uint8_t imu_retry_count = 0, imu_read_result;
     uint8_t heart_bus_used; /* 心率服务本拍是否占用了总线。 */
     uint8_t imu_continuous, imu_background = 0, imu_mode_changed; /* 连续采样需求、后台5Hz模式、模式是否切换。 */
     uint8_t imu_reference = 0, reference_requested; /* 加速度参考模式当前值/请求值。 */
@@ -487,39 +496,25 @@ static void app_sensor_task(void *pvParameters)
     app_imu_init_mag_hw();
     app_heart_init_hw(); /* 配置为待机，原有服务负责启动采样及照明。 */
 
-    /* 数据锁须在任务上下文创建 (调度器已运行, 见 app_display 同款注释) */
+    /* 日志先扫描恢复步数，再在任务上下文创建传感器快照锁。 */
+    app_battery_log_init();
     App_IMU_Init();
-    /* 尝试从EEPROM读取IMU零偏，结果决定后续是恢复还是重新校准。 */
-    store_result = app_imu_store_load(&offset);
     /* 初始化开机秒数、天气、电池记录、气压、心率、电池模块。 */
     app_uptime_init();
     app_weather_store_init();
-    app_battery_log_init();
     App_Baro_Init();
     app_heart_init();
     app_battery_init();
-    app_battery_service(); /* 零偏校准前启动采样；后续按秒完成电池启动均值。 */
+    app_battery_service(); /* 启动电池采样；后续按秒完成启动均值。 */
 
     /* 初始化温湿度传感器。 */
     app_aht21_init();
     /* 记录sensor就绪与校准开始时刻。 */
     app_diag_boot_set(APP_BOOT_SENSOR_READY_MS, HAL_GetTick());
     app_diag_boot_set(APP_BOOT_CAL_BEGIN_MS, HAL_GetTick());
-    /* EEPROM里有有效零偏记录：直接恢复到驱动，跳过本次静止校准。 */
-    if (store_result == APP_IMU_STORE_OK)
-    {
-        app_imu_restore_offset(&offset);
-        cal_finished = 1;
-        app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_RESTORED);
-        app_diag_boot_set(APP_BOOT_CAL_END_MS, HAL_GetTick());
-        app_diag_boot_set(APP_BOOT_CAL_RESULT, 0);
-    }
-    else
-    {
-        /* EEPROM空白/无有效记录时才使用原校准，失败不写入。 */
-        app_imu_calibration_begin(HAL_GetTick());
-        app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_WAIT_STILL);
-    }
+    app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_IDLE);
+    app_diag_boot_set(APP_BOOT_CAL_END_MS, HAL_GetTick());
+    app_diag_boot_set(APP_BOOT_CAL_RESULT, 0);
     /* 校准与各周期起点统一以当前tick为基准。 */
     xLastWakeTime = xTaskGetTickCount();
     battery_ms = HAL_GetTick();
@@ -537,8 +532,8 @@ static void app_sensor_task(void *pvParameters)
         power_state = s_power_state;
         /* 从状态字取出运动模式请求位。 */
         sport_requested = (power_state & APP_POWER_SPORT) != 0;
-        /* 运动模式要真正生效还需：校准流程已结束、无IMU/磁保存在途、磁校准未在进行。 */
-        sport_ready = sport_requested != 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && app_imu_is_calibrating() == 0;
+        /* SPORT独立请求100Hz纯加速度和连续心率。 */
+        sport_ready = sport_requested != 0;
         /* 比较本次可用状态与上一轮，得到是否发生切换。 */
         sport_changed = sport_ready != sporting;
         if (sport_changed != 0)
@@ -547,23 +542,14 @@ static void app_sensor_task(void *pvParameters)
             sporting = sport_ready;
             app_heart_set_sport_mode(sporting);
         }
-        /* 非运动且IMU/开机秒数/天气/心率保存空闲，取到UI提交的请求时重新开始零偏校准。 */
-        if (sporting == 0 && imu_saving == 0 && uptime_saving == 0 && weather_saving == 0 && heart_saving == 0 &&
-            app_diag_take_imu_calibration() != 0)
+        /* 旧诊断校准命令明确结束，纯加速度运行不再启动六轴平放校准。 */
+        if (app_diag_take_imu_calibration() != 0)
         {
-            /* 清零校准完成标志，让后续按未校准路径重新走一遍。 */
-            cal_finished = 0;
-            /* 丢弃旧的保存记录，并把校准结束时刻/结果置为无效值(UINT32_MAX)。 */
-            app_diag_imu_save_record(APP_IMU_SAVE_NONE, 0, UINT32_MAX, UINT32_MAX);
-            /* 启动驱动内零偏校准状态机，从"等待静止"开始。 */
-            app_imu_calibration_begin(HAL_GetTick());
-            /* 诊断中记录校准开始时刻，并清空上一轮的结束时刻与结果。 */
-            app_diag_boot_set(APP_BOOT_CAL_BEGIN_MS, HAL_GetTick());
-            app_diag_boot_set(APP_BOOT_CAL_END_MS, UINT32_MAX);
-            app_diag_boot_set(APP_BOOT_CAL_RESULT, UINT32_MAX);
+            app_diag_boot_set(APP_BOOT_CAL_STATE, MPU6050_CAL_IDLE);
+            app_diag_boot_set(APP_BOOT_CAL_RESULT, 1);
         }
         /* 熄屏睡眠需同时满足：非运动、UI已请求熄屏、校准流程已结束、无保存/校准在途。 */
-        sleep_requested = sporting == 0 && (power_state & APP_POWER_SCREEN_OFF) != 0 && cal_finished != 0 && imu_saving == 0 &&
+        sleep_requested = sporting == 0 && (power_state & APP_POWER_SCREEN_OFF) != 0 &&
                           mag_saving == 0 && app_imu_is_calibrating() == 0;
         /* 比较本次请求与上一轮睡眠状态，得到是否发生切换。 */
         sleep_changed = sleep_requested != sleeping;
@@ -648,21 +634,24 @@ static void app_sensor_task(void *pvParameters)
         /* 取一份心率快照，并查询是否有待处理的熄屏自动测量。 */
         app_heart_get_snapshot(&heart);
         heart_pending = app_heart_sleep_pending();
-        /* 需要加速度参考的条件：校准流程已结束、无保存在途/校准中、未在姿态页，且运动、心率开启或有待处理测量。 */
-        reference_requested = cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && app_imu_is_calibrating() == 0 &&
-                              (power_state & APP_POWER_MOTION) == 0 && (sporting != 0 || heart.enabled != 0 || heart_pending != 0);
+        reference_requested = sporting != 0 || heart.enabled != 0 || heart_pending != 0;
         /* 参考模式发生变化时，重排预热起点并置预热标志。 */
         if (reference_requested != imu_reference)
         {
             imu_reference = reference_requested;
             imu_wake_ms = now_ms;
-            imu_warming = 1; /* 加速度参考切回完整姿态时，仍等待陀螺仪稳定100ms。 */
+            imu_warming = 1; /* 两档加速度采样切换后等待新转换。 */
         }
         /* 把参考模式请求下发给IMU模块。 */
         app_imu_set_accel_reference(imu_reference);
-        /* 连续采样需求：校准未完成、IMU/磁保存在途、磁校准中、运动、心率开启或有待处理、姿态页。 */
-        imu_continuous = cal_finished == 0 || imu_saving != 0 || mag_saving != 0 || app_imu_is_calibrating() != 0 ||
-                         sporting != 0 || heart.enabled != 0 || heart_pending != 0 || (power_state & APP_POWER_MOTION) != 0;
+        /* MPU连续采样只服务SPORT、心率开启或待处理测量。 */
+        imu_continuous = reference_requested;
+        compass_requested = (power_state & APP_POWER_MOTION) != 0 || app_imu_is_calibrating() != 0;
+        if (compass_requested != compass_active)
+        {
+            compass_active = compass_requested;
+            compass_pending = 1;
+        }
         /* 后台模式即"不需要连续采样"；与上一轮比较得出模式是否切换。 */
         imu_mode_changed = imu_background != (imu_continuous == 0);
         if (imu_mode_changed != 0)
@@ -672,7 +661,7 @@ static void app_sensor_task(void *pvParameters)
             /* 模式切换后重排采样起点；后台模式下先标一个待取帧，尽快取到第一帧。 */
             imu_cycle_ms = now_ms;
             imu_sample_pending = imu_background;
-            /* 重新开始预热计时(完整姿态100ms、后台200ms)。 */
+            /* 重新开始预热计时(100Hz等待10ms、5Hz等待200ms)。 */
             imu_wake_ms = now_ms;
             imu_warming = 1;
         }
@@ -686,7 +675,8 @@ static void app_sensor_task(void *pvParameters)
         /* 本轮是否真的需要IMU：连续采样或存在待取帧。 */
         imu_active = imu_continuous != 0 || imu_sample_pending != 0;
         /* 总线需求：未睡眠，或温湿度/气压窗口激活，或气压休眠待写，或本轮要用IMU。 */
-        bus_needed = sleeping == 0 || environment_active != 0 || baro_active != 0 || baro_sleep_pending != 0 || imu_active != 0;
+        bus_needed = sleeping == 0 || environment_active != 0 || baro_active != 0 || baro_sleep_pending != 0 ||
+                     imu_active != 0 || compass_active != 0 || compass_pending != 0;
         /* 需要总线但当前处于挂起状态：重新初始化软件I2C并清除挂起标志。 */
         if (bus_needed != 0 && bus_parked != 0)
         {
@@ -713,7 +703,7 @@ static void app_sensor_task(void *pvParameters)
                 /* 仍在推进(2)，或刚从进行中回到就绪(0)：需要重新预热。 */
                 if (mpu_recovery == 2 || (mpu_recovering != 0 && mpu_recovery == 0))
                 {
-                    /* 恢复推进及首次就绪时重计预热，完整姿态在恢复后仍等陀螺仪稳定100ms。 */
+                    /* 恢复推进及首次就绪时重计加速度预热。 */
                     if (imu_background != 0)
                     {
                         imu_sample_pending = 1;
@@ -725,11 +715,6 @@ static void app_sensor_task(void *pvParameters)
                 if (mpu_recovery == 0)
                 {
                     mpu_recovering = 0;
-                }
-                /* 连续采样且不需要加速度参考时，顺带推进磁力计恢复一笔。 */
-                if (imu_continuous != 0 && imu_reference == 0)
-                {
-                    app_imu_mag_recover_step(HAL_GetTick());
                 }
             }
             /* 气压窗口激活时，每拍推进一步气压计恢复。 */
@@ -748,22 +733,22 @@ static void app_sensor_task(void *pvParameters)
         }
         /* 先按普通亮屏后台服务取40ms。 */
         period_ms = APP_SENSOR_IDLE_PERIOD_MS;
-        /* 校准未完成、心率开启、姿态页或有保存在途：收紧到20ms。 */
-        if (cal_finished == 0 || heart.enabled != 0 || (power_state & APP_POWER_MOTION) != 0 || imu_saving != 0 || mag_saving != 0)
+        /* 心率、指南针页或磁保存在途时保持对应的服务节拍。 */
+        if (heart.enabled != 0 || (power_state & APP_POWER_MOTION) != 0 || mag_saving != 0)
         {
             period_ms = APP_SENSOR_TASK_PERIOD;
         }
-        /* 运动模式，或校准完成后的心率测量：再收紧到10ms。 */
-        if (sporting != 0 || (heart.enabled != 0 && cal_finished != 0))
+        /* 运动模式或心率测量：再收紧到10ms。 */
+        if (sporting != 0 || heart.enabled != 0)
         {
             period_ms = APP_SENSOR_SPORT_PERIOD_MS;
         }
         /* 本轮确实要读IMU时，按模式配置采样周期并决定是否本拍服务。 */
         if (imu_active != 0)
         {
-            /* 默认沿用本拍调度周期，预热按完整姿态的100ms。 */
+            /* 默认沿用本拍调度周期，100Hz转换等待10ms。 */
             imu_period_ms = period_ms;
-            imu_warmup_ms = 100;
+            imu_warmup_ms = 10;
             /* 后台模式固定200ms采样，预热也取同一周期。 */
             if (imu_background != 0)
             {
@@ -784,10 +769,18 @@ static void app_sensor_task(void *pvParameters)
                 /* 预热结束，清标志。 */
                 imu_warming = 0;
                 /* 服务一轮IMU；本拍若心率占过总线则本轮延后磁读取。 */
-                App_IMU_Service(heart_bus_used == 0);
-                /* 记下本次采样时刻，并清掉待取帧。 */
+                imu_read_result = App_IMU_Service(0);
                 imu_cycle_ms = now_ms;
                 imu_sample_pending = 0;
+                if (imu_background != 0 && imu_read_result == MPU6050_DATA_NOT_READY && imu_retry_count < 2)
+                {
+                    ++imu_retry_count;
+                    imu_sample_pending = 1;
+                }
+                else
+                {
+                    imu_retry_count = 0;
+                }
             }
         }
         else if (sleeping != 0)
@@ -798,34 +791,12 @@ static void app_sensor_task(void *pvParameters)
         /* 心率开启时统一用10ms，满足心率服务30ms读取下限的整除关系。 */
         if (heart.enabled != 0)
         {
-            /* 磁校准或MPU恢复可保留20ms配置，心率服务仍须整除30ms读取下限。 */
+            /* 心率服务保持整除30ms读取下限，恢复和指南针各自分步推进。 */
             period_ms = APP_SENSOR_HEART_PERIOD_MS;
         }
-        /* 校准尚未完成时，每拍查询一次状态机进度并刷新诊断。 */
-        if (cal_finished == 0)
+        if (bus_needed != 0 && (compass_active != 0 || compass_pending != 0))
         {
-            /* 取校准状态、稳定帧数与已采集帧数，写入启动诊断。 */
-            cal_state = app_imu_calibration_progress(&cal_stable, &cal_frames);
-            app_diag_boot_set(APP_BOOT_CAL_STATE, (uint32_t)cal_state);
-            app_diag_boot_set(APP_BOOT_CAL_FRAMES, cal_frames);
-            app_diag_boot_set(APP_BOOT_CAL_STABLE_FRAMES, cal_stable);
-            /* 状态机已结束(成功或失败)才置完成标志并记录结束时刻。 */
-            if (cal_state == MPU6050_CAL_DONE || cal_state == MPU6050_CAL_FAILED)
-            {
-                cal_finished = 1;
-                app_diag_boot_set(APP_BOOT_CAL_END_MS, HAL_GetTick());
-                /* 成功：取回零偏值并置保存请求，EEPROM写入放到后续各拍。 */
-                if (cal_state == MPU6050_CAL_DONE)
-                {
-                    app_imu_get_offset(&offset);
-                    imu_saving = 1; /* 已提交RAM偏移，EEPROM在后续各拍推进。 */
-                }
-                /* 失败：诊断结果记为1，不保存。 */
-                else
-                {
-                    app_diag_boot_set(APP_BOOT_CAL_RESULT, 1);
-                }
-            }
+            compass_pending = app_imu_compass_service(compass_active, heart_bus_used == 0);
         }
         /* 重新取当前毫秒，供下面的气压窗口与电池节拍判定。 */
         now_ms = HAL_GetTick();
@@ -876,7 +847,7 @@ static void app_sensor_task(void *pvParameters)
                 app_battery_service();
             }
             /* 所有硬件活动都已收尾且总线未挂起：释放软件I2C引脚并记挂起。 */
-            if (imu_continuous == 0 && environment_active == 0 && baro_active == 0 && baro_sleep_pending == 0 && imu_sample_pending == 0 &&
+            if (imu_continuous == 0 && environment_active == 0 && baro_active == 0 && baro_sleep_pending == 0 && imu_sample_pending == 0 && compass_active == 0 && compass_pending == 0 &&
                 app_heart_sleep_pending() == 0 && bus_parked == 0)
             {
                 /* MPU继续自主5Hz采样，磁力计已休眠；仅释放软件I2C引脚。 */
@@ -895,52 +866,35 @@ static void app_sensor_task(void *pvParameters)
         {
             app_aht21_service(); /* 转换等待仍分步检查，避开气压/电池读取轮次。 */
         }
-        /* IMU零偏等待保存且其他保存都空闲：启动一次EEPROM写入，状态推进到2。 */
-        if (imu_saving == 1 && mag_saving == 0 && uptime_saving == 0 && weather_saving == 0 && heart_saving == 0 && ota_saving == 0)
-        {
-            store_result = app_imu_store_save_begin(&offset);
-            imu_saving = 2;
-        }
-        /* 写入已启动：每拍推进一步，直到不再是BUSY。 */
-        if (imu_saving == 2)
-        {
-            store_result = app_imu_store_save_step();
-            if (store_result != APP_IMU_STORE_BUSY)
-            {
-                /* 结束本轮保存，清进度标志。 */
-                imu_saving = 0;
-                /* 成功则诊断结果记0；失败记2(仅掉电保存失败，RAM偏移已生效)。 */
-                if (store_result == APP_IMU_STORE_OK)
-                {
-                    app_diag_boot_set(APP_BOOT_CAL_RESULT, 0);
-                }
-                else
-                {
-                    app_diag_boot_set(APP_BOOT_CAL_RESULT, 2); /* RAM成功，掉电保存失败。 */
-                }
-            }
-        }
-        /* 其他保存都空闲，且(非运动或磁保存已在进行)时，推进磁校准保存。 */
-        else if (uptime_saving == 0 && weather_saving == 0 && heart_saving == 0 && ota_saving == 0 && (sporting == 0 || mag_saving != 0))
+        if (uptime_saving == 0 && weather_saving == 0 && heart_saving == 0 && ota_saving == 0)
         {
             mag_saving = App_IMU_SaveService();
         }
-        /* 校准、开机时间、天气、心率周期和OTA共用EEPROM；在途事务完成后才允许下一方开始。
+        /* 磁校准、开机时间、天气、心率周期和OTA共用EEPROM；在途事务完成后才允许下一方开始。
          * OTA标志写入并读回确认后，其余保存都不再启动，等待复位进入升级。 */
-        /* 开机秒数保存：OTA未在写、校准完成、其他保存在途为0时才允许启动。 */
-        uptime_saving = app_uptime_service(ota_saving == 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 &&
+        /* 开机秒数保存：OTA未在写且其他保存在途为0时才允许启动。 */
+        uptime_saving = app_uptime_service(ota_saving == 0 && mag_saving == 0 &&
                                           weather_saving == 0 && heart_saving == 0 && app_imu_is_calibrating() == 0);
-        /* 天气保存：同样让开OTA与其余在途保存，且校准已完成。 */
-        weather_saving = app_weather_store_service(ota_saving == 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 &&
+        /* 天气保存：同样让开OTA与其余在途保存。 */
+        weather_saving = app_weather_store_service(ota_saving == 0 && mag_saving == 0 &&
                                                   uptime_saving == 0 && heart_saving == 0 && app_imu_is_calibrating() == 0);
-        heart_saving = app_heart_store_service(ota_saving == 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && uptime_saving == 0 &&
+        heart_saving = app_heart_store_service(ota_saving == 0 && mag_saving == 0 && uptime_saving == 0 &&
                                               weather_saving == 0 && app_imu_is_calibrating() == 0);
         /* OTA标志保存优先级最高：其他保存在途为0时启动。 */
-        ota_saving = app_ota_storage_service(imu_saving == 0 && mag_saving == 0 && uptime_saving == 0 && weather_saving == 0 && heart_saving == 0);
+        ota_saving = app_ota_storage_service(mag_saving == 0 && uptime_saving == 0 && weather_saving == 0 && heart_saving == 0);
         /* OTA未在写时，按开机秒数服务电池记录。 */
         if (ota_saving == 0)
         {
+            app_imu_activity_service();
             app_battery_log_service(app_uptime_get_seconds());
+        }
+        if (compass_active != 0 && period_ms > 40)
+        {
+            period_ms = 40;
+        }
+        if (imu_retry_count != 0 && period_ms > 20)
+        {
+            period_ms = 20;
         }
         /* 记录本轮诊断结束及实际周期。 */
         app_diag_task_end(APP_DIAG_SENSOR_TASK, period_ms);

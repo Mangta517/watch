@@ -172,7 +172,7 @@ uint8_t app_battery_log_ble_service(uint8_t ready, uint32_t now_ms)
         {
             s_ble.tx_length = (uint16_t)snprintf(s_ble.tx, sizeof(s_ble.tx), "BATLOG,STATUS,%lu,%lu,%lu,%u\r\n",
                                                  (unsigned long)status.samples, (unsigned long)status.slots,
-                                                 (unsigned long)BATTERY_LOG_CAPACITY, (unsigned)status.state);
+                                                 (unsigned long)status.capacity, (unsigned)status.state);
         }
         /* READ在日志区需要清空时直接回错误行，不进入导出。 */
         else if (s_ble.command == BATLOG_READ && status.state == APP_BATTERY_LOG_NEED_CLEAR)

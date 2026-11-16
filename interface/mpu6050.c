@@ -3,7 +3,7 @@
  * @file    mpu6050.c
  * @brief   MPU6050 驱动实现 —— 软件 I2C (common/my_i2c.c, SENSOR 总线)
  *          移植自旧工程 flight_hal/interface/my_mpu6050.c：
- *          手表±1000°/s、±4g；初始化100Hz，sensor按使用状态切换50/25Hz六轴或5Hz加速度低功耗。
+ *          手表加速度±4g；初始化5Hz低功耗，心率/SPORT切到100Hz，陀螺仪和温度保持待机。
  *          数据就绪中断: 器件 DATA_RDY 输出仍使能 —— INT_ENABLE(0x38)=0x01，
  *          INT_PIN_CFG=0xC0 (低有效/开漏/50µs脉冲)，空闲释放外部4.7k上拉，避免持续灌电流；
  *          main 启动即持续屏蔽 PB12 EXTI（早于稍后的 sensor 初始化，避免倒置时序），
@@ -28,7 +28,7 @@ static volatile uint8_t mpu6050_int_status; /* sensor 任务读回的状态 */
 static volatile uint16_t mpu6050_int_edges;
 static uint8_t mpu6050_ready;
 static uint32_t s_mpu_period_ms = MPU6050_SAMPLE_PERIOD_MS;
-static uint8_t s_mpu_accel_reference;
+
 
 /* 六轴零偏集中于模块私有结构体：accel[0..2]/gyro[0..2] 下标 0/1/2 依次对应 X/Y/Z 轴，
  * 数值为原始 LSB 零偏（Z 轴不包含重力 1g），仍由 sensor 任务的校准/恢复接口维护；
@@ -101,9 +101,8 @@ void my_mpu6050_recover_begin(void)
 {
     /* 先让数据接口失效：重配期间读到的帧不再对外发布。 */
     mpu6050_ready = 0;
-    /* 采样周期和加速度参考模式回到上电默认的 100Hz 六轴。 */
+    /* 采样周期回到上电默认的5Hz加速度循环。 */
     s_mpu_period_ms = MPU6050_SAMPLE_PERIOD_MS;
-    s_mpu_accel_reference = 0;
     /* 清掉上一次运行留下的“无新帧”与“睡眠中”标记。 */
     mpu_recovery.no_data = 0;
     mpu_recovery.sleeping = 0;
@@ -143,17 +142,17 @@ uint8_t my_mpu6050_recover_step(uint32_t now_ms)
 {
     /* 复位后按顺序写入的寄存器表：每项为 {寄存器地址, 目标值}。 */
     static const uint8_t config[][2] = {
-        {MPU6050_REG_PWR_MGMT_1, 0x00},
+        {MPU6050_REG_PWR_MGMT_1, 0x48},
         {MPU6050_GYRO_CONFIG, MPU6050_GYRO_RANGE},
         {MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE},
         {MPU6050_INT_PIN_CFG, 0xC0},
         {MPU6050_INT_ENABLE, 0x01},
         {MPU6050_FIFO_EN, 0x00},
         {MPU6050_USER_CTRL, 0x00},
-        {MPU6050_SMPLRT_DIV, MPU6050_SAMPLE_PERIOD_MS - 1},
+        {MPU6050_SMPLRT_DIV, 9},
         {MPU6050_CONFIG, MPU6050_DLPF_CFG},
-        {MPU6050_PWR_MGMT_1, 0x01},
-        {MPU6050_PWR_MGMT_2, 0x00}};
+        {MPU6050_PWR_MGMT_2, 0x47},
+        {MPU6050_PWR_MGMT_1, 0x28}};
     /* 暂存单次寄存器读出的值（WHO_AM_I、PWR_MGMT_1、INT_STATUS 共用）。 */
     uint8_t data;
     /* 已经就绪时不再重配，只在两种异常下重新开始恢复流程。 */
@@ -284,18 +283,13 @@ uint8_t my_mpu6050_init(void)
 uint8_t my_mpu6050_set_sleep(uint8_t sleeping)
 {
     /* 将要写入 PWR_MGMT_1 的值，先按当前采样模式取默认配置。 */
-    uint8_t config = 0x01;
+    uint8_t config = 0x08;
     /* now_ms 为本次操作时刻；elapsed_ms 为本次睡眠持续时长，用于补偿超时基准。 */
     uint32_t now_ms, elapsed_ms;
     /* 200ms 低功耗循环模式：CYCLE=1、TEMP_DIS=1、内部 8MHz 时钟。 */
     if (s_mpu_period_ms == 200)
     {
         config = 0x28;
-    }
-    /* 加速度参考模式：关闭温度并改用内部 8MHz 时钟。 */
-    else if (s_mpu_accel_reference != 0)
-    {
-        config = 0x08;
     }
     /* 需要睡眠时，在保留时钟选择的前提下清 CYCLE 位并置 SLEEP 位。 */
     if (sleeping != 0)
@@ -340,91 +334,36 @@ uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
     return my_mpu6050_set_sample_mode(period_ms, 0);
 }
 
-/* 设置采样周期与加速度参考模式；period_ms 单位为 ms，accel_reference 非 0 表示只连续采加速度。
- * 返回 0=设置成功或无需改动，1=参数非法/器件未就绪/寄存器写失败。 */
+/* 只保留5Hz循环与100Hz连续加速度，三轴陀螺仪始终待机。 */
 uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference)
 {
-    /* 将要写入 CONFIG 寄存器的 DLPF 配置值。 */
-    uint8_t filter;
-    /* 只接受 10/20/40/200ms 四档，其余周期直接判为参数错误。 */
-    if (period_ms != 10 && period_ms != 20 && period_ms != 40 && period_ms != 200)
+    uint8_t power_2 = 0x07, power_1 = 0x08;
+    (void)accel_reference;
+    if ((period_ms != 10 && period_ms != 200) || mpu6050_ready == 0)
     {
         return 1;
     }
-    /* 器件尚未完成初始化/恢复时不允许改配置。 */
-    if (mpu6050_ready == 0)
-    {
-        return 1;
-    }
-    /* 加速度参考模式与 200ms 低功耗循环互斥，后者优先。 */
-    accel_reference = accel_reference != 0 && period_ms != 200;
-    /* 周期与参考模式都没变化时直接返回成功，不产生总线事务。 */
-    if (period_ms == s_mpu_period_ms && accel_reference == s_mpu_accel_reference)
+    if (period_ms == s_mpu_period_ms)
     {
         return 0;
     }
-    /* 涉及进入/退出低功耗循环或参考模式切换时，需要先做一次电源状态过渡。 */
-    if (period_ms == 200 || s_mpu_period_ms == 200 || accel_reference != s_mpu_accel_reference)
+    if (period_ms == 200)
     {
-        /* 先退出循环并使用内部时钟，再启停陀螺仪，最后接通目标模式。 */
-        /* 默认保持六轴全开：PWR_MGMT_2=0x00、PWR_MGMT_1=0x01（使用陀螺仪 PLL）。 */
-        uint8_t power_2 = 0x00;
-        uint8_t power_1 = 0x01;
-        /* 目标为 200ms：三轴陀螺仪待机，加速度按 5Hz 循环唤醒。 */
-        if (period_ms == 200)
-        {
-            power_2 = 0x47; /* LP_WAKE_CTRL=1(5Hz)，三轴陀螺仪待机，加速度保持启用。 */
-            power_1 = 0x28; /* CYCLE=1、SLEEP=0、TEMP_DIS=1，内部8MHz时钟。 */
-        }
-        /* 目标为加速度参考模式：只停陀螺仪，时钟改用内部振荡器。 */
-        else if (accel_reference != 0)
-        {
-            power_2 = 0x07; /* 三轴陀螺仪待机，加速度连续转换，周期仍由SMPLRT_DIV设置。 */
-            power_1 = 0x08; /* 温度关闭、内部8MHz时钟；不能选择已停用的陀螺仪PLL。 */
-        }
-        /* 三步写入：先切内部时钟，再设置各轴启停，最后写入目标电源模式。 */
-        if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x08) != 0 ||
-            my_mpu6050_write_reg(MPU6050_PWR_MGMT_2, power_2) != 0 ||
-            my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, power_1) != 0)
-        {
-            /* 任一步失败都重新开始恢复流程，并返回失败。 */
-            my_mpu6050_recover_begin();
-            return 1;
-        }
-        /* 模式切换后重置有效帧基准，避免旧的 sample_ms 立刻触发 1s 无帧重配。 */
-        mpu_recovery.sample_ms = HAL_GetTick();
-        mpu_recovery.no_data = 0;
-        /* 200ms 低功耗循环不需要再配置 DLPF 和分频，直接记录并返回。 */
-        if (period_ms == 200)
-        {
-            s_mpu_period_ms = period_ms;
-            s_mpu_accel_reference = 0;
-            return 0;
-        }
+        power_2 = 0x47;
+        power_1 = 0x28;
     }
-    /* 其余周期默认使用 DLPF 配置 4：50Hz 采样时陀螺仪 20Hz、加速度 21Hz 带宽。 */
-    filter = 4; /* 50Hz采样：陀螺仪20Hz、加速度21Hz带宽。 */
-    /* 10ms 对应 100Hz 六轴运动模式，恢复项目默认的 42Hz 带宽。 */
-    if (period_ms == 10)
+    if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x08) != 0 ||
+        my_mpu6050_write_reg(MPU6050_PWR_MGMT_2, power_2) != 0 ||
+        my_mpu6050_write_reg(MPU6050_CONFIG, MPU6050_DLPF_CFG) != 0 ||
+        my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, 9) != 0 ||
+        my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, power_1) != 0)
     {
-        filter = MPU6050_DLPF_CFG; /* 运动模式恢复100Hz/42Hz带宽。 */
-    }
-    /* 40ms 对应 25Hz 采样，使用 10Hz 带宽。 */
-    else if (period_ms == 40)
-    {
-        filter = 5; /* 25Hz采样：10Hz带宽。 */
-    }
-    /* 先写 DLPF，再写分频值（周期减 1，因为分频寄存器是 0 基）。 */
-    if (my_mpu6050_write_reg(MPU6050_CONFIG, filter) != 0 ||
-        my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, (uint8_t)(period_ms - 1)) != 0)
-    {
-        /* 写失败：重新恢复，避免停留在半配置状态。 */
         my_mpu6050_recover_begin();
         return 1;
     }
-    /* 两笔写都成功后，才把新周期与新参考模式记为当前生效配置。 */
     s_mpu_period_ms = period_ms;
-    s_mpu_accel_reference = accel_reference;
+    mpu_recovery.sample_ms = HAL_GetTick();
+    mpu_recovery.no_data = 0;
     return 0;
 }
 
@@ -820,20 +759,10 @@ uint8_t my_mpu6050_get_accel(Accel_struct *accel)
 /* 一笔读状态与六轴；加速度模式只读0x3A..0x40，无新帧不覆盖输出。 */
 uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
 {
-    /* 原始读缓冲：首字节是 0x3A 中断状态，其后依次为加速度/温度/陀螺仪数据。 */
-    uint8_t packet[15];
-    /* 指向 packet[1]，即 0x3B 起的六轴数据，便于按轴偏移取值。 */
+    uint8_t packet[7];
     const uint8_t *buf = packet + 1;
-    /* 本次读取开始的毫秒时刻，作为“最近有效帧”的时间戳。 */
     uint32_t started_ms;
-    /* 本次要读的字节数，默认读满 15 字节（状态+加速度+温度+陀螺仪）。 */
-    uint16_t packet_size = sizeof(packet);
 
-    /* 低功耗/加速度参考模式：陀螺仪与温度已停用，只读状态和加速度共 7 字节。 */
-    if (s_mpu_period_ms == 200 || s_mpu_accel_reference != 0)
-    {
-        packet_size = 7; /* 低功耗只读状态和加速度，不读取停用的温度/陀螺仪寄存器。 */
-    }
     /* 输出指针为空或器件未就绪时直接返回失败。 */
     if (data == NULL || mpu6050_ready == 0)
     {
@@ -842,7 +771,7 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
     /* 记录读取开始时刻，用于填充 sample_ms。 */
     started_ms = HAL_GetTick();
     /* 从 INT_STATUS 起一笔突发读；失败则累计故障计数并返回 1。 */
-    if (mpu6050_bus_read(MPU6050_INT_STATUS, packet, packet_size) != 0)
+    if (mpu6050_bus_read(MPU6050_INT_STATUS, packet, sizeof(packet)) != 0)
     {
         mpu6050_read_fault();
         return 1;
@@ -862,18 +791,7 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
     data->Accel.Accel_x = (int16_t)(((buf[0] << 8) | buf[1]) - s_mpu_offset.accel[0]);
     data->Accel.Accel_y = (int16_t)(((buf[2] << 8) | buf[3]) - s_mpu_offset.accel[1]);
     data->Accel.Accel_z = (int16_t)(((buf[4] << 8) | buf[5]) - s_mpu_offset.accel[2]);
-    /* 低功耗模式没有陀螺仪数据：把输出角速度清零。 */
-    if (s_mpu_period_ms == 200 || s_mpu_accel_reference != 0)
-    {
-        memset(&data->Gyro, 0, sizeof(data->Gyro));
-    }
-    /* 六轴模式：buf[8..13] 对应 0x43..0x48，跳过 buf[6..7] 的温度。 */
-    else
-    {
-        data->Gyro.Gyro_x = (int16_t)(((buf[8] << 8) | buf[9]) - s_mpu_offset.gyro[0]);
-        data->Gyro.Gyro_y = (int16_t)(((buf[10] << 8) | buf[11]) - s_mpu_offset.gyro[1]);
-        data->Gyro.Gyro_z = (int16_t)(((buf[12] << 8) | buf[13]) - s_mpu_offset.gyro[2]);
-    }
+    memset(&data->Gyro, 0, sizeof(data->Gyro));
     /* 记录最近有效帧的读取开始时刻，并刷新恢复状态机的无帧基准。 */
     mpu_sample_ms = started_ms;
     mpu_recovery.sample_ms = HAL_GetTick();

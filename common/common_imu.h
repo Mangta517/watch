@@ -55,6 +55,17 @@ extern "C"
      * 清除旧重力积分但保留已有航向；=0保留俯仰/横滚与积分，供连续采样的磁校准结束使用。 */
     void Common_IMU_ReseedYaw(uint8_t reseed_gravity);
 
+    /* OV-Watch式加速度倾斜补偿后求atan2(Hy,Hx)，按本工程同轴坐标修正投影，输出[0,360)°。
+     * 加速度以8192LSB/g输入，和磁场须同轴同向；结果枚举区分倾角、场强与水平分量，失败保留输出。 */
+    typedef enum
+    {
+        COMMON_COMPASS_OK,
+        COMMON_COMPASS_ACCEL_INVALID,
+        COMMON_COMPASS_FIELD_RANGE,
+        COMMON_COMPASS_HORIZONTAL_WEAK
+    } common_compass_result;
+    common_compass_result common_imu_compass_heading(const Accel_struct *accel, const float mag_uT[3], float *heading_deg);
+
 #ifdef __cplusplus
 }
 #endif

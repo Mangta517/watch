@@ -118,9 +118,10 @@ static uint32_t host_steps, host_wrist_sequence, host_wrist_ms;
 static uint8_t host_mag_online = 1;
 static uint8_t host_mag_calibrated;
 static float host_yaw = 725.2f;
+static float host_compass_deg = 354.8f;
 static float host_altitude = -0.5f;
 static app_mag_cal_state host_mag_cal_state;
-static app_mag_fusion_state host_mag_fusion_state = APP_MAG_FUSION_ACTIVE;
+static app_compass_state host_compass_state = APP_COMPASS_READY;
 static app_mag_persist_state host_mag_persist_state;
 static uint8_t host_light;
 static uint8_t host_lcd_sleeping, host_tp_sleeping;
@@ -529,25 +530,23 @@ uint8_t App_IMU_GetSnapshot(app_imu_struct *imu)
     imu->steps = host_steps;
     imu->wrist_raise_sequence = host_wrist_sequence;
     imu->wrist_raise_ms = host_wrist_ms;
-    imu->pitch_deg = 12.4f;
-    imu->roll_deg = -3.6f;
-    imu->yaw_deg = host_yaw;
+    imu->compass_deg = host_compass_deg;
+    imu->compass_valid = host_mag_online && host_mag_cal_state != APP_MAG_CAL_RUNNING && host_compass_state == APP_COMPASS_READY;
     imu->mag_online = host_mag_online;
-    imu->mag_fused = host_mag_online && host_mag_cal_state != APP_MAG_CAL_RUNNING;
     imu->mag_calibrated = host_mag_calibrated;
     imu->mag_cal_state = host_mag_cal_state;
     imu->mag_persist_state = host_mag_persist_state;
     if (!host_mag_online)
     {
-        imu->mag_fusion_state = APP_MAG_FUSION_NO_DATA;
+        imu->compass_state = APP_COMPASS_NO_MAG_DATA;
     }
     else if (host_mag_cal_state == APP_MAG_CAL_RUNNING)
     {
-        imu->mag_fusion_state = APP_MAG_FUSION_CALIBRATING;
+        imu->compass_state = APP_COMPASS_CALIBRATING;
     }
     else
     {
-        imu->mag_fusion_state = host_mag_fusion_state;
+        imu->compass_state = host_compass_state;
     }
     imu->mag_cal_samples = 120;
     imu->mag_cal_span_uT[0] = 80;
@@ -853,72 +852,88 @@ static lv_coord_t trend_latest(const ui_trend_struct *trend)
 
 static void compass_direction_tests(void)
 {
-    static const float yaw[] = {0.0f, -90.0f, -180.0f, 90.0f, -359.8f, 1080.0f};
+    static const float degrees[] = {0.0f, 90.0f, 180.0f, 270.0f, 359.8f, 0.0f};
     static const int16_t heading[] = {0, 90, 180, 270, 0, 0};
+    app_imu_struct imu;
     unsigned i;
-    for (i = 0; i < sizeof(yaw) / sizeof(yaw[0]); ++i)
+    for (i = 0; i < sizeof(degrees) / sizeof(degrees[0]); ++i)
     {
-        host_yaw = yaw[i];
+        host_compass_deg = degrees[i];
         s_view.motion.compass_heading = -1;
         refresh_data();
         assert(s_view.motion.compass_heading == heading[i]);
     }
     /* 359°→1°及反向都只走北点附近，不绕远路。 */
-    host_yaw = -359.0f;
+    host_compass_deg = 359.0f;
     s_view.motion.compass_heading = -1;
     refresh_data();
-    host_yaw = -1.0f;
+    host_compass_deg = 1.0f;
     advance_active(100);
     assert(s_view.motion.compass_heading == 359 || s_view.motion.compass_heading == 0);
     advance_active(1500);
     assert(s_view.motion.compass_heading == 1);
-    host_yaw = -359.0f;
+    host_compass_deg = 359.0f;
     advance_active(1600);
     assert(s_view.motion.compass_heading == 359);
 
     /* 90°目标跳变后700ms内追到2°以内，防止显示滤波重新产生长拖尾。 */
-    host_yaw = 0.0f;
+    host_compass_deg = 0.0f;
     s_view.motion.compass_heading = -1;
     refresh_data();
-    host_yaw = -90.0f;
+    host_compass_deg = 90.0f;
     advance_active(700);
     assert(s_view.motion.compass_heading >= 88 && s_view.motion.compass_heading <= 90);
 
-    host_yaw = 0.0f;
+    host_compass_deg = 0.0f;
     s_view.motion.compass_heading = -1;
     refresh_data();
-    host_yaw = -120.0f;
+    host_compass_deg = 120.0f;
     s_refresh_tick = lv_tick_get(); /* 手动刷新后对齐100ms周期，覆盖一轮完整显示步长。 */
     advance_active(110);
     assert(s_view.motion.compass_heading > 12 && s_view.motion.compass_heading <= 36);
     advance_active(900);
     assert(s_view.motion.compass_heading == 120);
-    host_yaw = -90.0f;
+    host_compass_deg = 90.0f;
     advance_active(3000);
     for (i = 0; i < 10; ++i)
     {
         if (i % 2 == 0)
         {
-            host_yaw = -90.4f;
+            host_compass_deg = 90.4f;
         }
         else
         {
-            host_yaw = -89.6f;
+            host_compass_deg = 89.6f;
         }
         advance_active(100);
         assert(s_view.motion.compass_heading == 90);
     }
+    /* 直接指南针独立于融合yaw，即使yaw无效也继续显示自己的方位角。 */
     host_yaw = NAN;
+    host_compass_deg = 90.0f;
+    s_view.motion.compass_heading = -1;
+    refresh_data();
+    assert(s_view.motion.compass_heading == 90);
+    host_yaw = 725.2f;
+    host_compass_deg = NAN;
     refresh_data();
     assert(s_view.motion.compass_heading == -1 && strcmp(lv_label_get_text(s_view.motion.compass_value), "--") == 0);
-    host_yaw = 725.2f;
+    host_compass_deg = 354.8f;
     host_online = 0;
     refresh_data();
-    assert(s_view.motion.compass_heading == -1);
+    assert(s_view.motion.compass_heading == 355);
     host_online = 1;
     refresh_data();
     assert(s_view.motion.compass_heading == 355);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_value), "355\xC2\xB0 N") == 0);
+    App_IMU_GetSnapshot(&imu);
+    imu.compass_valid = 0;
+    compass_update(&imu);
+    assert(s_view.motion.compass_heading == -1);
+    assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "NO HEADING") == 0);
+    imu.compass_valid = 1;
+    compass_update(&imu);
+    assert(s_view.motion.compass_heading == 355);
 }
 static void compass_redraw_tests(void)
 {
@@ -937,7 +952,8 @@ static void compass_redraw_tests(void)
     for (i = 0; i < sizeof(headings) / sizeof(headings[0]); ++i)
     {
         online = headings[i] >= 0;
-        imu.yaw_deg = -(float)headings[i];
+        imu.compass_valid = online;
+        imu.compass_deg = (float)headings[i];
         s_compass_display_deg = (float)headings[i];
         /* 第二个45度保持指针位置，只切换未校准/已校准颜色。 */
         if (i == 16)
@@ -945,7 +961,7 @@ static void compass_redraw_tests(void)
             imu.mag_calibrated = 1;
         }
         pixels = host_flush_pixels;
-        compass_update(&imu, online);
+        compass_update(&imu);
         lv_refr_now(NULL);
         assert(host_flush_pixels > pixels && host_flush_pixels - pixels < lv_area_get_size(&card));
         memcpy(partial_frame, framebuffer, sizeof(partial_frame));
@@ -955,7 +971,7 @@ static void compass_redraw_tests(void)
     }
     App_IMU_GetSnapshot(&imu);
     s_compass_display_deg = display_deg;
-    compass_update(&imu, 1);
+    compass_update(&imu);
     lv_refr_now(NULL);
     puts("PASS: compass partial redraw matches full-card pixels across quadrants, validity and color changes, with fewer transferred pixels.");
 }
@@ -1705,7 +1721,7 @@ static void page_lifecycle_tests(void)
             }
             if (pages[index] != PAGE_MOTION)
             {
-                assert(s_view.motion.compass == NULL && s_view.motion.angles[0] == NULL);
+                assert(s_view.motion.compass == NULL && s_view.motion.mag_values[0] == NULL);
             }
             advance(200);
             assert(s_transition == 0 && !lv_obj_is_valid(old_screen));
@@ -2005,7 +2021,7 @@ int main(int argc, char **argv)
     drag(180, 140, -120, 0);
     assert(s_page == PAGE_SETTINGS && s_history_count == 1);
     assert(lv_obj_get_child_cnt(s_body) == 8);
-    assert(!s_view.display.brightness && !s_view.motion.angles[0] && !s_view.baro.pressure && !s_view.baro.altitude && !s_view.heart.card && !s_view.climate.card);
+    assert(!s_view.display.brightness && !s_view.motion.mag_values[0] && !s_view.baro.pressure && !s_view.baro.altitude && !s_view.heart.card && !s_view.climate.card);
     open_feature(PAGE_HEART);
     assert_footer_dots(0);
     assert(strcmp(lv_label_get_text(s_view.battery.label), "~50%") == 0);
@@ -2277,8 +2293,6 @@ int main(int argc, char **argv)
     open_feature(PAGE_MOTION);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
     advance(30);
-    assert(strcmp(lv_label_get_text(s_view.motion.angles[2]), "5.2") == 0);
-    assert(strcmp(lv_label_get_text(s_view.motion.yaw_source), "MAG UNCAL / calibrate first") == 0);
     assert(strcmp(lv_label_get_text(s_view.motion.mag_values[1]), "-14.2") == 0);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "UNCALIBRATED") == 0);
     compass_direction_tests();
@@ -2302,7 +2316,6 @@ int main(int argc, char **argv)
     }
     assert(host_mag_cal_state == APP_MAG_CAL_RUNNING);
     assert(strcmp(lv_label_get_text(s_view.motion.cal_label), "FINISH CALIBRATION") == 0);
-    assert(strcmp(lv_label_get_text(s_view.motion.yaw_source), "GYRO ONLY / CALIBRATING") == 0);
     assert(strstr(lv_label_get_text(s_view.motion.cal_status), "COLLECTING: 120") != NULL);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "CALIBRATING") == 0);
     screenshot("motion_calibrating");
@@ -2312,7 +2325,6 @@ int main(int argc, char **argv)
         tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
     }
     assert(host_mag_calibrated);
-    assert(strcmp(lv_label_get_text(s_view.motion.yaw_source), "MAG NORTH / fused yaw") == 0);
     assert(strcmp(lv_label_get_text(s_view.motion.mag_status), "CAL OK / MAG ONLINE") == 0);
     assert(strstr(lv_label_get_text(s_view.motion.cal_status), "CAL SAVED: 120") != NULL);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "MAG NORTH") == 0);
@@ -2378,9 +2390,8 @@ int main(int argc, char **argv)
     host_mag_online = 0;
     advance(120);
     assert(strcmp(lv_label_get_text(s_view.motion.mag_values[0]), "--") == 0);
-    assert(strcmp(lv_label_get_text(s_view.motion.angles[2]), "5.2") == 0);
-    assert(strcmp(lv_label_get_text(s_view.motion.yaw_source), "GYRO ONLY / MAG NO DATA") == 0);
-    assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "GYRO ONLY") == 0);
+    assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "NO MAG DATA") == 0);
+    assert(s_view.motion.compass_heading == -1);
     assert(s_compass_color == UI_MUTED);
     host_mag_online = 1;
     advance(120);
@@ -2395,7 +2406,6 @@ int main(int argc, char **argv)
     advance(120);
     assert(strcmp(lv_label_get_text(s_view.motion.mag_status), "CAL OK / SAVE FAILED") == 0);
     assert(strstr(lv_label_get_text(s_view.motion.cal_status), "RAM only") != NULL);
-    assert(strcmp(lv_label_get_text(s_view.motion.yaw_source), "MAG NORTH / fused yaw") == 0);
     screenshot("motion_save_failed");
     host_mag_cal_state = APP_MAG_CAL_NONE;
     host_mag_persist_state = APP_MAG_PERSIST_LOAD_FAILED;
@@ -2404,17 +2414,17 @@ int main(int argc, char **argv)
     host_mag_cal_state = APP_MAG_CAL_DONE;
     host_mag_persist_state = APP_MAG_PERSIST_SAVED;
     advance(120);
-    host_mag_fusion_state = APP_MAG_FUSION_FIELD_RANGE;
+    host_compass_state = APP_COMPASS_FIELD_RANGE;
     advance(120);
-    assert(strcmp(lv_label_get_text(s_view.motion.yaw_source), "GYRO ONLY / FIELD RANGE") == 0);
-    host_mag_fusion_state = APP_MAG_FUSION_HORIZONTAL_WEAK;
+    assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "FIELD RANGE") == 0);
+    host_compass_state = APP_COMPASS_HORIZONTAL_WEAK;
     advance(120);
-    assert(strcmp(lv_label_get_text(s_view.motion.yaw_source), "GYRO ONLY / HORIZ <5uT") == 0);
+    assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "HORIZ <5uT") == 0);
     host_mag_cal_state = APP_MAG_CAL_FAILED;
     advance(120);
     assert(strstr(lv_label_get_text(s_view.motion.cal_status), "CAL FAILED: 120") != NULL);
     host_mag_cal_state = APP_MAG_CAL_DONE;
-    host_mag_fusion_state = APP_MAG_FUSION_ACTIVE;
+    host_compass_state = APP_COMPASS_READY;
     advance(120);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
     advance(30);
@@ -2423,8 +2433,8 @@ int main(int argc, char **argv)
     screenshot("motion_scrolled");
     host_online = 0;
     advance(120);
-    assert(strcmp(lv_label_get_text(s_view.motion.angles[0]), "--") == 0);
-    assert(strcmp(lv_label_get_text(s_view.motion.status), "NO DATA") == 0);
+    assert(s_view.motion.compass_heading >= 0);
+    assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "MAG NORTH") == 0);
     host_online = 1;
     advance(120);
     key_back();

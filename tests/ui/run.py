@@ -94,7 +94,7 @@ make_preview(["heart", "motion", "environment", "aht21", "phone_weather", "bluet
              ["HEART RATE", "MOTION", "BAROMETER", "CLIMATE", "PHONE WEATHER", "BLUETOOTH", "DISPLAY", "SPORT MODE"],
              4, "watch-ui-details.png")
 make_preview(["altitude_history", "heart_history", "compass"],
-             ["ALTITUDE HISTORY", "HEART RATE HISTORY", "FUSED COMPASS / +X AXIS"],
+             ["ALTITUDE HISTORY", "HEART RATE HISTORY", "OV-WATCH COMPASS / +X AXIS"],
              3, "sensor-visualization-preview.png")
 make_preview([f"weather_icon_{index}" for index in range(9)],
              ["CLEAR", "MAINLY CLEAR", "PARTLY CLOUDY", "FOG", "DRIZZLE", "RAIN", "SNOW", "THUNDERSTORM", "UNKNOWN"],

@@ -6,6 +6,7 @@
 #include <string.h>
 
 static uint32_t rtc_seconds;
+static RTC_DateTypeDef calendar = {.Year = 0, .Month = 1, .Date = 1};
 RTC_TypeDef host_rtc;
 Host_Cycle_Type host_cycles;
 uint32_t SystemCoreClock = 84000000;
@@ -204,6 +205,7 @@ HAL_StatusTypeDef HAL_RTC_SetDate(RTC_HandleTypeDef *rtc, RTC_DateTypeDef *date,
 {
     assert(rtc->Instance == RTC && format == RTC_FORMAT_BIN);
     assert(date->Year == 0 && date->Month == 1 && date->Date == 1 && date->WeekDay == RTC_WEEKDAY_SATURDAY);
+    calendar = *date;
     ++date_calls;
     return HAL_OK;
 }
@@ -230,7 +232,7 @@ HAL_StatusTypeDef HAL_RTC_GetDate(RTC_HandleTypeDef *rtc, RTC_DateTypeDef *date,
 {
     assert(rtc->Instance == RTC && format == RTC_FORMAT_BIN && shadow_locked);
     shadow_locked = 0;
-    memset(date, 0, sizeof(*date));
+    *date = calendar;
     return HAL_OK;
 }
 uint32_t HAL_RTCEx_BKUPRead(RTC_HandleTypeDef *rtc, uint32_t reg)
@@ -420,6 +422,32 @@ int main(int argc, char **argv)
     rtc_seconds += 61;
     assert(watch_rtc_get_time(&time) == HAL_OK && time.minutes == 36 && time.seconds == 1);
     assert(watch_rtc_get_time(&time) == HAL_OK); /* 连续读取验证GetDate已释放影子锁存 */
+    {
+        uint16_t day = 0;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 1);
+        calendar.Month = 2;
+        calendar.Date = 29;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 60);
+        calendar.Month = 3;
+        calendar.Date = 1;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 61);
+        calendar.Year = 1;
+        calendar.Month = 1;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 367);
+        calendar.Month = 2;
+        calendar.Date = 29;
+        assert(watch_rtc_get_day_key(&day) == 1 && day == 367);
+        calendar.Year = 99;
+        calendar.Month = 12;
+        calendar.Date = 31;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 36525);
+        lse_ready = 0;
+        assert(watch_rtc_get_day_key(&day) == 1);
+        lse_ready = 1;
+        calendar.Year = 0;
+        calendar.Month = calendar.Date = 1;
+        puts("PASS: day keys use a coherent RTC date/time, include leap days and reject invalid dates or lost LSE.");
+    }
     calls = set_calls;
     seconds = rtc_seconds;
     host_rtc.PRER = (127U << 16) | 255U; /* 模拟旧固件已经初始化过的备份域。 */

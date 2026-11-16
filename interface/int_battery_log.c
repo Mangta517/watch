@@ -119,7 +119,7 @@ void int_battery_log_read(uint32_t slot, uint8_t record[BATTERY_LOG_RECORD_BYTES
     /* 逐字节读取的循环下标。 */
     uint32_t i;
     /* 槽号超出容量：没有对应记录，用0xFF填充表示未写入的擦除态。 */
-    if (slot >= BATTERY_LOG_CAPACITY)
+    if (slot >= BATTERY_LOG_LEGACY_CAPACITY)
     {
         memset(record, 0xFF, BATTERY_LOG_RECORD_BYTES);
         return;
@@ -131,7 +131,7 @@ void int_battery_log_read(uint32_t slot, uint8_t record[BATTERY_LOG_RECORD_BYTES
     }
 }
 
-uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RECORD_BYTES])
+static uint8_t battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RECORD_BYTES], uint8_t resume)
 {
     /* 暂存写入前读到的槽内容，也用于最后读回校验。 */
     uint8_t old[BATTERY_LOG_RECORD_BYTES];
@@ -149,16 +149,17 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
     HAL_StatusTypeDef result;
 
     /* 槽号越界直接判为参数错误。 */
-    if (slot >= BATTERY_LOG_CAPACITY)
+    if (slot >= BATTERY_LOG_LEGACY_CAPACITY)
     {
         return 1;
     }
     /* 先读该槽当前内容，用于判断是否仍为擦除态。 */
     int_battery_log_read(slot, old);
-    /* 任一字节不是0xFF说明该槽已写过，拒绝覆盖并返回失败。 */
-    for (i = 0; i < sizeof(old); ++i)
+    /* 普通记录只写空槽，布局标记续写仅允许跳过完全相同的已提交半字。 */
+    for (i = 0; i < sizeof(old); i += 2)
     {
-        if (old[i] != 0xFF)
+        if ((old[i] != 0xFF || old[i + 1] != 0xFF) &&
+            (resume == 0 || old[i] != record[i] || old[i + 1] != record[i + 1]))
         {
             return 1;
         }
@@ -174,6 +175,10 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
         /* 每两个字节组成一个半字写入，因此步长为2。 */
         for (i = 0; i < BATTERY_LOG_RECORD_BYTES; i += 2)
         {
+            if (resume != 0 && old[i] == record[i] && old[i + 1] == record[i + 1])
+            {
+                continue;
+            }
             /* 低字节在前、高字节在后拼成STM32小端半字。 */
             value = (uint16_t)((uint16_t)record[i] | ((uint16_t)record[i + 1] << 8));
             /* 保存当前中断屏蔽状态。 */
@@ -222,6 +227,16 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
     }
     /* 对外统一为0成功、1失败。 */
     return result != HAL_OK;
+}
+
+uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RECORD_BYTES])
+{
+    return battery_log_write(slot, record, 0);
+}
+
+uint8_t int_battery_log_resume_step_header(const uint8_t record[BATTERY_LOG_RECORD_BYTES])
+{
+    return battery_log_write(STEP_LOG_FIRST_SLOT, record, 1);
 }
 
 uint8_t int_battery_log_erase(void)

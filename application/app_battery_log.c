@@ -25,6 +25,15 @@ static struct
     uint8_t reset_written;
 } s_log;
 
+/* 与电压日志共用同一把锁，清日志前取得的是sensor最近发布的步数。 */
+static struct
+{
+    uint32_t steps, saved_steps, next_slot, saved_ms;
+    uint16_t day, saved_day, attempted_day;
+    uint8_t available, header_written, have_saved, attempted;
+} s_steps;
+static const uint8_t s_steps_header[8] = {0x53, 0x54, 0x50, 0x31, 0x16, 0x11, 0xE0, 0x7A};
+
 #define BATTERY_LOG_RESET_COMMIT 0x52535431
 
 static uint8_t battery_log_reset_decode(uint32_t slot, uint32_t session, app_reset_info_struct *info);
@@ -58,6 +67,138 @@ static uint16_t battery_log_crc(const uint8_t *data, uint32_t session)
         }
     }
     return crc; /* 返回本记录的16位CRC值。 */
+}
+
+/* 独立格式种子，CRC最后写入，避免将未提交槽恢复为有效步数。 */
+static uint16_t battery_log_steps_crc(const uint8_t data[8])
+{
+    uint16_t crc = battery_log_crc(data, 0x53545031) ^ 0xA561;
+    if (crc == UINT16_MAX)
+    {
+        crc = 0;
+    }
+    return crc;
+}
+
+static void battery_log_steps_scan(void)
+{
+    uint8_t data[8], occupied = 0, partial_header = 1, tail_occupied = 0;
+    uint32_t slot, i;
+    uint16_t crc;
+    memset(&s_steps, 0, sizeof(s_steps));
+    s_steps.next_slot = STEP_LOG_FIRST_SLOT + 1;
+    int_battery_log_read(STEP_LOG_FIRST_SLOT, data);
+    s_steps.header_written = memcmp(data, s_steps_header, sizeof(data)) == 0;
+    for (i = 0; i < sizeof(data); i += 2)
+    {
+        if ((data[i] != 0xFF || data[i + 1] != 0xFF) &&
+            (data[i] != s_steps_header[i] || data[i + 1] != s_steps_header[i + 1]))
+        {
+            partial_header = 0;
+        }
+    }
+    for (slot = STEP_LOG_FIRST_SLOT; slot < BATTERY_LOG_LEGACY_CAPACITY; ++slot)
+    {
+        int_battery_log_read(slot, data);
+        for (i = 0; i < sizeof(data); ++i)
+        {
+            if (data[i] != 0xFF)
+            {
+                occupied = 1;
+                s_steps.next_slot = slot + 1;
+                if (slot != STEP_LOG_FIRST_SLOT)
+                {
+                    tail_occupied = 1;
+                }
+                break;
+            }
+        }
+        if (slot == STEP_LOG_FIRST_SLOT || s_steps.header_written == 0)
+        {
+            continue;
+        }
+        crc = (uint16_t)((uint16_t)data[6] | ((uint16_t)data[7] << 8));
+        if (crc != UINT16_MAX && crc == battery_log_steps_crc(data))
+        {
+            s_steps.steps = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+            s_steps.day = (uint16_t)((uint16_t)data[4] | ((uint16_t)data[5] << 8));
+            s_steps.have_saved = 1;
+        }
+    }
+    s_steps.available = s_steps.header_written != 0 || occupied == 0 || (partial_header != 0 && tail_occupied == 0);
+    s_steps.saved_day = s_steps.day;
+    s_steps.saved_steps = s_steps.steps;
+    s_log.status.capacity = BATTERY_LOG_CAPACITY;
+    if (s_steps.available == 0)
+    {
+        /* 旧电压日志占用了尾部，保留全区供导出，显式清理后才启用新布局。 */
+        s_log.status.capacity = BATTERY_LOG_LEGACY_CAPACITY;
+    }
+}
+
+static uint8_t battery_log_steps_append(void)
+{
+    uint8_t data[8], i;
+    uint16_t crc;
+    if (s_steps.available == 0 || s_steps.next_slot >= BATTERY_LOG_LEGACY_CAPACITY)
+    {
+        return 1;
+    }
+    if (s_steps.header_written == 0)
+    {
+        if (int_battery_log_resume_step_header(s_steps_header) != 0)
+        {
+            return 1;
+        }
+        s_steps.header_written = 1;
+    }
+    for (i = 0; i < 4; ++i)
+    {
+        data[i] = (uint8_t)(s_steps.steps >> (8 * i));
+    }
+    data[4] = (uint8_t)s_steps.day;
+    data[5] = (uint8_t)(s_steps.day >> 8);
+    crc = battery_log_steps_crc(data);
+    data[6] = (uint8_t)crc;
+    data[7] = (uint8_t)(crc >> 8);
+    /* 失败槽也消费，掉电或欠压留下的半条记录不重复编程。 */
+    if (int_battery_log_write(s_steps.next_slot++, data) != 0)
+    {
+        return 1;
+    }
+    s_steps.saved_day = s_steps.day;
+    s_steps.saved_steps = s_steps.steps;
+    s_steps.have_saved = 1;
+    return 0;
+}
+
+void app_battery_log_steps_load(uint16_t *day, uint32_t *steps)
+{
+    *day = s_steps.day;
+    *steps = s_steps.steps;
+}
+
+void app_battery_log_steps_update(uint16_t day, uint32_t steps, uint32_t now_ms)
+{
+    uint8_t changed_day, due;
+    if (s_log_mutex == NULL || xSemaphoreTake(s_log_mutex, 0) == 0)
+    {
+        return;
+    }
+    s_steps.day = day;
+    s_steps.steps = steps;
+    changed_day = day != s_steps.saved_day && (s_steps.have_saved != 0 || steps != 0);
+    due = steps >= s_steps.saved_steps && steps - s_steps.saved_steps >= 100 &&
+          (uint32_t)(now_ms - s_steps.saved_ms) >= 300000;
+    if ((changed_day != 0 || due != 0) &&
+        (s_steps.attempted == 0 || s_steps.attempted_day != day || (uint32_t)(now_ms - s_steps.saved_ms) >= 300000))
+    {
+        s_steps.attempted = 1;
+        s_steps.attempted_day = day;
+        s_steps.saved_ms = now_ms;
+        battery_log_steps_append();
+    }
+    xSemaphoreGive(s_log_mutex);
 }
 
 /* 解码指定槽；CRC与session不符(坏槽/串号)返回1，0=已填入record。 */
@@ -96,6 +237,7 @@ void app_battery_log_init(void)
     /* 锁创建失败则把状态置为ERROR，后续写日志入口都会因无锁而不再推进。 */
     if (s_log_mutex == NULL)
     {
+        s_log.status.capacity = BATTERY_LOG_CAPACITY;
         s_log.status.state = APP_BATTERY_LOG_ERROR;
         return;
     }
@@ -107,8 +249,9 @@ void app_battery_log_init(void)
     /* 清空上次运行留下的状态/session/游标，作为本次扫描的起点。 */
     memset(&s_log, 0, sizeof(s_log));
     s_log.status.state = APP_BATTERY_LOG_READY;
-    /* 逐槽扫描整个日志区，slot同时是槽号。 */
-    for (slot = 0; slot < BATTERY_LOG_CAPACITY; ++slot)
+    battery_log_steps_scan();
+    /* 逐槽扫描电压日志区，slot同时是槽号。 */
+    for (slot = 0; slot < s_log.status.capacity; ++slot)
     {
         int_battery_log_read(slot, data); /* 读出该槽8字节原始内容。 */
         occupied = 0;
@@ -139,7 +282,7 @@ void app_battery_log_init(void)
             else if (s_log.session != 0 && record.voltage_mv == APP_BATTERY_LOG_RESET_TAG)
             {
                 app_reset_info_struct info;
-                if (slot + APP_BATTERY_LOG_RESET_SLOTS <= BATTERY_LOG_CAPACITY &&
+                if (slot + APP_BATTERY_LOG_RESET_SLOTS <= s_log.status.capacity &&
                     battery_log_reset_decode(slot, s_log.session, &info) == 0)
                 {
                     ++s_log.status.resets;
@@ -153,7 +296,7 @@ void app_battery_log_init(void)
         s_log.status.state = APP_BATTERY_LOG_NEED_CLEAR;
     }
     /* 已无空槽则标记FULL，后续追加会被拒绝。 */
-    else if (s_log.status.slots == BATTERY_LOG_CAPACITY)
+    else if (s_log.status.slots == s_log.status.capacity)
     {
         s_log.status.state = APP_BATTERY_LOG_FULL;
     }
@@ -174,7 +317,7 @@ static uint8_t battery_log_append(uint32_t seconds, uint16_t voltage_mv)
     uint32_t i;
     uint16_t crc;
     /* 已无空槽时置FULL并返回失败，不再尝试写入。 */
-    if (s_log.status.slots >= BATTERY_LOG_CAPACITY)
+    if (s_log.status.slots >= s_log.status.capacity)
     {
         s_log.status.state = APP_BATTERY_LOG_FULL;
         return 1;
@@ -199,7 +342,7 @@ static uint8_t battery_log_append(uint32_t seconds, uint16_t voltage_mv)
     }
     ++s_log.status.slots; /* 写入成功，占用槽数加一，即指向下一空槽。 */
     /* 刚好写满时置FULL，后续追加直接拒绝。 */
-    if (s_log.status.slots == BATTERY_LOG_CAPACITY)
+    if (s_log.status.slots == s_log.status.capacity)
     {
         s_log.status.state = APP_BATTERY_LOG_FULL;
     }
@@ -213,7 +356,7 @@ static uint8_t battery_log_reset_decode(uint32_t slot, uint32_t session, app_res
     uint32_t i;
     app_battery_log_record_struct record;
     /* session为0或剩余槽不足一整组17槽时，不可能有完整现场，直接返回失败。 */
-    if (session == 0 || slot > BATTERY_LOG_CAPACITY - APP_BATTERY_LOG_RESET_SLOTS)
+    if (session == 0 || slot > s_log.status.capacity - APP_BATTERY_LOG_RESET_SLOTS)
     {
         return 1;
     }
@@ -259,7 +402,7 @@ static void battery_log_save_reset(void)
         ++needed;
     }
     /* 剩余空槽不够(session标记+17槽现场)时置FULL，整组都不写，避免半组残留。 */
-    if (BATTERY_LOG_CAPACITY - s_log.status.slots < needed)
+    if (s_log.status.capacity - s_log.status.slots < needed)
     {
         s_log.status.state = APP_BATTERY_LOG_FULL;
         return;
@@ -409,6 +552,16 @@ void app_battery_log_clear_and_reset(void)
     if (int_battery_log_erase() != 0)
     {
         app_reset_capture_stop(APP_RESET_ERROR_HANDLER, 0, 0x53415245); /* task_tag小端字节为ERAS。 */
+    }
+    else
+    {
+        s_steps.available = 1;
+        s_steps.header_written = 0;
+        s_steps.next_slot = STEP_LOG_FIRST_SLOT + 1;
+        if (battery_log_steps_append() != 0)
+        {
+            app_reset_capture_stop(APP_RESET_ERROR_HANDLER, 0, 0x53505453);
+        }
     }
     NVIC_SystemReset(); /* 擦除后立即复位，由重启后的扫描重新建立日志状态。 */
 }

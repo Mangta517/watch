@@ -344,6 +344,45 @@ uint8_t watch_rtc_is_synced(void)
     return rtc_ready && HAL_RTCEx_BKUPRead(&watch_rtc, RTC_BKP_DR0) == WATCH_RTC_SYNCED;
 }
 
+uint8_t watch_rtc_get_day_key(uint16_t *day_key)
+{
+    static const uint16_t month_days[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365};
+    RTC_TimeTypeDef time = {0};
+    RTC_DateTypeDef date = {0};
+    uint16_t days, month_length;
+    uint8_t leap;
+    if (day_key == NULL || watch_rtc_is_synced() == 0 || __HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) == 0)
+    {
+        return 1;
+    }
+    if (HAL_RTC_GetTime(&watch_rtc, &time, RTC_FORMAT_BIN) != HAL_OK ||
+        HAL_RTC_GetDate(&watch_rtc, &date, RTC_FORMAT_BIN) != HAL_OK || __HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) == 0)
+    {
+        return 1;
+    }
+    if (date.Year > 99 || date.Month < 1 || date.Month > 12 || time.Hours > 23 || time.Minutes > 59 || time.Seconds > 59)
+    {
+        return 1;
+    }
+    leap = date.Year % 4 == 0; /* RTC覆盖2000..2099，2000年为闰年。 */
+    month_length = month_days[date.Month] - month_days[date.Month - 1];
+    if (date.Month == 2)
+    {
+        month_length += leap;
+    }
+    if (date.Date < 1 || date.Date > month_length)
+    {
+        return 1;
+    }
+    days = date.Year * 365 + (date.Year + 3) / 4 + month_days[date.Month - 1] + date.Date;
+    if (date.Month > 2)
+    {
+        days += leap;
+    }
+    *day_key = days;
+    return 0;
+}
+
 void watch_rtc_get_status(watch_rtc_status_struct *status)
 {
     /* 时间字段先清零，读取失败时保持 0 而不是残留随机值 */

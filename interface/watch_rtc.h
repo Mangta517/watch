@@ -32,6 +32,8 @@ HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time);
 /* INITF/影子同步各按DWT限1ms并用次数兜底；0成功，1未配置、时间非法或RTC故障，故障后可重新校时。 */
 uint8_t watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t seconds);
 uint8_t watch_rtc_is_synced(void);
+/* 仅LVGL调用；同步读取时间/日期，返回自2000-01-01起的天数+1。0成功，1未校时/读取失败。 */
+uint8_t watch_rtc_get_day_key(uint16_t *day_key);
 /* LVGL上下文只读快照；不初始化RTC、不改备份标记或时间。 */
 void watch_rtc_get_status(watch_rtc_status_struct *status);
 /* 返回本秒已过的亚秒计数(0~32767)；未就绪返回UINT32_MAX。由屏蔽中断的IDLE休眠流程读取。 */

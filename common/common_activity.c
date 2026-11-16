@@ -8,7 +8,7 @@ void common_activity_update(common_activity_struct *state, float ax, float ay, f
     if (state->have_sample != 0)
     {
         gap = sample_ms - state->sample_ms;
-        if (gap < 200)
+        if (gap < 140)
         {
             return;
         }
@@ -22,52 +22,56 @@ void common_activity_update(common_activity_struct *state, float ax, float ay, f
     }
     magnitude = sqrtf(ax * ax + ay * ay + az * az);
     state->sample_ms = sample_ms;
-    if (!(magnitude >= 0.5f && magnitude <= 2.0f))
+    if (!(magnitude >= 0.45f && magnitude <= 2.2f))
     {
-        /* 幅值超出0.5~2.0g或NaN，丢弃本帧并清除连续动作。 */
-        state->have_sample = 0;
-        state->peak_pending = state->walking_run = 0;
+        /* 单次冲击不拆散已确认的步态；正常帧仍按实际间隔处理峰值超时。 */
         state->down_frames = state->view_frames = state->wrist_armed = 0;
         return;
     }
     if (state->have_sample == 0)
     {
+        if (magnitude < 0.8f || magnitude > 1.2f)
+        {
+            return;
+        }
         state->gravity_g = magnitude;
         state->have_sample = 1;
         return;
     }
     /* 动态分量 = 当前幅值 - 重力基线，用于步态峰值/谷值判定。 */
     dynamic = magnitude - state->gravity_g;
-    /* 一阶低通更新重力基线(系数0.125)，缓慢跟随佩戴姿态变化。 */
-    state->gravity_g += dynamic * 0.125f;
+    /* 一阶低通更新重力基线(系数0.0625)，缓慢跟随佩戴姿态变化并减小对紧邻波谷的自吞噬。 */
+    state->gravity_g += dynamic * 0.0625f;
     /* 正峰后必须出现负谷；连续3个有效步态后回补，过滤单次抬手冲击。
      * shortcut: 5Hz针对日常步行，快速跑步可能混叠漏计，需提高采样率后再扩展。 */
     if (state->peak_pending != 0 && (uint32_t)(sample_ms - state->peak_ms) > 1000)
     {
-        /* 峰值挂起超过1s仍未见负谷：视为无效步态，清挂起与连续计数。 */
+        /* 峰值挂起超过1s仍未见负谷：只清本次挂起，连续步态超时由步间interval统一判定。 */
         state->peak_pending = 0;
-        state->walking_run = 0;
     }
-    if (state->peak_pending == 0 && dynamic >= 0.12f)
+    if (dynamic >= 0.065f)
     {
-        /* 动态分量达到正峰门限：记录峰值时刻，等待随后的负谷确认。 */
-        state->peak_pending = 1;
-        state->peak_ms = sample_ms;
+        /* 首次达到正峰门限，或前一步浅谷漏检后跨步迎来新正峰：记录/刷新峰值时刻。 */
+        if (state->peak_pending == 0 || (uint32_t)(sample_ms - state->peak_ms) >= 300)
+        {
+            state->peak_pending = 1;
+            state->peak_ms = sample_ms;
+        }
     }
-    else if (state->peak_pending != 0 && dynamic <= -0.04f)
+    else if (state->peak_pending != 0 && dynamic <= -0.025f)
     {
         /* 负谷出现：一次完整步态成立，计算本次与上一步的间隔。 */
         state->peak_pending = 0;
         interval = state->peak_ms - state->last_step_ms;
-        if (state->walking_run == 0 || interval > 2000)
+        if (state->walking_run == 0 || interval > 2400)
         {
-            /* 首个步态或间隔超过2s：重新开始连续步态计数，本次不计步。 */
+            /* 首个步态或间隔超过2.4s：重新开始连续步态计数，本次不计步。 */
             state->walking_run = 1;
             state->last_step_ms = state->peak_ms;
         }
-        else if (interval >= 300)
+        else if (interval >= 280)
         {
-            /* 步态间隔不小于300ms：更新上一步时刻，并按连续状态计步。 */
+            /* 步态间隔不小于280ms：更新上一步时刻，并按连续状态计步。 */
             state->last_step_ms = state->peak_ms;
             if (state->walking_run < 3)
             {

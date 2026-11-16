@@ -137,11 +137,8 @@ typedef struct
     } watch;
     struct
     {
-        lv_obj_t *status;
-        lv_obj_t *angles[3];
         lv_obj_t *mag_values[3];
         lv_obj_t *mag_status;
-        lv_obj_t *yaw_source;
         lv_obj_t *cal_label;
         lv_obj_t *cal_status;
         lv_obj_t *compass;
@@ -1519,13 +1516,13 @@ static void compass_invalidate_needle(int16_t previous_heading, int16_t heading)
     lv_obj_invalidate_area(s_view.motion.compass, &area);
 }
 
-static void compass_update(const app_imu_struct *imu, uint8_t online)
+static void compass_update(const app_imu_struct *imu)
 {
     /* 8个45度扇区对应的方位缩写，按顺时针排列。 */
     static const char *const directions[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
     /* 本帧最终显示的整数航向，-1表示无有效航向。 */
     int16_t heading = -1;
-    /* 指针颜色，默认灰色表示仅陀螺。 */
+    /* 指针颜色，默认灰色表示无有效直接磁方位角。 */
     uint32_t color = UI_MUTED;
     /* 状态标签颜色，默认灰色。 */
     uint32_t status_color = UI_MUTED;
@@ -1535,11 +1532,10 @@ static void compass_update(const app_imu_struct *imu, uint8_t online)
     uint32_t elapsed = LV_MIN((uint32_t)(now - s_view.motion.compass_tick), UI_REFRESH_MS);
     /* 目标角度、最短角差、本轮步长、步长限幅。 */
     float degrees, delta, step, limit;
-    /* 在线且yaw是有限数时才更新航向。 */
-    if (online && isfinite(imu->yaw_deg))
+    /* 使用sensor发布的OV-Watch直接方位角，UI只做显示平滑。 */
+    if (imu->compass_valid && isfinite(imu->compass_deg))
     {
-        /* 世界+Z向上：右手yaw取反得到顺时针磁航向，参考方向为MPU的+X轴。 */
-        degrees = fmodf(-imu->yaw_deg, 360.0f);
+        degrees = fmodf(imu->compass_deg, 360.0f);
         /* fmodf可能得到负数，加360归一化到[0,360)。 */
         if (degrees < 0.0f)
         {
@@ -1567,44 +1563,45 @@ static void compass_update(const app_imu_struct *imu, uint8_t online)
         heading = (int16_t)(s_compass_display_deg + 0.5f) % 360;
         /* 显示三位角度加度符号，扇区下标按(heading+22)/45取整再模8。 */
         ui_set_label_text_fmt(s_view.motion.compass_value, "%03d\xC2\xB0 %s", (int)heading, directions[((heading + 22) / 45) % 8]);
-        /* 磁融合确实在参与姿态解算时才讨论磁北。 */
-        if (imu->mag_fused && imu->mag_fusion_state == APP_MAG_FUSION_ACTIVE)
+        if (imu->mag_calibrated)
         {
-            if (imu->mag_calibrated)
-            {
-                /* 已校准：指针红色，状态文字绿色MAG NORTH。 */
-                color = UI_RED;
-                status_color = UI_GREEN;
-                ui_set_label_text(s_view.motion.compass_status, "MAG NORTH");
-            }
-            else
-            {
-                /* 未校准：指针和状态都用橙色提示UNCALIBRATED。 */
-                color = UI_ORANGE;
-                status_color = UI_ORANGE;
-                ui_set_label_text(s_view.motion.compass_status, "UNCALIBRATED");
-            }
+            color = UI_RED;
+            status_color = UI_GREEN;
+            ui_set_label_text(s_view.motion.compass_status, "MAG NORTH");
         }
         else
         {
-            /* 没有磁融合时，若正在校准则提示CALIBRATING，否则只是陀螺航向。 */
-            if (imu->mag_cal_state == APP_MAG_CAL_RUNNING)
-            {
-                status_color = UI_ORANGE;
-                ui_set_label_text(s_view.motion.compass_status, "CALIBRATING");
-            }
-            else
-            {
-                ui_set_label_text(s_view.motion.compass_status, "GYRO ONLY");
-            }
+            color = UI_ORANGE;
+            status_color = UI_ORANGE;
+            ui_set_label_text(s_view.motion.compass_status, "UNCALIBRATED");
         }
     }
     else
     {
-        /* 离线或yaw无效：数值和状态都显示占位，状态用红色。 */
+        /* 直接指南针无效时隐藏数值与指针，并显示当前原因。 */
         ui_set_label_text(s_view.motion.compass_value, "--");
-        ui_set_label_text(s_view.motion.compass_status, "NO IMU DATA");
         status_color = UI_RED;
+        if (imu->mag_cal_state == APP_MAG_CAL_RUNNING)
+        {
+            status_color = UI_ORANGE;
+            ui_set_label_text(s_view.motion.compass_status, "CALIBRATING");
+        }
+        else if (!imu->mag_online)
+        {
+            ui_set_label_text(s_view.motion.compass_status, "NO MAG DATA");
+        }
+        else if (imu->compass_state == APP_COMPASS_FIELD_RANGE)
+        {
+            ui_set_label_text(s_view.motion.compass_status, "FIELD RANGE");
+        }
+        else if (imu->compass_state == APP_COMPASS_HORIZONTAL_WEAK)
+        {
+            ui_set_label_text(s_view.motion.compass_status, "HORIZ <5uT");
+        }
+        else
+        {
+            ui_set_label_text(s_view.motion.compass_status, "NO HEADING");
+        }
     }
     /* 应用本轮算出的状态文字颜色。 */
     ui_set_text_color(s_view.motion.compass_status, status_color);
@@ -1634,8 +1631,6 @@ static void mag_calibration_open_cb(lv_event_t *event)
 static void imu_page(void)
 {
     int y = 0;
-    /* 角度三轴标题。 */
-    static const char *const angles[3] = {"PITCH", "ROLL", "YAW"};
     /* 磁力计三轴标题。 */
     static const char *const magnetic[3] = {"MAG X", "MAG Y", "MAG Z"};
     /* 临时控件句柄。 */
@@ -1651,20 +1646,13 @@ static void imu_page(void)
     lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
     /* 点击条目滚动到下方的磁校准区。 */
     lv_obj_add_event_cb(obj, mag_calibration_open_cb, LV_EVENT_CLICKED, NULL);
-    /* y推进228像素，开始角度区。 */
     y += 228;
-    /* 角度区顶部建IMU状态标签，初值WAITING。 */
-    s_view.motion.status = ui_badge(s_body, "WAITING", 2, y, UI_MUTED);
-    /* 建三轴角度卡片，值标签存到s_view.motion.angles，单位DEG。 */
-    motion_metrics(angles, "DEG", y + 26, s_view.motion.angles);
-    /* 角度卡片下方写航向来源说明。 */
-    s_view.motion.yaw_source = ui_note(s_body, "GYRO ONLY / heading may drift", y + 326);
     /* 磁力计状态标签，初值MAG WAITING。 */
-    s_view.motion.mag_status = ui_label(s_body, "MAG WAITING", 2, y + 360, &lv_font_montserrat_10, UI_MUTED);
+    s_view.motion.mag_status = ui_label(s_body, "MAG WAITING", 2, y, &lv_font_montserrat_10, UI_MUTED);
     /* 三轴磁力计卡片，值标签存到s_view.motion.mag_values，单位uT。 */
-    motion_metrics(magnetic, "uT", y + 384, s_view.motion.mag_values);
+    motion_metrics(magnetic, "uT", y + 24, s_view.motion.mag_values);
     /* 磁校准区建212x48可点击条。 */
-    obj = ui_card(s_body, 0, y + 684, 212, 48, UI_CARD_ALT, 0, 14);
+    obj = ui_card(s_body, 0, y + 324, 212, 48, UI_CARD_ALT, 0, 14);
     /* 条内写CALIBRATE MAG文字。 */
     s_view.motion.cal_label = ui_label(obj, "CALIBRATE MAG", 14, 16, &lv_font_montserrat_14, UI_TEXT);
     /* 文字不接收点击，底框可点击。 */
@@ -1673,9 +1661,9 @@ static void imu_page(void)
     /* 点击底框提交磁校准开关。 */
     lv_obj_add_event_cb(obj, mag_calibrate_cb, LV_EVENT_CLICKED, NULL);
     /* 校准条下方建校准状态标签，初值CAL NOT RUN。 */
-    s_view.motion.cal_status = ui_note(s_body, "CAL NOT RUN", y + 744);
+    s_view.motion.cal_status = ui_note(s_body, "CAL NOT RUN", y + 384);
     /* 最后写一段校准操作说明。 */
-    ui_note(s_body, "Rotate every axis for 30-60s, then tap FINISH. EEPROM keeps successful calibration.", y + 790);
+    ui_note(s_body, "Rotate every axis for 30-60s, then tap FINISH. EEPROM keeps successful calibration.", y + 430);
 }
 
 /* 校准输入只提交请求，下一轮sensor窗口取得新气压后完成。 */
@@ -2843,41 +2831,6 @@ static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
     }
 }
 
-/* 航向暂停原因直接来自采样服务，不通过“有磁场数字”猜测融合状态。
- * 把磁融合状态翻译成航向来源说明文字，返回静态字符串供标签显示。 */
-static const char *mag_yaw_status(const app_imu_struct *imu)
-{
-    /* 按融合状态枚举选择对应的说明。 */
-    switch (imu->mag_fusion_state)
-    {
-    case APP_MAG_FUSION_ACTIVE:
-        /* 磁融合正在参与解算：再按是否已校准区分"磁北"和"未校准"。 */
-        if (imu->mag_calibrated)
-        {
-            return "MAG NORTH / fused yaw";
-        }
-        else
-        {
-            return "MAG UNCAL / calibrate first";
-        }
-    case APP_MAG_FUSION_CALIBRATING:
-        /* 正在采集校准数据，航向暂时只靠陀螺。 */
-        return "GYRO ONLY / CALIBRATING";
-    case APP_MAG_FUSION_FIELD_RANGE:
-        /* 磁场幅值超出合理范围，融合被暂停。 */
-        return "GYRO ONLY / FIELD RANGE";
-    case APP_MAG_FUSION_HORIZONTAL_WEAK:
-        /* 水平分量过弱，无法可靠求航向。 */
-        return "GYRO ONLY / HORIZ <5uT";
-    case APP_MAG_FUSION_IMU_NO_DATA:
-        /* 没有新的IMU帧，融合无法推进。 */
-        return "GYRO ONLY / NO IMU FRAME";
-    default:
-        /* 其余情况按磁力计无数据说明。 */
-        return "GYRO ONLY / MAG NO DATA";
-    }
-}
-
 /* 把磁校准状态、EEPROM保存状态和采样覆盖幅度写到校准状态标签。 */
 static void mag_calibration_status(const app_imu_struct *imu)
 {
@@ -3201,41 +3154,10 @@ static void refresh_battery(void)
 static void refresh_motion(void)
 {
     app_imu_struct imu;
-    uint8_t online;
-    /* 取IMU一致快照，返回值只表示完整姿态是否在线；纯加速度档raw/steps仍可能有效。 */
-    online = App_IMU_GetSnapshot(&imu);
-    /* 顶部状态标签显示ONLINE或NO DATA。 */
-    ui_set_status(s_view.motion.status, online);
-    /* 罗盘指针、角度和状态文字由compass_update统一刷新。 */
-    compass_update(&imu, online);
-    /* 角度三轴标签已创建时才刷新角度区。 */
-    if (s_view.motion.angles[0] != NULL)
+    App_IMU_GetSnapshot(&imu);
+    compass_update(&imu);
+    if (s_view.motion.mag_values[0] != NULL)
     {
-        /* 完整姿态在线时显示俯仰、横滚、偏航角。 */
-        if (online)
-        {
-            /* 俯仰和横滚按一位小数显示。 */
-            ui_set_decimal(s_view.motion.angles[0], imu.pitch_deg, 0);
-            ui_set_decimal(s_view.motion.angles[1], imu.roll_deg, 0);
-            /* 偏航角按角度环绕格式显示，折到(-180,180]。 */
-            ui_set_decimal(s_view.motion.angles[2], imu.yaw_deg, 1);
-        }
-        /* 完整姿态未在线时三轴都显示占位符。 */
-        else
-        {
-            ui_set_label_text(s_view.motion.angles[0], "--");
-            ui_set_label_text(s_view.motion.angles[1], "--");
-            ui_set_label_text(s_view.motion.angles[2], "--");
-        }
-        /* 航向来源说明：完整姿态在线时按融合状态翻译，未在线时沿用现有占位文案。 */
-        if (online)
-        {
-            ui_set_label_text(s_view.motion.yaw_source, mag_yaw_status(&imu));
-        }
-        else
-        {
-            ui_set_label_text(s_view.motion.yaw_source, "GYRO ONLY / NO IMU FRAME");
-        }
         /* 磁力计状态标签按校准进度分支显示。 */
         if (imu.mag_cal_state == APP_MAG_CAL_RUNNING)
         {

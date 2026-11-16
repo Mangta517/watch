@@ -58,24 +58,10 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
             "-include", "tests/sensors/host/platform.h"]
     args += ["-I" + p for p in ["tests/sensors/host", "Core/Inc", "application", "interface", "common"]]
     subprocess.run(args + sources + ["-lm", "-o", exe], cwd=root, check=True)
-    for mode in ["fusion_resume", "mag_reseed_done", "mag_reseed_failed"]:
+    for mode in ["compass", "accel_warmup", "independent", "day_cold", "day_retained", "mag_calibration", "mag_save_failed", "mag_calibration_reference",
+                 "activity", "activity_high_rate", "uptime", "async_save", "mpu_stale", "mpu_sleep_recovery", "mag_sleep_recovery", "recovery"]:
         subprocess.run([exe, mode], cwd=root, check=True)
-    subprocess.run([exe, "activity"], cwd=root, check=True)
-    subprocess.run([exe, "background_mag_sleep_retry"], cwd=root, check=True)
-    subprocess.run([exe, "uptime"], cwd=root, check=True)
-    subprocess.run([exe, "async_save"], cwd=root, check=True)
-    subprocess.run([exe, "polling"], cwd=root, check=True)
-    for mode in ["mag_schedule", "mag_schedule_ppg", "mag_schedule_wrap"]:
-        subprocess.run([exe, mode], cwd=root, check=True)
-    subprocess.run([exe, "power_profile"], cwd=root, check=True)
-    subprocess.run([exe, "mpu_stale"], cwd=root, check=True)
-    subprocess.run([exe, "mpu_sleep_recovery"], cwd=root, check=True)
-    subprocess.run([exe, "mag_sleep_recovery"], cwd=root, check=True)
-    subprocess.run([exe, "recovery"], cwd=root, check=True)
     subprocess.run([exe], cwd=root, check=True)
-    subprocess.run([exe, "restored"], cwd=root, check=True)
-    subprocess.run([exe, "load_failed"], cwd=root, check=True)
-    subprocess.run([exe, "save_failed"], cwd=root, check=True)
     driver_exe = str(Path(out) / "drivers.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-include", "tests/sensors/host/i2c_platform.h",

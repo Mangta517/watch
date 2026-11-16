@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /* 计步/抬腕公共层，只消费sensor任务喂入的新鲜加速度(g)，不访问硬件。
- * 状态由调用方持有，最多每200ms消费一帧。断采超过600ms时重建连续动作，
+ * 状态由调用方持有，标称200ms消费一帧，允许60ms调度/振荡器容差。断采超过600ms时重建连续动作，
  * 累计步数与已发布抬腕序号保留。 */
 #define COMMON_ACTIVITY_MAX_GAP_MS 600
 
@@ -21,7 +21,7 @@ typedef struct
     uint8_t down_frames, view_frames, wrist_armed;
 } common_activity_struct;
 
-/* 状态从零初始化；加速度单位g。仅消费新帧，最多5Hz，不产生硬件访问。 */
+/* 状态从零初始化；加速度单位g。仅消费新帧，100Hz来源须先低通并按200ms送入，不产生硬件访问。 */
 void common_activity_update(common_activity_struct *state, float ax, float ay, float az, uint32_t sample_ms);
 
 #endif

@@ -16,6 +16,51 @@ static float s_error_i[3];
 static uint8_t s_gravity_pending = 1;
 static uint8_t s_yaw_pending = 1;
 
+common_compass_result common_imu_compass_heading(const Accel_struct *accel, const float mag_uT[3], float *heading_deg)
+{
+    /* 先转float再平方，避免原始int16满量程相乘/求和溢出。 */
+    float ax, ay, az, accel_squared, field_squared;
+    float pitch, roll, hx, hy, degrees;
+
+    if (accel == NULL || mag_uT == NULL || heading_deg == NULL)
+    {
+        return COMMON_COMPASS_ACCEL_INVALID;
+    }
+    ax = (float)accel->Accel_x / MPU6050_ACCEL_LSB_PER_G;
+    ay = (float)accel->Accel_y / MPU6050_ACCEL_LSB_PER_G;
+    az = (float)accel->Accel_z / MPU6050_ACCEL_LSB_PER_G;
+    accel_squared = ax * ax + ay * ay + az * az;
+    field_squared = mag_uT[0] * mag_uT[0] + mag_uT[1] * mag_uT[1] + mag_uT[2] * mag_uT[2];
+
+    /* +X竖直时无水平朝向；同时覆盖零加速度输入。 */
+    if (!(accel_squared >= 0.5625f && accel_squared <= 1.5625f) ||
+        ay * ay + az * az <= 0.03f * accel_squared)
+    {
+        return COMMON_COMPASS_ACCEL_INVALID;
+    }
+    if (!(field_squared >= 25.0f && field_squared <= 10000.0f))
+    {
+        return COMMON_COMPASS_FIELD_RANGE;
+    }
+    /* 按本工程同轴坐标修正OV-Watch投影：重力=(-sin(p),cos(p)sin(r),cos(p)cos(r))。
+     * atan2(ay,az)保留横滚象限，先消横滚再消俯仰，支持复合倾角和倒置。 */
+    pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+    roll = atan2f(ay, az);
+    hy = mag_uT[1] * cosf(roll) - mag_uT[2] * sinf(roll);
+    hx = mag_uT[0] * cosf(pitch) + mag_uT[1] * sinf(roll) * sinf(pitch) + mag_uT[2] * cosf(roll) * sinf(pitch);
+    if (!(hx * hx + hy * hy > 25.0f))
+    {
+        return COMMON_COMPASS_HORIZONTAL_WEAK;
+    }
+    degrees = atan2f(hy, hx) * RtA;
+    if (degrees < 0.0f)
+    {
+        degrees += 360.0f;
+    }
+    *heading_deg = fmodf(degrees, 360.0f);
+    return COMMON_COMPASS_OK;
+}
+
 void Common_IMU_Reset(void)
 {
     /* 回到单位四元数: q0=1 表示无旋转, 向量部清零。 */
