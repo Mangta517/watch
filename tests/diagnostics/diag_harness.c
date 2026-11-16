@@ -28,7 +28,7 @@ void diag_exit(void)
 
 uint32_t HAL_RCC_GetPCLK1Freq(void)
 {
-    return 32000000;
+    return 42000000;
 }
 
 uint32_t HAL_GetTick(void)
@@ -129,7 +129,7 @@ int main(int argc, char **argv)
     assert(fixture != NULL);
     diag_rcc.CFGR = RCC_CFGR_PPRE1;
     app_diag_clock_init();
-    assert(diag_timer.PSC == 6399 && diag_timer.CR1 == TIM_CR1_CEN);
+    assert(diag_timer.PSC == 8399 && diag_timer.CR1 == TIM_CR1_CEN);
     assert(s_sensors[APP_DIAG_MPU].init_result == UINT32_MAX);
     if (APP_DEBUG_TELEMETRY == 0)
     {

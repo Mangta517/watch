@@ -35,6 +35,7 @@ void __set_PRIMASK(uint32_t value)
 void HAL_GPIO_Init(GPIO_TypeDef *gpio, GPIO_InitTypeDef *config)
 {
     assert(gpio == port && primask == 1);
+    assert(config->Pull == GPIO_NOPULL);
     if (config->Mode == GPIO_MODE_ANALOG)
     {
         assert(config->Pull == GPIO_NOPULL && (config->Pin == scl_pin || config->Pin == sda_pin));
@@ -47,15 +48,13 @@ void HAL_GPIO_Init(GPIO_TypeDef *gpio, GPIO_InitTypeDef *config)
     }
     if (config->Pin == sda_pin)
     {
+        assert(config->Mode == GPIO_MODE_INPUT || config->Mode == GPIO_MODE_OUTPUT_OD);
         sda_mode = config->Mode;
     }
     else
     {
         assert(config->Pin == scl_pin);
-        if (selected_bus != MY_I2C_BUS_TP)
-        {
-            assert(config->Mode == GPIO_MODE_OUTPUT_OD);
-        }
+        assert(config->Mode == GPIO_MODE_OUTPUT_OD);
     }
 }
 void HAL_GPIO_WritePin(GPIO_TypeDef *gpio, uint16_t pin, GPIO_PinState value)

@@ -17,6 +17,12 @@ typedef enum
     APP_HEART_ERROR
 } app_heart_state;
 
+typedef enum
+{
+    APP_HEART_AUTO_INTERVAL_10MIN,
+    APP_HEART_AUTO_INTERVAL_1MIN
+} app_heart_auto_interval;
+
 typedef struct
 {
     uint16_t bpm;         /* 仅 VALID 时有效，40～200 BPM；工程估算值，需要实板校准 */
@@ -27,7 +33,7 @@ typedef struct
     uint32_t sample_ms;   /* HAL tick，毫秒 */
     app_heart_state state;
     em7028_fault fault; /* 故障时由 sensor 任务复制；UI 不查询驱动私有状态 */
-    uint8_t enabled;    /* 亮屏为手动请求；熄屏仅在后台开关打开时为自动测量窗口，关闭时恒为0。不直接操作I2C。 */
+    uint8_t enabled;    /* 亮屏为手动请求；熄屏为自动测量窗口，运动模式为连续测量。不直接操作I2C。 */
 } app_heart_struct;
 
 typedef struct
@@ -44,15 +50,17 @@ typedef struct
 
 /* sensor开机流程配置EM7028为待机；软件初始化另外创建快照锁。 */
 void app_heart_init_hw(void);
-/* 调度器启动后在sensor任务创建快照锁。 */
+/* sensor启动时恢复EEPROM周期并创建快照锁；无有效记录时默认10分钟。 */
 void app_heart_init(void);
 /* sensor每轮调用；内部限速30ms，返回1表示本轮访问了PPG总线，供磁轮询错开。 */
 uint8_t app_heart_service(void);
-/* 仅sensor任务：熄屏每10分钟自动测一次，有效BPM即停，最多10秒；保留亮屏手动请求。 */
+/* 仅sensor任务：熄屏按所选周期自动测量，有效BPM即停，最多10秒；保留亮屏手动请求。 */
 void app_heart_set_sleep_mode(uint8_t sleeping);
-/* 后台自动心率独立开关，开机默认开启每10分钟测量；set只提交请求不读I2C，sensor负责及时停止在途后台测量并保留有效值。 */
-void app_heart_set_auto_enabled(uint8_t enabled);
-uint8_t app_heart_get_auto_enabled(void);
+/* UI只更新RAM请求；周期变化后重新计时，sensor异步保存到0xF0/0xF8。 */
+void app_heart_set_auto_interval(app_heart_auto_interval interval);
+app_heart_auto_interval app_heart_get_auto_interval(void);
+/* 仅sensor任务；allow_start允许新事务，返回1表示EEPROM仍被占用，0表示空闲。 */
+uint8_t app_heart_store_service(uint8_t allow_start);
 /* sensor任务：运动模式强制连续测量，停止运动后恢复原手动请求，不发送原始蓝牙波形。 */
 void app_heart_set_sport_mode(uint8_t enabled);
 uint8_t app_heart_sleep_pending(void);

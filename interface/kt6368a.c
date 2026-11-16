@@ -267,7 +267,10 @@ void kt6368a_power_off(void)
     /* 模拟模式断开复用功能，避免经引脚向已断电模块反向供电。 */
     gpio.Mode = GPIO_MODE_ANALOG;
     gpio.Pull = GPIO_NOPULL;
+    mask = __get_PRIMASK();
+    __disable_irq();
     HAL_GPIO_Init(GPIOA, &gpio);
+    __set_PRIMASK(mask);
     /* 拉低BL1551B使能脚，切断模块供电。 */
     HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_RESET);
     /* 丢弃断电前残留的接收数据。 */
@@ -281,6 +284,7 @@ static HAL_StatusTypeDef kt6368a_power_enable(void)
     GPIO_InitTypeDef gpio = {0};
     /* 保存HAL_UART_Init/Receive_IT的返回状态。 */
     HAL_StatusTypeDef status;
+    uint32_t mask;
     if (ble.powered)
     {
         /* 已上电则直接成功，不重复初始化外设。 */
@@ -308,7 +312,7 @@ static HAL_StatusTypeDef kt6368a_power_enable(void)
 #if !defined(F411_BOOTLOADER)
     if (s_rx_callback != NULL)
     {
-        /* MSP初始化把USART1设为0；通知任务前改为12，满足FreeRTOS的ISR优先级约束。 */
+        /* 与MSP初始化统一使用12，满足FreeRTOS的ISR优先级约束。 */
         HAL_NVIC_SetPriority(USART1_IRQn, 12, 0);
     }
 #endif
@@ -322,7 +326,10 @@ static HAL_StatusTypeDef kt6368a_power_enable(void)
     gpio.Pull = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     gpio.Alternate = GPIO_AF7_USART1;
+    mask = __get_PRIMASK();
+    __disable_irq();
     HAL_GPIO_Init(GPIOA, &gpio);
+    __set_PRIMASK(mask);
     /* 清除可能残留的溢出错误标志，避免刚开接收就进错误回调。 */
     __HAL_UART_CLEAR_OREFLAG(&huart1);
     /* 清空断电期间/引脚切换期间可能收到的无效数据。 */

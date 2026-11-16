@@ -14,6 +14,7 @@ int main(void)
     const char *invalid[] = {"WEATHER,100,263,80\n",   "WEATHER,3,1001,80\n", "WEATHER,3,263,101\n",
                              "WEATHER,3,263,80junk\n", "WEATHER,3,,80\n",     "WEATHER,9999999999999999999999999999999999999,0,0\n"};
     app_weather_struct weather;
+    app_weather_restore(NULL);
     unsigned split, i;
     app_weather_get_snapshot(&weather);
     assert(!weather.valid);
@@ -37,6 +38,9 @@ int main(void)
         assert(weather.code == 3 && weather.temperature_x10 == -53);
     }
     feed("09:05\nhello\nWEATHER,0,263,70\n", 300);
+    app_weather_get_snapshot(&weather);
+    assert(weather.code == 0 && weather.temperature_x10 == 263 && weather.humidity_rh == 70);
+    app_weather_restore(NULL);
     app_weather_get_snapshot(&weather);
     assert(weather.code == 0 && weather.temperature_x10 == 263 && weather.humidity_rh == 70);
     feed("WEATHER,99,-1000,100", UINT32_MAX - 100U);

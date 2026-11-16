@@ -46,7 +46,7 @@
 #include "app_tickless.h"
 #define portSUPPRESS_TICKS_AND_SLEEP(ticks) app_tickless_sleep(ticks)
 #define configUSE_TICK_HOOK                 0
-#define configCPU_CLOCK_HZ                  ((unsigned long)64000000) /* F411: HSI/8*128/4 = 64MHz */
+#define configCPU_CLOCK_HZ                  ((unsigned long)84000000) /* F411: HSI/8*168/4 = 84MHz */
 #define configTICK_RATE_HZ                  1000                      /* HAL补时及LVGL时间单位均为1ms。 */
 #define configMAX_PRIORITIES                (5)
 #define configMINIMAL_STACK_SIZE            ((unsigned short)128)
@@ -62,7 +62,7 @@
 #define configIDLE_SHOULD_YIELD                  1
 
 /* 栈溢出检测(方法1: 切换时检查保存的栈指针边界, 开销小):
- * 触发即进入 vApplicationStackOverflowHook(app_task.c) 停死, 便于调试定位越界任务 */
+ * 触发即进入vApplicationStackOverflowHook(app_task.c)，关中断记录APP_RESET_STACK_OVERFLOW后主动复位。 */
 #define configCHECK_FOR_STACK_OVERFLOW 1
 
 /* Set the following definitions to 1 to include the API function, or zero

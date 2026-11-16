@@ -167,6 +167,10 @@ void app_weather_get_snapshot(app_weather_struct *snapshot)
 
 void app_weather_restore(const app_weather_struct *snapshot)
 {
+    if (snapshot == NULL)
+    {
+        return;
+    }
     /* 仅在当前天气快照无效、且待恢复记录本身有效时执行恢复。 */
     if (s_weather.valid == 0 && snapshot->valid != 0)
     {

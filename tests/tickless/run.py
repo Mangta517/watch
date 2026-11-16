@@ -19,6 +19,6 @@ with tempfile.TemporaryDirectory(prefix="watch-tickless-") as out:
     for stop_enabled in (0, 1):
         subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
                         "-DAPP_TICKLESS_ENABLE_STOP=" + str(stop_enabled),
-                        "-Itests/tickless/host", "-Iapplication", "-Iinterface", "-I" + out,
-                        "tests/tickless/tickless_harness.c", "application/app_tickless.c", "-o", exe], cwd=root, check=True)
+                        "-Itests/tickless/host", "-Iapplication", "-Iinterface", "-Icommon", "-I" + out,
+                        "tests/tickless/tickless_harness.c", "application/app_tickless.c", "interface/tps3823.c", "-o", exe], cwd=root, check=True)
         subprocess.run([exe], cwd=root, check=True)

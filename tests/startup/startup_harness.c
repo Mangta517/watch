@@ -1,5 +1,6 @@
 /* 执行真实任务入口，模拟等待期间sensor获得调度，验证首帧和采集不等RTC/蓝牙。 */
 #include <stdint.h>
+#include <assert.h>
 #define app_diag_boot_set startup_boot_set
 #define app_diag_take_imu_calibration startup_take_imu_calibration
 #include "../../application/app_task.c"
@@ -11,9 +12,14 @@
 #include "app_weather.h"
 
 static unsigned battery_log_calls;
+static uint8_t heart_store_test, heart_store_phase, heart_store_pending;
+static unsigned heart_store_writes;
 uint8_t app_ota_storage_service(uint8_t storage_available)
 {
-    (void)storage_available;
+    if (heart_store_phase != 0)
+    {
+        assert(storage_available == 0);
+    }
     return 0;
 }
 void app_battery_log_init(void)
@@ -25,12 +31,15 @@ void app_battery_log_service(uint32_t seconds)
     (void)seconds;
     ++battery_log_calls;
 }
-#include <assert.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
 
 static uint32_t reset_feed_events;
+void NVIC_SystemReset(void)
+{
+    assert(0 && "normal startup must not reset");
+}
 void app_reset_watchdog_feed(uint32_t now_ms)
 {
     assert(now_ms == HAL_GetTick());
@@ -103,8 +112,8 @@ static uint32_t sleep_pose_ms;
 static uint8_t sleep_recovery_test, sleep_recovery_sample;
 static uint32_t sleep_recovery_last_ms;
 static unsigned sleep_recovery_steps;
-static uint8_t sleep_stationary_test, stationary_seen_slow, stationary_back_fast;
-static unsigned stationary_slow_waits, stationary_fast_waits;
+static uint8_t sleep_stationary_test, stationary_seen_idle, stationary_transition_seen;
+static unsigned stationary_idle_waits, stationary_short_motion_samples;
 static uint8_t stationary_report, stationary_sample_seen, stationary_recovery_active;
 static uint32_t stationary_last_sample;
 static uint8_t environment_early_close;
@@ -170,9 +179,13 @@ uint8_t bl24c02_transfer_step(bl24c02_transfer_struct *io)
         {
             ++uptime_writes;
         }
-        else
+        else if (io->address < 0xF0)
         {
             ++weather_writes;
+        }
+        else
+        {
+            ++heart_store_writes;
         }
     }
     else
@@ -186,6 +199,7 @@ uint8_t bl24c02_transfer_step(bl24c02_transfer_struct *io)
 uint8_t startup_take_imu_calibration(void)
 {
     uint8_t request = manual_request;
+    assert(heart_store_phase == 0);
     manual_request = 0;
     return request;
 }
@@ -204,7 +218,7 @@ app_imu_store_result app_imu_store_load(mpu6050_offset_struct *offset)
 }
 app_imu_store_result app_imu_store_save_begin(const mpu6050_offset_struct *offset)
 {
-    assert(uptime_io_active == 0);
+    assert(uptime_io_active == 0 && heart_store_phase == 0);
     assert(sport_active == 0);
     assert(memcmp(offset, &stored_offset, sizeof(*offset)) == 0);
     ++saves;
@@ -224,7 +238,7 @@ app_imu_store_result app_imu_store_save_step(void)
 }
 uint8_t App_IMU_SaveService(void)
 {
-    assert(uptime_io_active == 0);
+    assert(uptime_io_active == 0 && heart_store_phase == 0);
     if (sport_test != 0)
     {
         assert(sport_active == 0);
@@ -254,7 +268,6 @@ static uint32_t first_frame_chunk_ms = 150U;
 static unsigned int first_frame_chunks = 10U;
 static void (*display_progress_callback)(void);
 static uint32_t watchdog_last_falling_ms;
-static uint8_t watchdog_idle_paused;
 static uint8_t runtime_render, runtime_sensor_stalled;
 static uint32_t runtime_chunk_ms = 150U;
 static unsigned int runtime_chunks = 10U, render_yields;
@@ -280,26 +293,6 @@ void tps3823_feed(void)
     }
     ++watchdog_feeds;
     watchdog_last_falling_ms = tick;
-}
-
-/* 硬件空闲暂停的测试私有模型：真实顺序由application/app_tickless.c实现并经tests/tickless验证，
- * 本harness不链接tickless，只复刻"实际等待前查询授权、醒来立即补一次下降沿"的外部效果。
- * 等待前读取真实app_task_watchdog_stop_allowed()，只有sensor进度授权为真才记录本次暂停。 */
-static void watchdog_model_idle_pause(void)
-{
-    watchdog_idle_paused = app_task_watchdog_stop_allowed();
-}
-
-/* idle等待结束模拟tps3823_stop_resume立即输出下降沿，只刷新硬件最后下降沿基线；
- * 不改写app_watchdog.last_feed_ms、不增加watchdog_feeds，
- * 因此200ms软件授权窗口仍只由真实sensor进度喂狗续期，暂停不会自我延长。 */
-static void watchdog_model_idle_resume(void)
-{
-    if (watchdog_idle_paused != 0)
-    {
-        watchdog_idle_paused = 0;
-        watchdog_last_falling_ms = tick;
-    }
 }
 
 static void test_watchdog_progress(uint8_t wrap)
@@ -376,39 +369,35 @@ static void test_watchdog_startup(uint8_t wrap)
     puts("Watchdog: sensor startup may progress for 5s, then missing first round stops feeding, including tick wrap: PASS");
 }
 
-static void test_watchdog_stop_authorization(uint8_t wrap)
+static void test_watchdog_sleep_stall(uint8_t wrap)
 {
     uint32_t feed_mark;
+    unsigned int i;
+    displayed = 1;
     tick = 1000;
     if (wrap != 0)
     {
-        tick = UINT32_MAX - 150U;
+        tick = UINT32_MAX - 350;
     }
-    memset(&app_watchdog, 0, sizeof(app_watchdog));
-    s_sleep_poll_ms = APP_SENSOR_SLEEP_IDLE_POLL_MS;
-    /* sensor 尚未产生进度：即使刚发生喂狗也拒绝授权长 STOP。 */
-    app_watchdog.last_feed_ms = tick;
-    assert(app_task_watchdog_stop_allowed() == 0);
-    /* sensor 已启动：距最近一次真实喂狗不超过200ms且为1000ms慢待机节拍才授权。 */
-    app_watchdog.sensor_started = 1;
-    feed_mark = app_watchdog.last_feed_ms;
-    assert(app_task_watchdog_stop_allowed() == 1);
-    /* 授权查询本身不喂狗、不推进授权时刻。 */
-    assert(app_watchdog.last_feed_ms == feed_mark);
-    tick += 200; /* 恰好200ms边界仍授权。 */
-    assert(app_task_watchdog_stop_allowed() == 1);
-    tick += 1; /* 超过200ms且没有新sensor进度真实喂狗：不续期。 */
-    assert(app_task_watchdog_stop_allowed() == 0);
-    /* 非静止慢待机的200ms节拍即使喂狗新鲜也不授权。 */
-    s_sleep_poll_ms = APP_SENSOR_SLEEP_POLL_MS;
-    app_watchdog.last_feed_ms = tick;
-    assert(app_task_watchdog_stop_allowed() == 0);
-    /* 回到1000ms节拍后按同一last_feed_ms立即恢复授权，函数仍未改写喂狗时刻。 */
-    s_sleep_poll_ms = APP_SENSOR_SLEEP_IDLE_POLL_MS;
-    feed_mark = app_watchdog.last_feed_ms;
-    assert(app_task_watchdog_stop_allowed() == 1);
-    assert(app_watchdog.last_feed_ms == feed_mark);
-    puts("Watchdog: long-STOP pause requires sensor start, real feed within 200ms and 1000ms idle poll; not renewed without progress, including tick wrap: PASS");
+    app_watchdog_begin();
+    for (i = 0; i < 10; ++i)
+    {
+        tick += 200;
+        ++app_sensor_watchdog_progress;
+        app_watchdog_service();
+        assert(watchdog_feeds == i + 1);
+    }
+    feed_mark = watchdog_last_falling_ms;
+    /* 静止后台停滞后，LVGL继续运行和查询等待周期都不能续喂。 */
+    for (i = 0; i < 5; ++i)
+    {
+        tick += 200;
+        assert(app_task_sleep_poll_ms() == 200);
+        app_watchdog_service();
+        assert(watchdog_feeds == 10 && watchdog_last_falling_ms == feed_mark);
+    }
+    assert((uint32_t)(tick - feed_mark) == 1000);
+    puts("PASS: 200ms background progress feeds normally; stalled sensor cannot renew watchdog through idle polling, including tick wrap.");
 }
 
 void startup_boot_set(uint8_t field, uint32_t value)
@@ -508,7 +497,7 @@ uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
 {
     if (sleep_stationary_test != 0)
     {
-        assert(clear == pdTRUE && wait == 1000 && s_sleep_poll_ms == 1000);
+        assert(clear == pdTRUE && wait == 200 && app_task_sleep_poll_ms() == 200);
         return 1;
     }
     if (lvgl_wait_test != 0)
@@ -837,6 +826,10 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     if (sport_test != 0)
     {
         uint32_t finish_ms = 2000U;
+        if (heart_store_test != 0 && uptime_io_active != 0 && storage_address < 0xC0)
+        {
+            heart_store_pending = 1;
+        }
         if (weather_task_test != 0 && weather_task_updated == 0 && uptime_io_active != 0 && storage_address < 0xC0)
         {
             static const char update[] = "WEATHER,61,-53,81\n";
@@ -889,6 +882,10 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
                     assert(memcmp(uptime_eeprom + 0xE0, "WTH1", 4) == 0);
                     assert(saves == 1);
                 }
+                if (heart_store_test != 0)
+                {
+                    assert(heart_store_writes == 3 && heart_store_phase == 0 && uptime_io_active == 0);
+                }
             }
             if (sport_test == 2U)
             {
@@ -904,8 +901,8 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     }
     if (sleep_test != 0)
     {
-        assert(ticks == 10U || ticks == 20U || ticks == 40U || ticks == 100U || ticks == 200 || ticks == 400 || ticks == 1000);
-        if (ticks == 200 || ticks == 1000)
+        assert(ticks == 10U || ticks == 20U || ticks == 40U || ticks == 100U || ticks == 200);
+        if (ticks == 200)
         {
             ++sleep_idle_waits;
             assert(lvgl_notifications == sleep_idle_waits);
@@ -915,29 +912,23 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
             assert(ticks == 10U);
         }
         assert(++sensor_rounds == app_sensor_watchdog_progress);
-        /* 有效下降沿间隔必须始终短于芯片最短900ms超时：获sensor进度授权的idle等待在醒来时
-         * 由下面的pause/resume模型立即补一次下降沿，未获授权时不记录暂停，本断言照常拦截停滞。 */
+        /* 空闲等待不额外喂狗，双任务真实进度必须使下降沿间隔小于芯片最短900ms超时。 */
         assert((uint32_t)(tick - watchdog_last_falling_ms) < 900);
         app_watchdog_service();
         if (sleep_stationary_test != 0)
         {
-            if (ticks == 1000)
+            assert(app_task_sleep_poll_ms() == 200);
+            if (ticks == 200 && sensor_elapsed_ms >= 10000)
             {
-                assert(s_sleep_poll_ms == 1000);
                 app_lvgl_wait(APP_IDLE_POLL_MS, 1);
-                ++stationary_slow_waits;
-                stationary_seen_slow = 1;
+                ++stationary_idle_waits;
+                stationary_seen_idle = 1;
             }
-            else if (ticks == 200)
+            /* 连续静止后仍保持5Hz；400ms短动作必须被读取，亮屏/心率/恢复沿用原节拍。 */
+            if (stationary_seen_idle != 0 && sensor_elapsed_ms >= 12000)
             {
-                ++stationary_fast_waits;
-            }
-            /* 10~12秒加速度稳定→1000ms慢待机；恢复运动→立即回到200ms，进入与退出各至少验证一次。 */
-            if (stationary_seen_slow != 0 && sensor_elapsed_ms >= 12000 && ticks != 1000)
-            {
-                stationary_back_fast = 1;
-                assert(stationary_slow_waits >= 2U && stationary_fast_waits >= 1U);
-                assert(s_sleep_poll_ms == 200);
+                stationary_transition_seen = 1;
+                assert(stationary_idle_waits >= 9 && stationary_short_motion_samples >= 2);
                 if (sleep_stationary_test == 4)
                 {
                     assert(ticks == 40 && app_task_is_screen_off() == 0);
@@ -980,12 +971,8 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
             assert(battery_sleep_mode == 0);
             longjmp(sensor_stop, 1);
         }
-        /* 本轮处理结束后进入的idle等待：先按真实授权判定是否允许暂停TPS3823超时检测，
-         * 再推进这段等待时间，醒来时补硬件下降沿，等价于tickless的pause/resume顺序。 */
-        watchdog_model_idle_pause();
         sensor_elapsed_ms += ticks;
         tick += ticks;
-        watchdog_model_idle_resume();
         if (sleep_stationary_test == 4 && sensor_elapsed_ms >= 12000)
         {
             app_task_set_power_state(0, 0, 0, 0);
@@ -1266,6 +1253,43 @@ void App_Baro_Init(void)
 void app_heart_init(void)
 {
     assert(hardware_count == 5);
+    heart_store_pending = heart_store_test;
+}
+uint8_t app_heart_store_service(uint8_t allow_start)
+{
+    static bl24c02_transfer_struct io;
+    static uint8_t record[8] = {'H', 'R', 1, 1, 0, 0, 0, 0};
+    uint8_t result;
+    if (heart_store_test == 0)
+    {
+        return 0;
+    }
+    if (heart_store_phase == 0)
+    {
+        if (allow_start == 0 || heart_store_pending == 0)
+        {
+            return 0;
+        }
+        assert(mock_cal_state == MPU6050_CAL_DONE);
+        heart_store_pending = 0;
+        bl24c02_transfer_begin(&io, 0xF0, record, sizeof(record), 1);
+        heart_store_phase = 1;
+        return 1;
+    }
+    result = bl24c02_transfer_step(&io);
+    if (result == 2)
+    {
+        return 1;
+    }
+    assert(result == 0);
+    if (heart_store_phase == 1)
+    {
+        bl24c02_transfer_begin(&io, 0xF0, record, sizeof(record), 0);
+        heart_store_phase = 2;
+        return 1;
+    }
+    heart_store_phase = 0;
+    return 0;
 }
 void app_heart_set_sleep_mode(uint8_t sleeping)
 {
@@ -1293,10 +1317,6 @@ uint8_t app_heart_sleep_pending(void)
 uint8_t app_imu_is_calibrating(void)
 {
     return 0;
-}
-uint8_t app_imu_is_stationary(void)
-{
-    return stationary_report;
 }
 uint8_t spl006_set_sleep(uint8_t sleeping)
 {
@@ -1537,14 +1557,19 @@ void App_IMU_Service(uint8_t read_mag)
         {
             if (stationary_sample_seen != 0)
             {
-                assert((uint32_t)(tick - stationary_last_sample) <= 1000);
+                assert((uint32_t)(tick - stationary_last_sample) <= 200);
             }
             stationary_sample_seen = 1;
             stationary_last_sample = tick;
             stationary_report = sensor_elapsed_ms >= 10000;
+            if (sensor_elapsed_ms >= 11400 && sensor_elapsed_ms < 11800)
+            {
+                ++stationary_short_motion_samples;
+                stationary_report = 0;
+            }
             if (sleep_stationary_test <= 2 && sensor_elapsed_ms >= 12000)
             {
-                stationary_report = 0; /* 读回新帧后才发现运动，必须在同轮缩短等待。 */
+                stationary_report = 0; /* 持续运动时也保持200ms采样。 */
             }
         }
         sleep_imu_sample_ms = tick;
@@ -1560,7 +1585,7 @@ void App_IMU_Service(uint8_t read_mag)
                 assert(sensor_elapsed_ms - sleep_pose_ms >= 200);
                 if (sleep_stationary_test != 0)
                 {
-                    assert(sensor_elapsed_ms - sleep_pose_ms <= 1000);
+                    assert(sensor_elapsed_ms - sleep_pose_ms <= 200);
                 }
                 else
                 {
@@ -2002,13 +2027,14 @@ int main(int argc, char **argv)
         {
             sport_test = 3;
         }
-        if (strcmp(argv[1], "sport_weather") == 0)
+        if (strcmp(argv[1], "sport_weather") == 0 || strcmp(argv[1], "sport_heart") == 0)
         {
             static const char initial[] = "WEATHER,3,263,80\n";
             sport_test = 3;
             weather_task_test = 1;
             restored_mode = 0;
             complete_cal = 1;
+            heart_store_test = strcmp(argv[1], "sport_heart") == 0;
             app_weather_receive((const uint8_t *)initial, sizeof(initial) - 1, tick);
             app_weather_store_sync();
         }
@@ -2086,8 +2112,8 @@ int main(int argc, char **argv)
         }
         if (sleep_stationary_test != 0)
         {
-            assert(stationary_back_fast != 0);
-            puts("PASS: slow idle reads stay within 1000ms, LVGL follows 1000ms and motion/recovery/wake/PPG exits immediately.");
+            assert(stationary_transition_seen != 0);
+            puts("PASS: stationary sleep keeps 200ms IMU/LVGL cadence, captures a 400ms motion and preserves recovery/wake/PPG transitions.");
             return 0;
         }
         assert(sleep_first_seen != 0);
@@ -2116,9 +2142,9 @@ int main(int argc, char **argv)
         test_watchdog_startup((uint8_t)(strcmp(argv[1], "watchdog_startup_wrap") == 0));
         return 0;
     }
-    if (argc > 1 && (strcmp(argv[1], "watchdog_stop") == 0 || strcmp(argv[1], "watchdog_stop_wrap") == 0))
+    if (argc > 1 && (strcmp(argv[1], "watchdog_sleep_stall") == 0 || strcmp(argv[1], "watchdog_sleep_stall_wrap") == 0))
     {
-        test_watchdog_stop_authorization((uint8_t)(strcmp(argv[1], "watchdog_stop_wrap") == 0));
+        test_watchdog_sleep_stall((uint8_t)(strcmp(argv[1], "watchdog_sleep_stall_wrap") == 0));
         return 0;
     }
     if (argc > 1)

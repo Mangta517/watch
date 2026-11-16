@@ -114,6 +114,7 @@ void __DMB(void)
 }
 void HAL_GPIO_Init(void *port, GPIO_InitTypeDef *gpio)
 {
+    assert(mask == 1);
     assert(port == GPIOA && gpio->Pin == (BLE_TX_Pin | BLE_RX_Pin));
     uart_gpio_mode = gpio->Mode;
 }

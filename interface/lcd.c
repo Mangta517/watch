@@ -8,7 +8,7 @@
   *          ② SPI1_TX DMA(DMA2_Stream2) 已由 CubeMX 配置 → 提供 Watch 同款
   *             "阻塞整块发送" + "DMA 异步刷屏(经 TxCplt 回调报完成)" 双路径;
   *          ③ 背光为 TIM3_CH3/PB0, OCPolarity=HIGH → CCR 正映射 (不反转);
- *             CubeMX 已配 PSC=63/ARR=300 → 1MHz/301 ≈ 3.32kHz, LCD_Open_Light
+ *             CubeMX 已配 PSC=83/ARR=300 → 1MHz/301 ≈ 3.32kHz, LCD_Open_Light
   *             里仍按 LCD_BL_ARR 重写一次 ARR 作防御 (AutoReloadPreload=DISABLE,
   *             立即生效), 保证与驱动宏一致。
   *          依赖: hspi1(spi.c, Mode3: CPOL=High/CPHA=2Edge, MSB, DIV2), htim3(tim.c),
@@ -34,9 +34,9 @@ uint8_t lcd_is_stop_idle(void)
 #define LCD_RES_Clr() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_RESET)
 #define LCD_RES_Set() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_SET)
 
-/* 最大65534字节在32MHz下约16.4ms；50ms保留调度余量并限制故障阻塞时间。 */
+/* 最大65534字节在42MHz下约12.5ms；50ms保留调度余量并限制故障阻塞时间。 */
 #define LCD_SPI_TMO 50
-/* 最大65534字节在32MHz下约16.4ms；100ms后仍无回调则按失败收尾。 */
+/* 最大65534字节在42MHz下约12.5ms；100ms后仍无回调则按失败收尾。 */
 #define LCD_DMA_TIMEOUT_MS 100
 
 /******************************************************************************
@@ -298,7 +298,9 @@ uint8_t LCD_Flush_Service(void)
     /* DMA 通道仍使能说明还在访问像素缓冲，此时不能通知 LVGL 复用该缓冲。 */
     if (hspi1.hdmatx != NULL && (hspi1.hdmatx->Instance->CR & DMA_SxCR_EN) != 0)
     {
-        return 0; /* DMA尚未停止访问像素缓冲，不能通知LVGL复用。 */
+        /* 停止失败不能释放像素缓冲，也不能无限喂狗等待。 */
+        Error_Handler();
+        return 0;
     }
     /* DMA 已停：关闭 SPI 外设并中止 HAL 侧传输状态，便于下一笔重新开始。 */
     __HAL_SPI_DISABLE(&hspi1);
@@ -537,6 +539,8 @@ static uint8_t lcd_power_command(uint8_t command)
 
 uint8_t LCD_ST7789_SleepIn(void)
 {
+    GPIO_InitTypeDef gpio = {0};
+    uint32_t mask;
     /* 先把背光占空比降到 0，避免面板休眠过程中仍亮着。 */
     LCD_Set_Light(0);
     /* 发送 0x10 进入睡眠；失败直接返回 1，后续断电步骤不执行。 */
@@ -549,6 +553,14 @@ uint8_t LCD_ST7789_SleepIn(void)
     /* 移植层已等DMA收尾；CCR=0保持PB0低电平，停计数并关闭显示外设时钟。 */
     htim3.Instance->CR1 &= ~TIM_CR1_CEN;
     __HAL_SPI_DISABLE(&hspi1);
+    /* CLK/MOSI有4.7k外部上拉；释放复用输出，避免MOSI末位为0时持续耗电。 */
+    gpio.Pin = LCD_CLK_Pin | LCD_SDA_Pin;
+    gpio.Mode = GPIO_MODE_ANALOG;
+    gpio.Pull = GPIO_NOPULL;
+    mask = __get_PRIMASK();
+    __disable_irq();
+    HAL_GPIO_Init(GPIOB, &gpio);
+    __set_PRIMASK(mask);
     __HAL_RCC_TIM3_CLK_DISABLE();
     __HAL_RCC_SPI1_CLK_DISABLE();
     __HAL_RCC_DMA2_CLK_DISABLE();
@@ -558,10 +570,22 @@ uint8_t LCD_ST7789_SleepIn(void)
 
 uint8_t LCD_ST7789_SleepOut(void)
 {
+    GPIO_InitTypeDef gpio = {0};
+    uint32_t mask;
     /* 依次恢复 DMA2、SPI1、TIM3 的时钟，供后续命令与 PWM 使用。 */
     __HAL_RCC_DMA2_CLK_ENABLE();
     __HAL_RCC_SPI1_CLK_ENABLE();
     __HAL_RCC_TIM3_CLK_ENABLE();
+    /* 发唤醒命令前恢复SPI1复用；与同口触摸/I2C的方向切换互斥。 */
+    gpio.Pin = LCD_CLK_Pin | LCD_SDA_Pin;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio.Alternate = GPIO_AF5_SPI1;
+    mask = __get_PRIMASK();
+    __disable_irq();
+    HAL_GPIO_Init(GPIOB, &gpio);
+    __set_PRIMASK(mask);
     __HAL_TIM_ENABLE(&htim3); /* 先以CCR=0恢复，应用层在面板醒后设置原亮度。 */
     /* 发送 0x11 退出睡眠；失败返回 1，调用方需据此决定是否继续显示。 */
     if (lcd_power_command(0x11) != 0)

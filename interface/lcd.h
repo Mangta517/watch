@@ -30,7 +30,7 @@ uint8_t lcd_is_stop_idle(void);
 #define LCD_HEIGHT   280
 #define LCD_OFFSET_Y 20
 
-/* 背光: TIM3_CH3 @64MHz/64(PSC+1) = 1MHz 计数, ARR=300 -> 约3.32kHz。
+/* 背光: TIM3_CH3 @84MHz/84(PSC+1) = 1MHz 计数, ARR=300 -> 约3.32kHz。
  * OCPolarity=HIGH 高电平点亮, 占空比 = CCR/ARR, 无需反转映射。 */
 #define LCD_BL_CCR_INVERT 0
 #define LCD_BL_ARR        300

@@ -52,12 +52,16 @@ ui_sources = ["interface/watch_key.c", "tests/ui/ui_harness.c", "application/ui_
 ui_args = [gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-Wall", "-Wextra", "-Werror"]
 subprocess.run(ui_args + ["-DAPP_DEBUG_TELEMETRY=1"] + ui_sources + [str(library), "-lm", "-o", str(exe)],
                cwd=ROOT, check=True)
+subprocess.run([str(exe), "page_auto_sleep"], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe), "cached_weather"], cwd=ROOT, check=True)
 subprocess.run([str(exe), "page_lifecycle"], cwd=ROOT, check=True)
+subprocess.run([str(exe), "render_perf"], cwd=ROOT, check=True)
+subprocess.run([str(exe), "render_perf", "28"], cwd=ROOT, check=True)
 quiet_exe = OUT / "ui_quiet.exe"
 subprocess.run(ui_args + ["-DAPP_DEBUG_TELEMETRY=0"] + ui_sources + [str(library), "-lm", "-o", str(quiet_exe)],
                cwd=ROOT, check=True)
+subprocess.run([str(quiet_exe), "page_auto_sleep"], cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe)], cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe), "page_lifecycle"], cwd=ROOT, check=True)
 from PIL import Image, ImageDraw, ImageFont
@@ -98,7 +102,7 @@ make_preview([f"weather_icon_{index}" for index in range(9)],
 for name in ["watch", "motion_magnetic", "motion_calibrating", "motion_calibration_status", "motion_restored", "motion_save_failed",
              "bluetooth", "bluetooth_empty", "bluetooth_tx", "bluetooth_time",
              "watch_activity", "watch_synced", "watch_midnight", "watch_unsynced", "watch_seconds",
-             "heart", "heart_details", "heart_measuring", "heart_no_signal", "heart_unavailable",
+             "heart", "heart_details", "heart_measuring", "heart_no_signal", "heart_unavailable", "heart_auto_10min", "heart_auto_1min",
              "aht21", "aht21_measuring", "aht21_crc_error", "aht21_unavailable", "battery_waiting", "battery_error", "battery_low", "battery_empty", "battery_full", "phone_weather", "watch_climate"]:
     Image.open(OUT / (name + ".ppm")).save(OUT / (name + ".png"))
 print("Preview:", OUT / "watch-ui-preview.png")

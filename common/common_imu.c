@@ -14,6 +14,7 @@ static const float Gyro_Gr = 1.0f / MPU6050_GYRO_LSB_PER_DPS / 180.0f * 3.141592
 static Quaternion_Struct s_q = {1, 0, 0, 0};
 static float s_error_i[3];
 static uint8_t s_gravity_pending = 1;
+static uint8_t s_yaw_pending = 1;
 
 void Common_IMU_Reset(void)
 {
@@ -22,8 +23,20 @@ void Common_IMU_Reset(void)
     s_q.q1 = s_q.q2 = s_q.q3 = 0.0f;
     /* 清空加速度修正的积分项, 避免旧姿态累积的修正带入新姿态。 */
     memset(s_error_i, 0, sizeof(s_error_i));
-    /* 标记需要由首个有效加速度样本重新建立俯仰/横滚。 */
+    /* 标记需要由首个有效加速度样本重新建立俯仰/横滚, 并由首个有效水平磁场建立航向。 */
     s_gravity_pending = 1;
+    s_yaw_pending = 1;
+}
+
+void Common_IMU_ReseedYaw(uint8_t reseed_gravity)
+{
+    /* 校准后只重对齐航向；断采恢复还需先重建重力方向，避免用旧倾角投影磁场。 */
+    s_yaw_pending = 1;
+    if (reseed_gravity != 0)
+    {
+        s_gravity_pending = 1;
+        memset(s_error_i, 0, sizeof(s_error_i));
+    }
 }
 
 uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const float mag_uT[3], Euler_struct *euler, float dt)
@@ -35,8 +48,8 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
     float gyro[3];        /* 修正后的机体角速度，rad/s */
     float error[3] = {0}; /* 加速度与预测重力的方向误差 */
     /* norm: 向量模长(先用于加速度归一化, 后用于水平磁场归一化与四元数归一化);
-     * dot: 磁场在重力方向上的投影; half_roll/half_pitch: 初始姿态的半角。 */
-    float norm, dot, half_roll, half_pitch;
+     * dot: 磁场在重力方向上的投影; half_roll/half_pitch/half_yaw: 初始姿态的半角。 */
+    float norm, dot, half_roll, half_pitch, half_yaw;
     float north[3];      /* 四元数预测的单位磁北向量 */
     float horizontal[3]; /* 实测磁场的水平投影 */
     float cross[3];      /* 水平磁场与预测磁北的叉积 */
@@ -58,17 +71,20 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
     accel[2] = raw->Accel.Accel_z;
     norm = sqrtf(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]);
 
-    /* 首个有效重力样本建立俯仰/横滚；倒置时叉积为零，不能从正Z初值自行收敛。
-     * 航向从0开始，仍由后续磁参考修正；仅启动/显式Reset后执行一次。 */
+    /* 启动或断采恢复时用首个有效重力样本建立俯仰/横滚；倒置时不能依靠叉积自行收敛。
+     * 保留已有航向，无磁场时不清零；Reset后的单位四元数自然给出0航向。 */
     if (s_gravity_pending != 0 && norm > 0.75f * MPU6050_ACCEL_LSB_PER_G && norm < 1.25f * MPU6050_ACCEL_LSB_PER_G)
     {
         /* 由加速度方向直接算出横滚/俯仰半角, 再用半角三角值组合出初始四元数。 */
         half_roll = 0.5f * atan2f(accel[1], accel[2]);
         half_pitch = 0.5f * atan2f(-accel[0], sqrtf(accel[1] * accel[1] + accel[2] * accel[2]));
-        s_q.q0 = q0 = cosf(half_roll) * cosf(half_pitch);
-        s_q.q1 = q1 = sinf(half_roll) * cosf(half_pitch);
-        s_q.q2 = q2 = cosf(half_roll) * sinf(half_pitch);
-        s_q.q3 = q3 = -sinf(half_roll) * sinf(half_pitch);
+        half_yaw = 0.5f * atan2f(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3));
+        sine = sinf(half_yaw);
+        cosine = cosf(half_yaw);
+        s_q.q0 = q0 = cosf(half_roll) * cosf(half_pitch) * cosine + sinf(half_roll) * sinf(half_pitch) * sine;
+        s_q.q1 = q1 = sinf(half_roll) * cosf(half_pitch) * cosine - cosf(half_roll) * sinf(half_pitch) * sine;
+        s_q.q2 = q2 = cosf(half_roll) * sinf(half_pitch) * cosine + sinf(half_roll) * cosf(half_pitch) * sine;
+        s_q.q3 = q3 = cosf(half_roll) * cosf(half_pitch) * sine - sinf(half_roll) * sinf(half_pitch) * cosine;
         /* 初始姿态已建立, 后续不再重复此步骤。 */
         s_gravity_pending = 0;
     }
@@ -107,7 +123,7 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
     }
 
     /* 3. 磁场投影到水平面，仅沿重力轴修正航向，不直接拉动俯仰/横滚。 */
-    if (mag_uT != NULL && isfinite(mag_uT[0]) && isfinite(mag_uT[1]) && isfinite(mag_uT[2]))
+    if (s_gravity_pending == 0 && mag_uT != NULL && isfinite(mag_uT[0]) && isfinite(mag_uT[1]) && isfinite(mag_uT[2]))
     {
         /* 磁场与重力单位向量点乘, 得到磁场沿重力轴的分量。 */
         dot = mag_uT[0] * gravity[0] + mag_uT[1] * gravity[1] + mag_uT[2] * gravity[2];
@@ -136,10 +152,29 @@ uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const floa
             sine = cross[0] * gravity[0] + cross[1] * gravity[1] + cross[2] * gravity[2];
             cosine = horizontal[0] * north[0] + horizontal[1] * north[1] + horizontal[2] * north[2];
             heading_error = atan2f(sine, cosine); /* 跨 ±180° 取最短路径 */
-            for (i = 0; i < 3; ++i)
+            if (s_yaw_pending != 0)
             {
-                /* 航向误差只沿重力轴注入角速度, 不改变俯仰/横滚。 */
-                gyro[i] += 1.5f * heading_error * gravity[i]; /* 航向比例增益1.5/s */
+                /* 启动/退出后台或校准后首个有效水平磁场: 绕重力轴直接对齐真实磁北, 保持俯仰/横滚不变。 */
+                half_yaw = 0.5f * heading_error;
+                cosine = cosf(half_yaw);
+                sine = sinf(half_yaw);
+                s_q.q0 = q0 * cosine - (q1 * gravity[0] + q2 * gravity[1] + q3 * gravity[2]) * sine;
+                s_q.q1 = q1 * cosine + (q0 * gravity[0] - q3 * gravity[1] + q2 * gravity[2]) * sine;
+                s_q.q2 = q2 * cosine + (q3 * gravity[0] + q0 * gravity[1] - q1 * gravity[2]) * sine;
+                s_q.q3 = q3 * cosine + (-q2 * gravity[0] + q1 * gravity[1] + q0 * gravity[2]) * sine;
+                q0 = s_q.q0;
+                q1 = s_q.q1;
+                q2 = s_q.q2;
+                q3 = s_q.q3;
+                s_yaw_pending = 0;
+            }
+            else
+            {
+                for (i = 0; i < 3; ++i)
+                {
+                    /* 航向误差只沿重力轴注入角速度, 不改变俯仰/横滚; 提高磁增益使磁北主导真实航向。 */
+                    gyro[i] += 3.0f * heading_error * gravity[i];
+                }
             }
             mag_used = 1; /* 标记本拍已用磁参考。 */
         }

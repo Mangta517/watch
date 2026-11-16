@@ -1,5 +1,6 @@
 /* 真实心率服务，模拟 EM7028 波形、时钟和快照锁；不代表实板脉搏准确性。 */
 #include "app_heart.h"
+#include "bl24c02.h"
 #include "em7028.h"
 #include "main.h"
 #include "FreeRTOS.h"
@@ -8,10 +9,12 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static uint32_t tick;
 static uint16_t raw = 2000;
 static uint8_t locked;
+static uint8_t interval_change_on_take;
 static uint8_t running;
 static uint8_t chip_sampling;
 static em7028_result start_result = EM7028_OK;
@@ -23,6 +26,83 @@ static unsigned stops;
 static uint8_t expect_rejected;
 static em7028_fault read_fault = {EM7028_FAULT_READ, 0x29, 0};
 extern uint32_t host_heart_fault_diag;
+
+static uint8_t eeprom[BL24C02_CAPACITY_BYTES];
+static uint8_t eeprom_read_fail, eeprom_write_protected;
+static uint8_t eeprom_write_limit = 8;
+static unsigned eeprom_writes, eeprom_transactions;
+static bl24c02_transfer_struct *eeprom_active;
+
+uint8_t bl24c02_read(uint16_t address, uint8_t *data, uint16_t length)
+{
+    uint16_t i;
+    assert(locked == 0 && eeprom_active == NULL);
+    assert(address == 0xF0 && length == 16);
+    if (eeprom_read_fail != 0)
+    {
+        return 1;
+    }
+    for (i = 0; i < length; ++i)
+    {
+        data[i] = eeprom[address + i];
+    }
+    return 0;
+}
+
+void bl24c02_transfer_begin(bl24c02_transfer_struct *io, uint16_t address, uint8_t *data, uint16_t length, uint8_t write)
+{
+    assert(locked == 0 && eeprom_active == NULL);
+    assert(address >= 0xF0 && address + length <= sizeof(eeprom));
+    if (write != 0)
+    {
+        assert(length == 8 && address / BL24C02_PAGE_BYTES == (address + length - 1) / BL24C02_PAGE_BYTES);
+    }
+    eeprom_active = io;
+    ++eeprom_transactions;
+    io->address = address;
+    io->data = data;
+    io->remaining = length;
+    io->write = write;
+    io->phase = 0;
+}
+
+uint8_t bl24c02_transfer_step(bl24c02_transfer_struct *io)
+{
+    uint16_t i;
+    assert(locked == 0 && eeprom_active == io);
+    if (io->phase++ == 0)
+    {
+        return 2;
+    }
+    eeprom_active = NULL;
+    if (io->write != 0)
+    {
+        ++eeprom_writes;
+        if (eeprom_write_protected == 0)
+        {
+            for (i = 0; i < io->remaining && i < eeprom_write_limit; ++i)
+            {
+                eeprom[io->address + i] = io->data[i];
+            }
+        }
+        if (eeprom_write_limit < io->remaining)
+        {
+            return 1;
+        }
+    }
+    else
+    {
+        if (eeprom_read_fail != 0)
+        {
+            return 1;
+        }
+        for (i = 0; i < io->remaining; ++i)
+        {
+            io->data[i] = eeprom[io->address + i];
+        }
+    }
+    return 0;
+}
 
 void em7028_get_fault(em7028_fault *fault)
 {
@@ -48,6 +128,12 @@ SemaphoreHandle_t xSemaphoreCreateMutex(void)
 int xSemaphoreTake(SemaphoreHandle_t mutex, TickType_t wait)
 {
     assert(mutex == &locked && wait == portMAX_DELAY && locked == 0);
+    if (interval_change_on_take != 0)
+    {
+        interval_change_on_take = 0;
+        ++tick;
+        app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    }
     locked = 1;
     return 1;
 }
@@ -499,7 +585,7 @@ static void sleep_tests(void)
     uint32_t elapsed, cycle_ms;
     unsigned before;
     stop_result = start_result = read_result = EM7028_OK;
-    app_heart_set_auto_enabled(1); /* 前序用例会切换开关，本用例重新开启后台自动心率。 */
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
     app_heart_set_enabled(1);
     app_heart_service();
     tick = UINT32_MAX - 1000;
@@ -563,41 +649,50 @@ static void sleep_tests(void)
     puts("PASS: sleep heart first/next 10min deadlines, 10s timeout, early valid stop, retained result, no raw queue, failed start, manual restore and tick wrap.");
 }
 
-/* 后台自动心率独立开关：关闭时熄屏满十分钟也不起测，启用后窗口内关闭立即停测关LED并保留有效值，
- * 计时从启用/熄屏起且不因service重置（跨tick回绕），手动START/STOP与SPORT不受影响。 */
-static void auto_toggle_tests(void)
+/* 两种周期切换重新计时，重复点击保持截止时间；窗口、手动测量和SPORT沿用原流程。 */
+static void auto_interval_tests(void)
 {
     app_heart_struct heart;
     uint32_t elapsed;
-    unsigned i;
     stop_result = start_result = read_result = EM7028_OK;
     app_heart_set_sleep_mode(0);
     app_heart_set_enabled(0);
     app_heart_service();
-    /* 关闭后台：熄屏满十分钟不起测，快照不显示继续采样。 */
-    app_heart_set_auto_enabled(0);
-    assert(app_heart_get_auto_enabled() == 0);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    tick = UINT32_MAX - 30000;
     app_heart_set_sleep_mode(1);
-    tick += 600000;
+    /* 模拟UI抢先更新周期起点，sensor使用取得锁后的tick避免无符号减法误判到期。 */
+    interval_change_on_take = 1;
+    app_heart_service();
+    assert(running == 0 && app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
+    tick += 30000;
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    app_heart_set_auto_interval((app_heart_auto_interval)-1);
+    app_heart_set_auto_interval((app_heart_auto_interval)2);
+    app_heart_set_auto_interval((app_heart_auto_interval)256);
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
+    tick += 29999;
     app_heart_service();
     assert(running == 0 && app_heart_sleep_pending() == 0);
-    app_heart_get_snapshot(&heart);
-    assert(heart.enabled == 0 && heart.state == APP_HEART_OFF);
-    /* 开启后从启用时刻起算，反复service不得重置周期；跨越32位回绕恰好十分钟才到期起测。 */
-    tick = UINT32_MAX - 300000;
-    app_heart_set_auto_enabled(1);
-    assert(app_heart_get_auto_enabled() != 0);
-    for (elapsed = 100; elapsed < 600000; elapsed += 100)
-    {
-        tick += 100;
-        app_heart_service();
-        assert(running == 0 && app_heart_sleep_pending() == 0);
-    }
-    tick += 100;
+    ++tick;
     assert(app_heart_sleep_pending() != 0);
     app_heart_service();
-    assert(running != 0 && chip_sampling != 0); /* 到期起测并点亮LED。 */
-    /* 窗口内喂入有效波形得到自动结果后关闭后台开关：sensor立即停测关LED并保留有效值。 */
+    assert(running != 0 && chip_sampling != 0);
+    /* 在途窗口切换周期仍在原10秒截止停测，下一周期从切换时刻起算。 */
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    tick += 9999;
+    raw = 2000;
+    app_heart_service();
+    assert(running != 0);
+    ++tick;
+    app_heart_service();
+    assert(running == 0 && chip_sampling == 0);
+    tick += 589999;
+    assert(app_heart_sleep_pending() == 0);
+    ++tick;
+    app_heart_service();
+    assert(running != 0);
+    /* 有效波形提前停测，最近有效值跨周期切换保留。 */
     for (elapsed = 20; elapsed <= 10000 && running != 0; elapsed += 20)
     {
         tick += 20;
@@ -605,49 +700,193 @@ static void auto_toggle_tests(void)
         app_heart_service();
     }
     app_heart_get_snapshot(&heart);
-    assert(heart.last_bpm >= 86 && heart.last_bpm <= 94); /* 已保留自动有效值。 */
-    app_heart_set_auto_enabled(0);
-    do
-    {
-        tick += 20;
-        app_heart_service();
-    } while (running != 0);
-    app_heart_get_snapshot(&heart);
-    assert(running == 0 && chip_sampling == 0); /* LED随停测关闭。 */
-    assert(heart.enabled == 0 && app_heart_sleep_pending() == 0);
-    assert(heart.last_bpm >= 86 && heart.last_bpm <= 94); /* 关闭后台不清除已得有效值。 */
-    /* 开关独立于手动：亮屏时手动START/STOP不受后台开关影响。 */
+    assert(running == 0 && elapsed < 10000 && heart.last_bpm >= 86 && heart.last_bpm <= 94);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    tick += 59000;
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    tick += 599999;
+    app_heart_service();
+    assert(running == 0 && app_heart_sleep_pending() == 0);
+    ++tick;
+    assert(app_heart_sleep_pending() != 0);
     app_heart_set_sleep_mode(0);
-    app_heart_set_auto_enabled(1);
     app_heart_set_enabled(1);
     app_heart_service();
-    assert(running != 0);
-    app_heart_set_auto_enabled(0); /* 关后台不影响进行中的手动测量。 */
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
     app_heart_service();
     app_heart_get_snapshot(&heart);
     assert(running != 0 && heart.enabled != 0);
     app_heart_set_enabled(0);
     app_heart_service();
-    assert(running == 0);
-    /* SPORT强制连续与后台开关无关：自动关闭时运动模式仍持续采样。 */
     app_heart_set_sport_mode(1);
     app_heart_service();
-    assert(running != 0);
-    for (i = 0; i < 100; ++i)
-    {
-        tick += 10;
-        raw = (uint16_t)(2000.0f + 80.0f * sinf((float)i * 90.0f * 6.2831853f / 60000.0f));
-        app_heart_service();
-    }
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    tick += 10000;
+    app_heart_service();
     app_heart_get_snapshot(&heart);
     assert(running != 0 && heart.enabled != 0);
     app_heart_set_sport_mode(0);
     app_heart_service();
     assert(running == 0);
-    puts("PASS: background auto heart independent switch, 10min deadline from enable/tick-wrap without per-service reset, mid-window disable stops LED and retains value, manual and SPORT unaffected.");
+    puts("PASS: 1/10min deadlines, same/invalid selections, UI preemption, tick wrap, in-window changes, early valid stop, manual and SPORT.");
 }
 
-int main(void)
+static void store_drain(void)
+{
+    uint8_t i;
+    for (i = 0; i < 24; ++i)
+    {
+        app_heart_store_service(1);
+    }
+    assert(eeprom_active == NULL);
+}
+
+static void store_tests(void)
+{
+    uint16_t i;
+    uint8_t prefix, byte;
+    unsigned before;
+    /* CRC夹具由Python zlib.crc32独立生成，覆盖序号255到0及相同序号。 */
+    static const uint8_t old_record[8] = {'H', 'R', 1, 255, 0xDC, 0x8B, 0xC5, 0x24};
+    static const uint8_t next_record[8] = {'H', 'R', 0, 0, 0x10, 0x55, 0xDC, 0x10};
+    static const uint8_t invalid_interval[8] = {'H', 'R', 2, 1, 0x04, 0x07, 0xED, 0x55};
+    for (i = 0; i < 0xF0; ++i)
+    {
+        eeprom[i] = (uint8_t)(i ^ 0x5A);
+    }
+    memset(eeprom + 0xF0, 0xFF, 16);
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    store_drain();
+    assert(eeprom_writes == 0 && eeprom_transactions == 0);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN && eeprom_transactions == 0);
+    assert(app_heart_store_service(0) == 0 && eeprom_transactions == 0);
+    assert(app_heart_store_service(1) == 1);
+    while (app_heart_store_service(0) != 0)
+    {
+        assert(eeprom_transactions <= 2);
+    }
+    assert(eeprom_writes == 1 && eeprom[0xF0] == 'H' && eeprom[0xF2] == 1 && eeprom[0xF3] == 1);
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
+    store_drain();
+    assert(eeprom_writes == 1);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    store_drain();
+    assert(eeprom[0xFA] == 0 && eeprom[0xFB] == 2 && eeprom_writes == 2);
+    for (byte = 0; byte < 8; ++byte)
+    {
+        eeprom[0xF8 + byte] ^= 0x80;
+        app_heart_init();
+        assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
+        eeprom[0xF8 + byte] ^= 0x80;
+    }
+    /* 在途值先保存完成，后续请求仍须继续落盘。 */
+    app_heart_init();
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    assert(app_heart_store_service(1) == 1);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    store_drain();
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN && eeprom_writes == 4);
+    /* 写已完成而读回失败，随后改回旧值，必须先重读再决定是否还需要写。 */
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    assert(app_heart_store_service(1) == 1);
+    assert(app_heart_store_service(0) == 1);
+    assert(app_heart_store_service(0) == 1);
+    assert(eeprom_active != NULL && eeprom_active->write == 0);
+    eeprom_read_fail = 1;
+    assert(app_heart_store_service(0) == 1);
+    assert(app_heart_store_service(0) == 0);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    before = eeprom_transactions;
+    assert(app_heart_store_service(1) == 0 && eeprom_transactions == before);
+    eeprom_read_fail = 0;
+    tick += 1000;
+    store_drain();
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN && eeprom_writes == 6);
+    /* 写保护触发读回不一致，事务释放后延迟重试。 */
+    eeprom_write_protected = 1;
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    store_drain();
+    assert(eeprom_writes == 7 && app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
+    before = eeprom_transactions;
+    tick += 999;
+    assert(app_heart_store_service(1) == 0 && eeprom_transactions == before);
+    eeprom_write_protected = 0;
+    ++tick;
+    store_drain();
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN && eeprom_writes == 8);
+    /* 每个不完整前缀模拟目标槽掉电撕裂，重启恢复另一个有效槽。 */
+    for (prefix = 0; prefix < 8; ++prefix)
+    {
+        memset(eeprom + 0xF8, 0xFF, 8);
+        app_heart_init();
+        eeprom_write_limit = prefix;
+        app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+        assert(app_heart_store_service(1) == 1);
+        assert(app_heart_store_service(1) == 1);
+        assert(app_heart_store_service(1) == 0);
+        app_heart_init();
+        assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
+    }
+    eeprom_write_limit = 8;
+    /* 启动读失败时先保留默认值，存储恢复后先扫描旧记录再写另一槽。 */
+    eeprom_read_fail = 1;
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    store_drain();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
+    eeprom_read_fail = 0;
+    tick += 1000;
+    before = eeprom_writes;
+    store_drain();
+    assert(eeprom_writes == before);
+    /* 验证独立CRC夹具以及8位序号回绕后的最新选择。 */
+    for (byte = 0; byte < 8; ++byte)
+    {
+        eeprom[0xF0 + byte] = old_record[byte];
+        eeprom[0xF8 + byte] = invalid_interval[byte];
+    }
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
+    for (byte = 0; byte < 8; ++byte)
+    {
+        eeprom[0xF8 + byte] = next_record[byte];
+    }
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    store_drain();
+    assert(eeprom[0xF3] == 1);
+    for (byte = 0; byte < 8; ++byte)
+    {
+        eeprom[0xF8 + byte] = eeprom[0xF0 + byte];
+    }
+    app_heart_init();
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    store_drain();
+    assert(eeprom[0xFB] == 2); /* 相同序号选槽0，下一次应写槽1。 */
+    for (i = 0; i < 260; ++i)
+    {
+        app_heart_set_auto_interval((app_heart_auto_interval)((i + 1) % 2));
+        store_drain();
+        app_heart_init();
+        assert(app_heart_get_auto_interval() == (app_heart_auto_interval)((i + 1) % 2));
+    }
+    for (i = 0; i < 0xF0; ++i)
+    {
+        assert(eeprom[i] == (uint8_t)(i ^ 0x5A));
+    }
+    puts("PASS: HR CRC fixtures, defaults, async arbitration, reboot restore, corruption/torn writes, concurrent changes, read/write failures, retry and sequence wrap.");
+}
+
+int main(int argc, char **argv)
 {
     app_heart_struct heart;
     uint16_t retained_bpm;
@@ -655,6 +894,11 @@ int main(void)
     unsigned i;
     static const unsigned rates[] = {40, 60, 90, 120, 180, 200};
     static const unsigned rejected_rates[] = {30, 35, 220, 250, 500};
+    if (argc > 1 && strcmp(argv[1], "store") == 0)
+    {
+        store_tests();
+        return 0;
+    }
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_ERROR && heart.bpm == 0);
     read_fault = (em7028_fault){EM7028_FAULT_CONFIG, 0x0D, 0xFF};
@@ -665,13 +909,13 @@ int main(void)
     assert(heart.fault.kind == EM7028_FAULT_CONFIG && heart.fault.reg == 0x0D && heart.fault.value == 0xFF);
     assert(host_heart_fault_diag == 0xFF0D0402);
     puts("PASS: startup fault is available to the BLE snapshot and existing diagnostic result before manual START.");
-    assert(app_heart_get_auto_enabled() != 0); /* 开机默认开启后台每10分钟测量。 */
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN);
     app_heart_set_enabled(1);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_MEASURING && running == 0);
     app_heart_set_enabled(0);
 
-    /* 默认开关无需手动启用，首次熄屏满10分钟起测，10秒超时后停止。 */
+    /* 默认周期在首次熄屏满10分钟起测，10秒超时后停止。 */
     app_heart_set_sleep_mode(1);
     tick += 599999;
     app_heart_service();
@@ -683,7 +927,7 @@ int main(void)
     app_heart_service();
     assert(running == 0 && chip_sampling == 0 && app_heart_sleep_pending() == 0);
     app_heart_set_sleep_mode(0);
-    puts("PASS: default auto heart starts after 10min screen-off without toggling AUTO and stops after 10s.");
+    puts("PASS: default auto heart starts after 10min screen-off and stops after 10s.");
 
     /* 原始样本按成功读取顺序发送，溢出保留最新32帧，失败读数不得入队。 */
     assert(app_heart_read_samples(NULL, 1) == 0);
@@ -983,7 +1227,7 @@ int main(void)
     assert(app_heart_service() == 1 && app_heart_sleep_pending() == 0);
     assert(chip_sampling == 0);
     assert(app_heart_service() == 0);
-    app_heart_set_auto_enabled(1); /* 后续熄屏窗口重试/fault用例需要后台开关开启。 */
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
     app_heart_set_sleep_mode(1);
     tick += 600000;
     app_heart_service();
@@ -1032,6 +1276,24 @@ int main(void)
     puts("PASS: manual/automatic/fault stops retain a pending close through NACKs and stop retrying after success.");
     sleep_tests();
     sport_tests();
-    auto_toggle_tests();
+    auto_interval_tests();
+    /* 后台窗口启动后转入运动模式：旧窗口的10秒截止不得关闭连续采样。 */
+    app_heart_set_sport_mode(0);
+    app_heart_set_sleep_mode(0);
+    app_heart_set_enabled(0);
+    app_heart_service();
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    app_heart_set_sleep_mode(1);
+    tick += 600000;
+    app_heart_service();
+    assert(chip_sampling != 0);
+    app_heart_set_sport_mode(1);
+    tick += 10000;
+    {
+        unsigned stops_before = stops;
+        app_heart_service();
+        assert(stops == stops_before && chip_sampling != 0);
+    }
+    puts("PASS: entering sport mode during an automatic window preserves continuous sampling past its old deadline.");
     return 0;
 }

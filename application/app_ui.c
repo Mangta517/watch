@@ -62,6 +62,12 @@
 #define WATCH_DIAL_HEIGHT    280
 #define WATCH_DIAL_CENTER_X  (WATCH_DIAL_WIDTH / 2)
 #define WATCH_DIAL_CENTER_Y  (WATCH_DIAL_HEIGHT / 2)
+#define WATCH_DIAL_FACE_RADIUS 44
+
+/* Flash刻度表由240x280布局生成；改布局时必须同时重新生成坐标。 */
+#if WATCH_DIAL_WIDTH != 240 || WATCH_DIAL_HEIGHT != 280
+#error Regenerate dial coordinate tables for the new dial size.
+#endif
 #define WATCH_HOUR_RADIUS    46
 #define WATCH_MINUTE_RADIUS  72
 #define WATCH_SECOND_RADIUS  92
@@ -153,6 +159,7 @@ typedef struct
         uint8_t calibration_waiting;
         lv_obj_t *pressure;
         lv_obj_t *altitude;
+        lv_obj_t *unit;
         ui_trend_struct trend;
         uint32_t refresh_tick;
         uint32_t history_sequence;
@@ -161,13 +168,14 @@ typedef struct
     {
         lv_obj_t *card;
         lv_obj_t *value;
+        lv_obj_t *unit;
         lv_obj_t *status;
         lv_obj_t *summary;
         lv_obj_t *details;
         lv_obj_t *details_title;
         lv_obj_t *button;
-        lv_obj_t *auto_button;
-        lv_obj_t *auto_label;
+        lv_obj_t *auto_buttons[2];
+        lv_obj_t *auto_labels[2];
         ui_trend_struct trend;
     } heart;
     struct
@@ -200,6 +208,7 @@ typedef struct
     {
         lv_obj_t *button;
         lv_obj_t *label;
+        lv_obj_t *status;
     } sport;
 } ui_page_refs_struct;
 
@@ -575,31 +584,115 @@ static void weather_icon_draw_cb(lv_event_t *event)
     }
 }
 
+typedef enum
+{
+    UI_ICON_MOTION,
+    UI_ICON_BAROMETER,
+    UI_ICON_WEATHER,
+    UI_ICON_STEPS,
+    UI_ICON_DROP
+} ui_vector_icon_t;
+
+/* 同一套20px几何用于网格徽章和表盘细环，不增加位图或字形。 */
+static void vector_icon_draw_cb(lv_event_t *event)
+{
+    lv_draw_ctx_t *context = lv_event_get_draw_ctx(event);
+    lv_area_t area;
+    lv_draw_rect_dsc_t fill;
+    lv_draw_arc_dsc_t arc;
+    lv_point_t points[3];
+    ui_vector_icon_t icon = (ui_vector_icon_t)(uintptr_t)lv_event_get_user_data(event);
+    lv_obj_get_coords(lv_event_get_target(event), &area);
+    lv_draw_rect_dsc_init(&fill);
+    switch (icon)
+    {
+    case UI_ICON_MOTION:
+        points[0] = (lv_point_t){area.x1 + 10, area.y1 + 1};
+        points[1] = (lv_point_t){area.x1 + 3, area.y1 + 10};
+        points[2] = (lv_point_t){area.x1 + 10, area.y1 + 19};
+        fill.bg_color = lv_color_hex(UI_ROSE);
+        lv_draw_polygon(context, &fill, points, 3);
+        points[1].x = area.x1 + 17;
+        fill.bg_color = lv_color_hex(UI_BLUE);
+        lv_draw_polygon(context, &fill, points, 3);
+        break;
+    case UI_ICON_BAROMETER:
+        weather_icon_line(context, &area, 1, 17, 7, 8, UI_CYAN);
+        weather_icon_line(context, &area, 7, 8, 12, 17, UI_CYAN);
+        weather_icon_line(context, &area, 10, 14, 15, 10, UI_BLUE);
+        weather_icon_line(context, &area, 15, 10, 19, 17, UI_BLUE);
+        lv_draw_arc_dsc_init(&arc);
+        arc.color = lv_color_hex(UI_MUTED);
+        arc.width = 2;
+        arc.rounded = 1;
+        points[0] = (lv_point_t){area.x1 + 10, area.y1 + 10};
+        lv_draw_arc(context, &arc, &points[0], 9, 215, 325);
+        break;
+    case UI_ICON_WEATHER:
+        weather_icon_shape(context, &area, 1, 1, 11, 11, UI_AMBER);
+        weather_icon_shape(context, &area, 7, 7, 10, 10, UI_TEXT);
+        weather_icon_shape(context, &area, 2, 11, 18, 7, UI_TEXT);
+        break;
+    case UI_ICON_STEPS:
+        weather_icon_shape(context, &area, 1, 4, 6, 9, UI_BATTERY_GREEN);
+        weather_icon_shape(context, &area, 2, 0, 4, 3, UI_BATTERY_GREEN);
+        weather_icon_shape(context, &area, 11, 8, 6, 9, UI_BATTERY_GREEN);
+        weather_icon_shape(context, &area, 12, 4, 4, 3, UI_BATTERY_GREEN);
+        break;
+    case UI_ICON_DROP:
+        points[0] = (lv_point_t){area.x1 + 10, area.y1 + 1};
+        points[1] = (lv_point_t){area.x1 + 4, area.y1 + 12};
+        points[2] = (lv_point_t){area.x1 + 16, area.y1 + 12};
+        fill.bg_color = lv_color_hex(UI_CYAN);
+        lv_draw_polygon(context, &fill, points, 3);
+        weather_icon_shape(context, &area, 4, 7, 13, 13, UI_CYAN);
+        break;
+    }
+}
+
+static void vector_icon(lv_obj_t *parent, int x, int y, ui_vector_icon_t icon)
+{
+    lv_obj_t *obj = ui_panel(parent, x, y, 20, 20, UI_BG);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(obj, vector_icon_draw_cb, LV_EVENT_DRAW_MAIN, (void *)(uintptr_t)icon);
+}
+
 static void card(const char *icon, const char *title, int index, uint32_t accent, const ui_page_t *destination)
 {
-    /* 两列四行对称圆角方形磁贴: 宽102、高64，列间距8像素、行间距6像素。 */
-    lv_obj_t *obj = ui_card(s_body, (index % 2) * 110, 2 + (index / 2) * 70, 102, 64, UI_CARD, UI_BORDER, 14);
-    /* 卡片顶部居中的30x30圆角图标徽章，作为card子节点以免改变s_body子索引。 */
-    lv_obj_t *badge = ui_card(obj, 36, 8, 30, 30, UI_CARD_ALT, accent, 10);
-    /* 卡片底部标题，宽度撑满磁贴并水平居中。 */
+    static const uint32_t badge_colors[] = {0x302035, 0x142D43, 0x123536, 0x14332C,
+                                           0x362D1D, 0x142D43, 0x35271F, 0x14332C};
+    lv_obj_t *obj = ui_card(s_body, (index % 2) * 110, 2 + (index / 2) * 70, 102, 64, UI_CARD_SOFT, 0, 14);
+    lv_obj_t *badge = ui_card(obj, 35, 7, 32, 32, badge_colors[index], 0, 11);
     lv_obj_t *caption = ui_label(obj, title, 0, 44, &lv_font_montserrat_10, UI_TEXT);
     lv_obj_clear_flag(badge, LV_OBJ_FLAG_CLICKABLE);
-    /* 目标页是心率页时，用自绘心形代替字体图标。 */
-    if (*destination == PAGE_HEART)
+    switch (*destination)
     {
-        /* 心形居中放在30x30徽章内部(20x20 -> 偏移5,5)。 */
-        heart_icon(badge, 5, 5);
-    }
-    else
+    case PAGE_HEART:
+        heart_icon(badge, 6, 6);
+        break;
+    case PAGE_MOTION:
+        vector_icon(badge, 6, 6, UI_ICON_MOTION);
+        break;
+    case PAGE_ENVIRONMENT:
+        vector_icon(badge, 6, 6, UI_ICON_BAROMETER);
+        break;
+    case PAGE_WEATHER:
+        vector_icon(badge, 6, 6, UI_ICON_WEATHER);
+        break;
+    case PAGE_AHT21:
+        vector_icon(badge, 6, 6, UI_ICON_DROP);
+        break;
+    default:
     {
-        /* 其他卡片用20号符号字体放在徽章内，颜色取强调色。 */
-        lv_obj_t *symbol = ui_label(badge, icon, 0, 4, &lv_font_montserrat_20, accent);
-        lv_obj_set_width(symbol, 30);
+        lv_obj_t *symbol = ui_label(badge, icon, 0, 5, &lv_font_montserrat_20, accent);
+        lv_obj_set_width(symbol, 32);
         lv_obj_set_style_text_align(symbol, LV_TEXT_ALIGN_CENTER, 0);
+        break;
+    }
     }
     lv_obj_set_width(caption, 102);
     lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
-    /* 把整张磁贴注册为入口，点击后跳到destination页。 */
     make_entry(obj, destination);
 }
 
@@ -613,60 +706,86 @@ static uint32_t humidity_ring_color(int32_t rh_percent)
     return UI_CYAN;
 }
 
-static void watch_dial_ray_offset(int16_t angle_deg, float inset, lv_coord_t *dx_out, lv_coord_t *dy_out)
+/* 半宽115、半高135、圆角41的射线交点存于Flash；刻度内缩12/9/5像素，分块刷新只查表。 */
+static const lv_point_t s_dial_ticks[60][2] =
 {
-    const float half_w = 115.0f;
-    const float half_h = 135.0f;
-    const float corner_r = 41.0f;
-    const float box_x = half_w - corner_r;
-    const float box_y = half_h - corner_r;
-    float rad = (float)angle_deg * 3.14159265f / 180.0f;
-    float sx = sinf(rad);
-    float cy = cosf(rad);
-    float ux = fabsf(sx);
-    float uy = fabsf(cy);
-    float dist;
+    {{0, -123}, {0, -135}},
+    {{14, -130}, {14, -135}},
+    {{28, -130}, {29, -135}},
+    {{42, -130}, {44, -135}},
+    {{58, -130}, {60, -135}},
+    {{73, -127}, {78, -135}},
+    {{91, -126}, {94, -130}},
+    {{103, -115}, {107, -119}},
+    {{110, -99}, {114, -103}},
+    {{111, -81}, {115, -84}},
+    {{107, -62}, {115, -66}},
+    {{110, -49}, {115, -51}},
+    {{110, -36}, {115, -37}},
+    {{110, -23}, {115, -24}},
+    {{110, -12}, {115, -12}},
+    {{103, 0}, {115, 0}},
+    {{110, 12}, {115, 12}},
+    {{110, 23}, {115, 24}},
+    {{110, 36}, {115, 37}},
+    {{110, 49}, {115, 51}},
+    {{107, 62}, {115, 66}},
+    {{111, 81}, {115, 84}},
+    {{110, 99}, {114, 103}},
+    {{103, 115}, {107, 119}},
+    {{91, 126}, {94, 130}},
+    {{73, 127}, {78, 135}},
+    {{58, 130}, {60, 135}},
+    {{42, 130}, {44, 135}},
+    {{28, 130}, {29, 135}},
+    {{14, 130}, {14, 135}},
+    {{0, 123}, {0, 135}},
+    {{-14, 130}, {-14, 135}},
+    {{-28, 130}, {-29, 135}},
+    {{-42, 130}, {-44, 135}},
+    {{-58, 130}, {-60, 135}},
+    {{-73, 127}, {-78, 135}},
+    {{-91, 126}, {-94, 130}},
+    {{-103, 115}, {-107, 119}},
+    {{-110, 99}, {-114, 103}},
+    {{-111, 81}, {-115, 84}},
+    {{-107, 62}, {-115, 66}},
+    {{-110, 49}, {-115, 51}},
+    {{-110, 36}, {-115, 37}},
+    {{-110, 23}, {-115, 24}},
+    {{-110, 12}, {-115, 12}},
+    {{-103, 0}, {-115, 0}},
+    {{-110, -12}, {-115, -12}},
+    {{-110, -23}, {-115, -24}},
+    {{-110, -36}, {-115, -37}},
+    {{-110, -49}, {-115, -51}},
+    {{-107, -62}, {-115, -66}},
+    {{-111, -81}, {-115, -84}},
+    {{-110, -99}, {-114, -103}},
+    {{-103, -115}, {-107, -119}},
+    {{-91, -126}, {-94, -130}},
+    {{-73, -127}, {-78, -135}},
+    {{-58, -130}, {-60, -135}},
+    {{-42, -130}, {-44, -135}},
+    {{-28, -130}, {-29, -135}},
+    {{-14, -130}, {-14, -135}},
+};
 
-    if (ux < 1e-5f)
-    {
-        dist = half_h / uy;
-    }
-    else if (uy < 1e-5f)
-    {
-        dist = half_w / ux;
-    }
-    else
-    {
-        float tx = half_w / ux;
-        float ty = half_h / uy;
-        if (ty <= tx && ty * ux <= box_x)
-        {
-            dist = ty;
-        }
-        else if (tx <= ty && tx * uy <= box_y)
-        {
-            dist = tx;
-        }
-        else
-        {
-            float b = ux * box_x + uy * box_y;
-            float c = box_x * box_x + box_y * box_y - corner_r * corner_r;
-            float disc = b * b - c;
-            dist = b + sqrtf(disc > 0.0f ? disc : 0.0f);
-        }
-    }
-    dist -= inset;
-    *dx_out = (lv_coord_t)floorf(sx * dist + 0.5f);
-    *dy_out = (lv_coord_t)floorf(-cy * dist + 0.5f);
-}
+static const lv_point_t s_dial_hours[4] =
+{
+    {91, 0},
+    {0, 113},
+    {-91, 0},
+    {0, -113},
+};
 
-/* 占满240x280整页的圆角方形表盘与60格全周刻度，状态与三个圆环参数嵌于表盘内部留白。 */
+/* 240x280圆角表盘与60格刻度，顶部状态胶囊、底部两环共用局部刷新路径。 */
 static void clock_dial_draw_cb(lv_event_t *event)
 {
     /* 事件目标就是表盘容器，取它作为坐标原点。 */
     lv_obj_t *dial = lv_event_get_target(event);
     /* 绘制上下文。 */
-    lv_draw_ctx_t *context = lv_event_get_draw_ctx(event);
+    lv_draw_ctx_t *context;
     /* 表盘绝对坐标区域及全屏圆角表盘区域。 */
     lv_area_t area, face_area;
     /* 表盘底色样式。 */
@@ -675,57 +794,65 @@ static void clock_dial_draw_cb(lv_event_t *event)
     lv_draw_line_dsc_t style;
     /* 刻度内端和外端点。 */
     lv_point_t inner, outer;
-    /* 60格刻度角度与计数。 */
-    int16_t angle;
-    float tick_inset;
-    lv_coord_t dx, dy;
+    /* 60格刻度计数。 */
     uint8_t i;
     /* 取表盘控件坐标，圆心位于(120,140)。 */
     lv_obj_get_coords(dial, &area);
-    /* 画覆盖236x276整页的深蓝表盘底色与细描边，四角外围保留UI_BG底色。 */
+    face_area.x1 = area.x1 + 2;
+    face_area.y1 = area.y1 + 2;
+    face_area.x2 = area.x2 - 2;
+    face_area.y2 = area.y2 - 2;
+    if (lv_event_get_code(event) == LV_EVENT_COVER_CHECK)
+    {
+        lv_cover_check_info_t *info = lv_event_get_param(event);
+        /* 自绘底框在圆角内部完全覆盖，允许LVGL从表盘开始重绘。 */
+        if (info->res != LV_COVER_RES_MASKED && _lv_area_is_in(info->area, &face_area, WATCH_DIAL_FACE_RADIUS))
+        {
+            info->res = LV_COVER_RES_COVER;
+        }
+        return;
+    }
+    context = lv_event_get_draw_ctx(event);
+    /* 圆角内部完全覆盖，四角外围保留UI_BG底色。 */
     lv_draw_rect_dsc_init(&face);
     face.bg_color = lv_color_hex(0x06192D);
     face.bg_opa = LV_OPA_COVER;
-    face.border_color = lv_color_hex(UI_BORDER_STRONG);
-    face.border_width = 1;
-    face.border_opa = LV_OPA_COVER;
-    face.radius = 44;
-    face_area.x1 = area.x1 + 2;
-    face_area.y1 = area.y1 + 2;
-    face_area.x2 = area.x1 + WATCH_DIAL_WIDTH - 2;
-    face_area.y2 = area.y1 + WATCH_DIAL_HEIGHT - 2;
+    face.border_width = 0;
+    face.radius = WATCH_DIAL_FACE_RADIUS;
     lv_draw_rect(context, &face, &face_area);
     /* 初始化线条样式，循环内只改颜色和宽度。 */
     lv_draw_line_dsc_init(&style);
     /* 一圈60格，每格6度，沿全屏表盘外缘分布。 */
     for (i = 0; i < 60; ++i)
     {
-        angle = i * 6;
         /* 3/6/9/12整点用亮蓝长刻度，其余整点用青灰刻度，分钟格用短细线。 */
         if (i % 15 == 0)
         {
-            tick_inset = 12.0f;
             style.color = lv_color_hex(UI_BLUE);
             style.width = 2;
         }
         else if (i % 5 == 0)
         {
-            tick_inset = 9.0f;
             style.color = lv_color_hex(UI_MUTED);
             style.width = 2;
         }
         else
         {
-            tick_inset = 5.0f;
-            style.color = lv_color_hex(UI_BORDER);
+            style.color = lv_color_hex(0x17344B);
             style.width = 1;
         }
-        watch_dial_ray_offset(angle, tick_inset, &dx, &dy);
-        inner.x = area.x1 + WATCH_DIAL_CENTER_X + dx;
-        inner.y = area.y1 + WATCH_DIAL_CENTER_Y + dy;
-        watch_dial_ray_offset(angle, 0.0f, &dx, &dy);
-        outer.x = area.x1 + WATCH_DIAL_CENTER_X + dx;
-        outer.y = area.y1 + WATCH_DIAL_CENTER_Y + dy;
+        inner.x = area.x1 + WATCH_DIAL_CENTER_X + s_dial_ticks[i][0].x;
+        inner.y = area.y1 + WATCH_DIAL_CENTER_Y + s_dial_ticks[i][0].y;
+        outer.x = area.x1 + WATCH_DIAL_CENTER_X + s_dial_ticks[i][1].x;
+        outer.y = area.y1 + WATCH_DIAL_CENTER_Y + s_dial_ticks[i][1].y;
+        /* 先跳过当前条带/脏区外的刻度，留足线宽边缘。 */
+        if (LV_MAX(inner.x, outer.x) + style.width < context->clip_area->x1 ||
+            LV_MIN(inner.x, outer.x) - style.width > context->clip_area->x2 ||
+            LV_MAX(inner.y, outer.y) + style.width < context->clip_area->y1 ||
+            LV_MIN(inner.y, outer.y) - style.width > context->clip_area->y2)
+        {
+            continue;
+        }
         lv_draw_line(context, &style, &inner, &outer);
     }
 }
@@ -736,6 +863,8 @@ static lv_obj_t *clock_hand(lv_obj_t *dial, lv_point_t *points, uint8_t width, u
     lv_obj_t *hand = lv_line_create(dial);
     /* 去掉线条默认样式。 */
     lv_obj_remove_style_all(hand);
+    /* 点数组坐标属于整个表盘；固定尺寸，更新时只标脏新旧线段。 */
+    lv_obj_set_size(hand, WATCH_DIAL_WIDTH, WATCH_DIAL_HEIGHT);
     /* 指针颜色使用传入值(时针白、分针橙、秒针红)。 */
     lv_obj_set_style_line_color(hand, lv_color_hex(color), 0);
     /* 指针线宽由调用方指定，单位像素。 */
@@ -769,122 +898,89 @@ static void set_clock_hand(lv_obj_t *hand, lv_point_t *points, float degrees, ui
     /* 只有端点确实变化时才更新线条，避免同一位置重复重绘。 */
     if (endpoint.x != points[1].x || endpoint.y != points[1].y)
     {
-        /* 保存新端点。 */
+        lv_area_t coords, dirty;
+        lv_coord_t pad = lv_obj_get_style_line_width(hand, LV_PART_MAIN) + 1;
+        lv_obj_get_coords(hand, &coords);
+        dirty.x1 = coords.x1 + LV_MIN(points[0].x, LV_MIN(points[1].x, endpoint.x)) - pad;
+        dirty.y1 = coords.y1 + LV_MIN(points[0].y, LV_MIN(points[1].y, endpoint.y)) - pad;
+        dirty.x2 = coords.x1 + LV_MAX(points[0].x, LV_MAX(points[1].x, endpoint.x)) + pad;
+        dirty.y2 = coords.y1 + LV_MAX(points[0].y, LV_MAX(points[1].y, endpoint.y)) + pad;
+        /* lv_line已持有数组地址，直接更新端点，避免set_points把整对象标脏。 */
         points[1] = endpoint;
-        /* 用更新后的两点刷新线条几何。 */
-        lv_line_set_points(hand, points, 2);
+        lv_obj_invalidate_area(hand, &dirty);
     }
-}
-
-static void steps_icon_draw_cb(lv_event_t *event)
-{
-    /* 图标所在控件区域。 */
-    lv_area_t area;
-    /* 绘制上下文。 */
-    lv_draw_ctx_t *context = lv_event_get_draw_ctx(event);
-    /* 取控件绝对坐标作为相对绘制原点。 */
-    lv_obj_get_coords(lv_event_get_target(event), &area);
-    /* 左脚掌主体: 6x9绿色胶囊。 */
-    weather_icon_shape(context, &area, 1, 4, 6, 9, UI_GREEN);
-    /* 左脚趾: 4x3绿色小圆。 */
-    weather_icon_shape(context, &area, 2, 0, 4, 3, UI_GREEN);
-    /* 右脚掌主体: 6x9绿色胶囊。 */
-    weather_icon_shape(context, &area, 11, 8, 6, 9, UI_GREEN);
-    /* 右脚趾: 4x3绿色小圆。 */
-    weather_icon_shape(context, &area, 12, 4, 4, 3, UI_GREEN);
 }
 
 static void watch_page(void)
 {
-    /* 两个静态目标页常量，分别供温湿度入口和心率入口保存指针。 */
     static const ui_page_t climate = PAGE_AHT21;
     static const ui_page_t heart = PAGE_HEART;
-    lv_obj_t *dial, *number, *hub, *entry, *label, *steps_icon;
-    /* 小时数字文本缓冲，两位数字加结束符。 */
+    lv_obj_t *dial, *number, *hub, *entry, *label;
     char text[3];
-    lv_coord_t dx, dy;
     uint8_t hour;
 
-    /* 1) 全屏时钟表盘(240x280 占满整页，全周60格刻度与1..12数字沿四周分布)。 */
     dial = ui_panel(s_body, 0, 0, WATCH_DIAL_WIDTH, WATCH_DIAL_HEIGHT, UI_BG);
     lv_obj_set_style_radius(dial, 0, 0);
     lv_obj_set_style_bg_opa(dial, LV_OPA_TRANSP, 0);
     lv_obj_add_event_cb(dial, clock_dial_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_add_event_cb(dial, clock_dial_draw_cb, LV_EVENT_COVER_CHECK, NULL);
     lv_obj_clear_flag(dial, LV_OBJ_FLAG_CLICKABLE);
-    for (hour = 1; hour <= 12; ++hour)
+    for (hour = 3; hour <= 12; hour += 3)
     {
-        float inset = (hour % 6 == 0) ? 22.0f : 24.0f;
         lv_snprintf(text, sizeof(text), "%u", (unsigned)hour);
-        watch_dial_ray_offset((int16_t)(hour * 30), inset, &dx, &dy);
-        number = ui_label(dial, text,
-                          WATCH_DIAL_CENTER_X - 10 + dx,
-                          WATCH_DIAL_CENTER_Y - 6 + dy,
-                          &lv_font_montserrat_10, (hour % 3 == 0) ? UI_TEXT : UI_MUTED);
+        number = ui_label(dial, text, WATCH_DIAL_CENTER_X - 10 + s_dial_hours[hour / 3 - 1].x,
+                          WATCH_DIAL_CENTER_Y - 6 + s_dial_hours[hour / 3 - 1].y, &lv_font_montserrat_10, UI_TEXT);
         lv_obj_set_width(number, 20);
         lv_obj_set_style_text_align(number, LV_TEXT_ALIGN_CENTER, 0);
     }
 
-    /* 2) 表盘上方留白区: 左上心率快捷状态(无圆环/无方框) + 右上校时来源与向右箭头。 */
-    entry = ui_panel(dial, 38, 40, 80, 22, UI_BG);
-    lv_obj_set_style_bg_opa(entry, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_radius(entry, 0, 0);
-    heart_icon(entry, 0, 1);
-    s_view.watch.heart = ui_label(entry, "--", 18, 2, &lv_font_montserrat_14, UI_TEXT);
+    entry = ui_card(dial, 36, 39, 82, 24, UI_CARD_SOFT, 0, LV_RADIUS_CIRCLE);
+    heart_icon(entry, 2, 2);
+    s_view.watch.heart = ui_label(entry, "--", 22, 4, &lv_font_montserrat_14, UI_TEXT);
     lv_obj_set_width(s_view.watch.heart, 26);
     lv_obj_set_style_text_align(s_view.watch.heart, LV_TEXT_ALIGN_RIGHT, 0);
-    ui_label(entry, "BPM", 47, 5, &lv_font_montserrat_10, UI_MUTED);
+    ui_label(entry, "BPM", 51, 8, &lv_font_montserrat_10, UI_MUTED);
     make_entry(entry, &heart);
-    lv_obj_set_style_bg_opa(entry, LV_OPA_TRANSP, LV_STATE_PRESSED);
 
-    s_view.watch.hint = ui_label(dial, "SET VIA BLE", 116, 43, &lv_font_montserrat_10, UI_MUTED);
-    lv_obj_set_width(s_view.watch.hint, 74);
-    lv_obj_set_style_text_align(s_view.watch.hint, LV_TEXT_ALIGN_RIGHT, 0);
-    ui_label(dial, LV_SYMBOL_RIGHT, 194, 41, &lv_font_montserrat_14, UI_BLUE);
+    entry = ui_card(dial, 148, 39, 64, 24, UI_CARD_SOFT, 0, LV_RADIUS_CIRCLE);
+    lv_obj_clear_flag(entry, LV_OBJ_FLAG_CLICKABLE);
+    create_battery_ring(entry, 2, 3, 18, 3);
+    s_view.battery.label = ui_label(entry, "--%", 2, 8, &lv_font_montserrat_10, UI_MUTED);
+    lv_obj_set_width(s_view.battery.label, 60);
+    lv_obj_set_style_text_align(s_view.battery.label, LV_TEXT_ALIGN_RIGHT, 0);
 
-    /* 数字时间嵌于表盘上半区。 */
-    s_view.watch.time = ui_label(dial, "--:--", WATCH_DIAL_CENTER_X - 38, 68, &lv_font_montserrat_20, UI_TEXT);
+    s_view.watch.time = ui_label(dial, "--:--", WATCH_DIAL_CENTER_X - 38, 66, &lv_font_montserrat_20, UI_TEXT);
     lv_obj_set_width(s_view.watch.time, 76);
     lv_obj_set_style_text_align(s_view.watch.time, LV_TEXT_ALIGN_CENTER, 0);
+    s_view.watch.hint = ui_label(dial, "SET VIA BLE", 50, 92, &lv_font_montserrat_10, UI_MUTED);
+    lv_obj_set_width(s_view.watch.hint, 140);
+    lv_obj_set_style_text_align(s_view.watch.hint, LV_TEXT_ALIGN_CENTER, 0);
 
-    /* 3) 表盘下半区留白并列三个无框圆环(步数 + 湿度 + 电量)。 */
-    /* 左: 步数圆环(中心x=54) + 步数计数 + STEPS标签。 */
-    s_view.watch.steps_ring = ui_create_ring_gauge(dial, 44, UI_TRACK_GREEN, UI_BATTERY_GREEN, 5);
-    lv_obj_set_pos(s_view.watch.steps_ring, 32, 156);
-    steps_icon = ui_panel(s_view.watch.steps_ring, 12, 13, 20, 18, UI_BG);
-    lv_obj_set_style_bg_opa(steps_icon, LV_OPA_TRANSP, 0);
-    lv_obj_clear_flag(steps_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(steps_icon, steps_icon_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
-    s_view.watch.steps = ui_label(dial, "0", 22, 204, &lv_font_montserrat_14, UI_TEXT);
-    lv_obj_set_width(s_view.watch.steps, 64);
+    /* 两环中心为(70,190)/(170,190)，中央竖向通道及6点数字留白。 */
+    s_view.watch.steps_ring = ui_create_ring_gauge(dial, 36, UI_TRACK_GREEN, UI_BATTERY_GREEN, 4);
+    lv_obj_set_pos(s_view.watch.steps_ring, 52, 172);
+    vector_icon(s_view.watch.steps_ring, 8, 8, UI_ICON_STEPS);
+    s_view.watch.steps = ui_label(dial, "0", 30, 214, &lv_font_montserrat_14, UI_TEXT);
+    lv_obj_set_width(s_view.watch.steps, 80);
     lv_obj_set_style_text_align(s_view.watch.steps, LV_TEXT_ALIGN_CENTER, 0);
-    label = ui_label(dial, "STEPS", 22, 222, &lv_font_montserrat_10, UI_MUTED);
-    lv_obj_set_width(label, 64);
+    label = ui_label(dial, "STEPS", 30, 234, &lv_font_montserrat_10, UI_MUTED);
+    lv_obj_set_width(label, 80);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
 
-    /* 中: 湿度圆环(中心x=114，透明快捷容器点击进入AHT21页)。 */
-    entry = ui_panel(dial, 80, 152, 68, 88, UI_BG);
+    entry = ui_panel(dial, 136, 168, 68, 80, UI_BG);
     lv_obj_set_style_bg_opa(entry, LV_OPA_TRANSP, 0);
     lv_obj_set_style_radius(entry, 0, 0);
-    s_view.watch.humidity_ring = ui_create_ring_gauge(entry, 44, UI_TRACK_BLUE, UI_CYAN, 5);
-    lv_obj_set_pos(s_view.watch.humidity_ring, 12, 4);
-    label = ui_label(s_view.watch.humidity_ring, "RH", 0, 0, &lv_font_montserrat_10, UI_CYAN);
-    lv_obj_center(label);
-    s_view.watch.temperature = ui_label(entry, "--C\n--%", 0, 52, &lv_font_montserrat_14, UI_TEXT);
+    s_view.watch.humidity_ring = ui_create_ring_gauge(entry, 36, UI_TRACK_BLUE, UI_CYAN, 4);
+    lv_obj_set_pos(s_view.watch.humidity_ring, 16, 4);
+    vector_icon(s_view.watch.humidity_ring, 8, 8, UI_ICON_DROP);
+    s_view.watch.temperature = ui_label(entry, "--C\n--%", 0, 46, &lv_font_montserrat_14, UI_TEXT);
     lv_obj_set_width(s_view.watch.temperature, 68);
     lv_obj_set_style_text_align(s_view.watch.temperature, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_line_space(s_view.watch.temperature, 0, 0);
     make_entry(entry, &climate);
     lv_obj_set_style_bg_opa(entry, LV_OPA_TRANSP, LV_STATE_PRESSED);
 
-    /* 右: 电量圆环(中心x=184) + 百分比与电压文字。 */
-    create_battery_ring(dial, 162, 156, 44, 5);
-    label = ui_label(s_view.battery.bar, "BAT", 0, 0, &lv_font_montserrat_10, UI_MUTED);
-    lv_obj_center(label);
-    s_view.battery.label = ui_label(dial, "--%", 140, 211, &lv_font_montserrat_14, UI_MUTED);
-    lv_obj_set_width(s_view.battery.label, 88);
-    lv_obj_set_style_text_align(s_view.battery.label, LV_TEXT_ALIGN_CENTER, 0);
-
-    /* 4) 指针与中心轴最后创建，保证在表盘参数与数字时间之上平滑扫掠。 */
+    /* 指针最后创建，继续使用旧/新线段包围盒局部标脏。 */
     s_view.watch.hour_hand = clock_hand(dial, s_hour_points, 5, UI_TEXT);
     s_view.watch.minute_hand = clock_hand(dial, s_minute_points, 3, UI_ORANGE);
     s_view.watch.second_hand = clock_hand(dial, s_second_points, 2, UI_RED);
@@ -972,8 +1068,8 @@ static void refresh_clock(void)
     }
     else
     {
-        /* 已校时，提示时间源为RTC/LSE。 */
-        ui_set_label_text(s_view.watch.hint, "RTC / LSE");
+        /* 已校时，提示当前LSE时间源。 */
+        ui_set_label_text(s_view.watch.hint, "LSE");
         /* 指针此前被隐藏时，把三根指针重新显示出来。 */
         if (lv_obj_has_flag(s_view.watch.hour_hand, LV_OBJ_FLAG_HIDDEN))
         {
@@ -1055,8 +1151,8 @@ static void refresh_clock(void)
 
 static lv_obj_t *metric(const char *title, const char *unit, int y, uint32_t color)
 {
-    /* 在页面容器s_body的y位置建一张带细边框的212x88圆角卡片，作为单项指标的底框。 */
-    lv_obj_t *obj = ui_card(s_body, 0, y, 212, 88, UI_CARD, UI_BORDER, 16);
+    /* 在页面容器s_body的y位置建一张圆角的212x88圆角卡片，作为单项指标的底框。 */
+    lv_obj_t *obj = ui_card(s_body, 0, y, 212, 88, UI_CARD_SOFT, 0, 16);
     /* 数值标签句柄，创建后返回给刷新函数使用。 */
     lv_obj_t *value;
     /* 卡片左上角写指标标题，10号字体、灰色。 */
@@ -1100,8 +1196,8 @@ static void motion_metrics(const char *const titles[3], const char *unit, int y,
 {
     /* 三轴依次使用蓝/橙/绿，和标题、数值标签颜色对应。 */
     static const uint32_t colors[3] = {UI_BLUE, UI_ORANGE, UI_GREEN};
-    /* 在s_body的y位置建一张带细边框的212x288卡片，容纳三行指标。 */
-    lv_obj_t *obj = ui_card(s_body, 0, y, 212, 288, UI_CARD, UI_BORDER, 16);
+    /* 在s_body的y位置建一张圆角的212x288卡片，容纳三行指标。 */
+    lv_obj_t *obj = ui_card(s_body, 0, y, 212, 288, UI_CARD_SOFT, 0, 16);
     /* 轴序号，0..2。 */
     uint8_t i;
     /* 卡片右上角统一标注单位，灰色10号字体。 */
@@ -1287,15 +1383,19 @@ static void sport_mode_cb(lv_event_t *event)
     s_sport_mode = s_sport_mode == 0;
     if (s_sport_mode != 0)
     {
-        /* 进入运动模式：按钮文案改成停止，底色改红。 */
+        /* 进入运动模式，按钮改为停止并更新ACTIVE状态。 */
         ui_set_label_text(s_view.sport.label, "STOP SPORT");
-        lv_obj_set_style_bg_color(s_view.sport.button, lv_color_hex(UI_RED), 0);
+        lv_obj_set_style_bg_color(s_view.sport.button, lv_color_hex(0x3A222D), 0);
+        ui_set_label_text(s_view.sport.status, "ACTIVE");
+        ui_set_text_color(s_view.sport.status, UI_BATTERY_GREEN);
     }
     else
     {
-        /* 退出运动模式：按钮文案改回开始，底色改绿。 */
+        /* 退出运动模式，按钮改为开始并更新READY状态。 */
         ui_set_label_text(s_view.sport.label, "START SPORT");
-        lv_obj_set_style_bg_color(s_view.sport.button, lv_color_hex(UI_GREEN), 0);
+        lv_obj_set_style_bg_color(s_view.sport.button, lv_color_hex(0x143B33), 0);
+        ui_set_label_text(s_view.sport.status, "READY");
+        ui_set_text_color(s_view.sport.status, UI_MUTED);
     }
     /* 按新的运动模式重算蓝牙供电策略。 */
     app_ble_update_power(s_screen_on, s_sport_mode, 0);
@@ -1305,37 +1405,43 @@ static void sport_mode_cb(lv_event_t *event)
 
 static void sport_page(void)
 {
-    /* 页面顶部建带边框212x96卡片，容纳标题和模式按钮。 */
-    lv_obj_t *card = ui_card(s_body, 0, 0, 212, 96, UI_CARD, UI_BORDER, 16);
-    /* 卡片左上角写页面标题。 */
-    ui_label(card, "SPORT MODE", 14, 12, &lv_font_montserrat_14, UI_BLUE);
-    /* 卡片下部建184x40绿色按钮底框，保存到全局供回调改色。 */
-    s_view.sport.button = ui_panel(card, 14, 42, 184, 40, UI_GREEN);
-    /* 按钮上创建文案标签，初始为START SPORT，颜色UI_TEXT。 */
+    lv_obj_t *card = ui_card(s_body, 0, 0, 212, 124, UI_CARD_SOFT, 0, 16);
+    lv_obj_t *notice, *dot, *label;
+    const char *messages[] = {"Continuous motion and heart rate, even with screen off.",
+                              "Bluetooth and barometer pause until sport mode is off."};
+    const uint32_t colors[] = {UI_BATTERY_GREEN, UI_AMBER};
+    uint8_t i;
+    ui_label(card, "SPORT MODE", 14, 12, &lv_font_montserrat_10, UI_BLUE);
+    s_view.sport.status = ui_badge(card, "READY", 130, 6, UI_MUTED);
+    ui_label(card, "100Hz IMU + Continuous HR", 14, 37, &lv_font_montserrat_10, UI_MUTED);
+    s_view.sport.button = ui_panel(card, 14, 68, 184, 40, 0x143B33);
+    lv_obj_set_style_radius(s_view.sport.button, LV_RADIUS_CIRCLE, 0);
     s_view.sport.label = ui_label(s_view.sport.button, "START SPORT", 0, 0, &lv_font_montserrat_14, UI_TEXT);
-    /* 文案在按钮内居中。 */
     lv_obj_center(s_view.sport.label);
-    /* 文案不接收点击，点击落到下面的按钮底框。 */
     lv_obj_clear_flag(s_view.sport.label, LV_OBJ_FLAG_CLICKABLE);
-    /* 按钮底框可点击。 */
     lv_obj_add_flag(s_view.sport.button, LV_OBJ_FLAG_CLICKABLE);
-    /* 页面重建时若运动模式已开，按当前状态显示停止文案和红色底色。 */
     if (s_sport_mode != 0)
     {
         ui_set_label_text(s_view.sport.label, "STOP SPORT");
-        lv_obj_set_style_bg_color(s_view.sport.button, lv_color_hex(UI_RED), 0);
+        lv_obj_set_style_bg_color(s_view.sport.button, lv_color_hex(0x3A222D), 0);
+        ui_set_label_text(s_view.sport.status, "ACTIVE");
+        ui_set_text_color(s_view.sport.status, UI_BATTERY_GREEN);
     }
-    /* 注册点击回调，切换运动模式。 */
     lv_obj_add_event_cb(s_view.sport.button, sport_mode_cb, LV_EVENT_CLICKED, NULL);
-    /* 两条说明文字，分别说明连续采样和蓝牙/气压计暂停。 */
-    ui_note(s_body, "Continuous motion and heart rate, even with screen off.", 112);
-    ui_note(s_body, "Bluetooth and barometer pause until sport mode is off.", 174);
+    for (i = 0; i < 2; ++i)
+    {
+        notice = ui_panel(s_body, 0, 136 + i * 68, 212, 58, UI_CARD_ALT);
+        dot = ui_panel(notice, 12, 15, 6, 6, colors[i]);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        label = ui_label(notice, messages[i], 28, 12, &lv_font_montserrat_10, UI_MUTED);
+        lv_obj_set_width(label, 170);
+    }
 }
 
 static void compass_create(int y)
 {
-    /* 在s_body的y位置建带边框212x174卡片，作为罗盘容器并接收自绘回调。 */
-    s_view.motion.compass = ui_card(s_body, 0, y, 212, 174, UI_CARD, UI_BORDER, 16);
+    /* 在s_body的y位置建圆角212x174卡片，作为罗盘容器并接收自绘回调。 */
+    s_view.motion.compass = ui_card(s_body, 0, y, 212, 174, UI_CARD_SOFT, 0, 16);
     /* 按上北下南、左西右东放置四个方位字母，北向用红色。 */
     ui_label(s_view.motion.compass, "N", 102, 22, &lv_font_montserrat_10, UI_RED);
     ui_label(s_view.motion.compass, "E", 142, 59, &lv_font_montserrat_10, UI_TEXT);
@@ -1536,8 +1642,8 @@ static void imu_page(void)
     lv_obj_t *obj;
     /* 在页面顶部建罗盘卡片。 */
     compass_create(y);
-    /* 罗盘下方建带边框212x36可点击条，作为校准入口。 */
-    obj = ui_card(s_body, 0, y + 182, 212, 36, UI_CARD_ALT, UI_BORDER_STRONG, 12);
+    /* 罗盘下方建圆角212x36可点击条，作为校准入口。 */
+    obj = ui_card(s_body, 0, y + 182, 212, 36, UI_CARD_ALT, 0, 12);
     /* 条内写校准入口文字和右箭头。 */
     s_view.motion.compass_calibration = ui_label(obj, "CALIBRATION  " LV_SYMBOL_RIGHT, 14, 11, &lv_font_montserrat_14, UI_TEXT);
     /* 文字本身不接收点击，点击落到条目底框。 */
@@ -1548,7 +1654,7 @@ static void imu_page(void)
     /* y推进228像素，开始角度区。 */
     y += 228;
     /* 角度区顶部建IMU状态标签，初值WAITING。 */
-    s_view.motion.status = ui_label(s_body, "WAITING", 2, y + 4, &lv_font_montserrat_10, UI_MUTED);
+    s_view.motion.status = ui_badge(s_body, "WAITING", 2, y, UI_MUTED);
     /* 建三轴角度卡片，值标签存到s_view.motion.angles，单位DEG。 */
     motion_metrics(angles, "DEG", y + 26, s_view.motion.angles);
     /* 角度卡片下方写航向来源说明。 */
@@ -1558,7 +1664,7 @@ static void imu_page(void)
     /* 三轴磁力计卡片，值标签存到s_view.motion.mag_values，单位uT。 */
     motion_metrics(magnetic, "uT", y + 384, s_view.motion.mag_values);
     /* 磁校准区建212x48可点击条。 */
-    obj = ui_card(s_body, 0, y + 684, 212, 48, UI_CARD_ALT, UI_BORDER_STRONG, 14);
+    obj = ui_card(s_body, 0, y + 684, 212, 48, UI_CARD_ALT, 0, 14);
     /* 条内写CALIBRATE MAG文字。 */
     s_view.motion.cal_label = ui_label(obj, "CALIBRATE MAG", 14, 16, &lv_font_montserrat_14, UI_TEXT);
     /* 文字不接收点击，底框可点击。 */
@@ -1626,31 +1732,34 @@ static void baro_page(void)
     lv_obj_t *control;
     app_baro_struct baro;
     uint8_t i;
-    /* 在s_body的y位置建带边框212x94卡片，容纳海拔和气压。 */
-    lv_obj_t *card = ui_card(s_body, 0, y, 212, 94, UI_CARD, UI_BORDER, 16);
+    /* 在s_body的y位置建圆角212x94卡片，容纳海拔和气压。 */
+    lv_obj_t *card = ui_card(s_body, 0, y, 212, 94, UI_CARD_SOFT, 0, 16);
     /* 卡片左上角写ALTITUDE标题。 */
     ui_label(card, "ALTITUDE", 12, 10, &lv_font_montserrat_10, UI_BLUE);
     /* 右上角建气压计状态标签，初值WAITING，宽60右对齐。 */
-    s_view.baro.status = ui_label(card, "WAITING", 140, 10, &lv_font_montserrat_10, UI_MUTED);
+    s_view.baro.status = ui_badge(card, "WAITING", 134, 6, UI_MUTED);
     lv_obj_set_width(s_view.baro.status, 60);
     lv_obj_set_style_text_align(s_view.baro.status, LV_TEXT_ALIGN_RIGHT, 0);
     /* 标题下方建海拔数值标签，初值"--"。 */
     s_view.baro.altitude = ui_label(card, "--", 12, 27, &lv_font_montserrat_30, UI_TEXT);
     lv_obj_set_width(s_view.baro.altitude, 168);
     /* 数值右侧标单位m。 */
-    ui_label(card, "m", 184, 40, &lv_font_montserrat_14, UI_MUTED);
+    control = ui_label(card, "m", 0, 0, &lv_font_montserrat_14, UI_MUTED);
+    lv_obj_set_width(s_view.baro.altitude, LV_SIZE_CONTENT);
+    lv_obj_align_to(control, s_view.baro.altitude, LV_ALIGN_OUT_RIGHT_BOTTOM, 4, -3);
+    s_view.baro.unit = control;
     /* 画一条188x1分隔线。 */
-    ui_panel(card, 12, 64, 188, 1, UI_BORDER);
+    ui_panel(card, 8, 64, 196, 26, UI_CARD_ALT);
     /* 分隔线下方写PRESSURE标题。 */
-    ui_label(card, "PRESSURE", 12, 75, &lv_font_montserrat_10, UI_MUTED);
+    ui_label(card, "PRESSURE", 14, 73, &lv_font_montserrat_10, UI_MUTED);
     /* 气压数值标签，初值"--"。 */
     s_view.baro.pressure = ui_label(card, "--", 92, 72, &lv_font_montserrat_14, UI_TEXT);
     /* 右侧标单位hPa。 */
-    ui_label(card, "hPa", 182, 75, &lv_font_montserrat_10, UI_MUTED);
+    ui_label(card, "hPa", 178, 73, &lv_font_montserrat_10, UI_MUTED);
     /* 卡片下方建海拔趋势图，采样周期取气压历史周期APP_BARO_HISTORY_PERIOD_MS。 */
     ui_trend_create(&s_view.baro.trend, s_body, "ALTITUDE TREND / m", y + 102, 116, UI_BLUE, APP_BARO_HISTORY_PERIOD_MS);
     /* 卡片下方建已知海拔校准区(-1000..9000m输入、+/-、CALIBRATE、RESET与状态提示)，保持子节点顺序。 */
-    card = ui_card(s_body, 0, y + 232, 212, 148, UI_CARD, UI_BORDER, 16);
+    card = ui_card(s_body, 0, y + 232, 212, 148, UI_CARD_SOFT, 0, 16);
     ui_label(card, "KNOWN ALTITUDE / m", 12, 9, &lv_font_montserrat_10, UI_MUTED);
     s_view.baro.altitude_input = lv_spinbox_create(card);
     lv_obj_set_pos(s_view.baro.altitude_input, 48, 27);
@@ -1708,7 +1817,7 @@ static void brightness_cb(lv_event_t *event)
         LCD_Set_Light(0);
     }
     /* 在滑条旁显示新亮度百分比。 */
-    ui_set_label_text_fmt(s_view.display.brightness, "%d%%", (int)s_brightness);
+    ui_set_label_text_fmt(s_view.display.brightness, "%d", (int)s_brightness);
 }
 
 /* 服务只提供业务状态，蓝牙页面保有文案和配色。 */
@@ -1772,7 +1881,7 @@ static void bluetooth_page(void)
     app_ble_snapshot_struct snapshot;
     app_ble_get_snapshot(&snapshot);
     /* 顶部建蓝牙初始化状态标签，初值INIT PENDING。 */
-    s_view.bluetooth.status = ui_label(s_body, "INIT PENDING", 4, 4, &lv_font_montserrat_10, UI_MUTED);
+    s_view.bluetooth.status = ui_badge(s_body, "INIT PENDING", 4, 0, UI_MUTED);
     /* 状态下方显示蓝牙模块名KT6368A_BLE_NAME。 */
     ui_note(s_body, snapshot.device_name, 22);
     /* 第二行左侧建RX字节计数标签，初值RX 0 B，蓝色。 */
@@ -1781,7 +1890,7 @@ static void bluetooth_page(void)
     s_view.bluetooth.tx_status = ui_label(s_body, s_bluetooth_tx_styles[snapshot.tx_state].text, 84, 44, &lv_font_montserrat_10,
                                           s_bluetooth_tx_styles[snapshot.tx_state].color);
     /* 建124x28蓝色SEND TEST按钮底框。 */
-    button = ui_panel(s_body, 0, 62, 124, 28, UI_BLUE);
+    button = ui_panel(s_body, 0, 62, 124, 28, UI_BORDER);
     /* 按钮内写SEND TEST文字并居中。 */
     caption = ui_label(button, "SEND TEST", 0, 0, &lv_font_montserrat_10, UI_TEXT);
     lv_obj_center(caption);
@@ -1793,16 +1902,16 @@ static void bluetooth_page(void)
     {
         lv_obj_add_state(button, LV_STATE_DISABLED);
     }
-    /* 右侧建76x28带边框的CLEAR按钮底框。 */
-    button = ui_card(s_body, 136, 62, 76, 28, UI_CARD_ALT, UI_BORDER_STRONG, 12);
+    /* 右侧建76x28圆角的CLEAR按钮底框。 */
+    button = ui_card(s_body, 136, 62, 76, 28, UI_CARD_ALT, 0, 12);
     /* 按钮内写CLEAR文字并居中。 */
     caption = ui_label(button, "CLEAR", 0, 0, &lv_font_montserrat_10, UI_TEXT);
     lv_obj_center(caption);
     /* 按钮可点击，点击清空接收显示历史。 */
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, bluetooth_clear_cb, LV_EVENT_CLICKED, NULL);
-    /* 建带边框212x94日志框，作为可滚动容器保存接收文本。 */
-    s_view.bluetooth.log_box = ui_card(s_body, 0, 98, 212, 94, UI_CARD, UI_BORDER, 16);
+    /* 建圆角212x94日志框，作为可滚动容器保存接收文本。 */
+    s_view.bluetooth.log_box = ui_card(s_body, 0, 98, 212, 94, UI_CARD_SOFT, 0, 16);
     /* 日志框允许滚动，方向为垂直。 */
     lv_obj_add_flag(s_view.bluetooth.log_box, LV_OBJ_FLAG_SCROLLABLE);
     /* 关闭弹性回弹和滚动链，滚到底不带动外层页面。 */
@@ -1823,8 +1932,8 @@ static void bluetooth_page(void)
     lv_obj_set_style_text_line_space(s_view.bluetooth.log, 3, 0);
     /* 日志框下方建校时状态标签，初值提示发送HH:MM:SS。 */
     s_view.bluetooth.clock_status = ui_label(s_body, "Send HH:MM:SS to set time", 4, 200, &lv_font_montserrat_10, UI_MUTED);
-    /* 建带边框212x36的BLE电源策略按钮底框。 */
-    button = ui_card(s_body, 0, 228, 212, 36, UI_CARD_ALT, UI_BORDER_STRONG, 12);
+    /* 建圆角212x36的BLE电源策略按钮底框。 */
+    button = ui_card(s_body, 0, 228, 212, 36, UI_CARD_ALT, 0, 12);
     /* 按钮内写BLE: KEEP CONNECTED并居中。 */
     s_view.bluetooth.power_label = ui_label(button, "BLE: KEEP CONNECTED", 0, 0, &lv_font_montserrat_10, UI_TEXT);
     lv_obj_center(s_view.bluetooth.power_label);
@@ -1960,16 +2069,14 @@ static void heart_toggle_cb(lv_event_t *event)
     refresh_data();
 }
 
-static void heart_auto_cb(lv_event_t *event)
+static void heart_auto_interval_cb(lv_event_t *event)
 {
-    (void)event;
     /* 切页动画期间忽略点击。 */
     if (s_transition)
     {
         return;
     }
-    /* 后台自动心率独立开关：只提交请求，UI 不读I2C；不影响手动 START/STOP 与 SPORT。 */
-    app_heart_set_auto_enabled(app_heart_get_auto_enabled() == 0);
+    app_heart_set_auto_interval((app_heart_auto_interval)(uintptr_t)lv_event_get_user_data(event));
     /* 提交后刷新一次页面显示。 */
     refresh_data();
 }
@@ -1986,7 +2093,7 @@ static void heart_details_cb(lv_event_t *event)
     if (lv_obj_has_flag(s_view.heart.details, LV_OBJ_FLAG_HIDDEN))
     {
         lv_obj_clear_flag(s_view.heart.details, LV_OBJ_FLAG_HIDDEN);
-        ui_set_label_text(s_view.heart.details_title, "DETAILS  " LV_SYMBOL_UP);
+        ui_set_label_text(s_view.heart.details_title, "DETAILS  -");
         /* 无动画滚动到展开后的详情卡。 */
         lv_obj_scroll_to_view(s_view.heart.details, LV_ANIM_OFF);
     }
@@ -2004,15 +2111,10 @@ static void heart_window(void)
 {
     /* DETAILS开关条句柄。 */
     lv_obj_t *toggle;
-    const char *auto_text = "AUTO / 10 MIN: OFF";
-    uint32_t auto_color = UI_MUTED;
-    if (app_heart_get_auto_enabled() != 0)
-    {
-        auto_text = "AUTO / 10 MIN: ON";
-        auto_color = UI_GREEN;
-    }
-    /* 顶部建带边框212x76心率卡片。 */
-    s_view.heart.card = ui_card(s_body, 0, 0, 212, 76, UI_CARD, UI_BORDER, 16);
+    const char *auto_text[2] = {"10 MIN", "1 MIN"};
+    uint8_t i;
+    /* 顶部建圆角212x76心率卡片。 */
+    s_view.heart.card = ui_card(s_body, 0, 0, 212, 76, UI_CARD_SOFT, 0, 16);
     /* 卡片左上角画心形图标。 */
     heart_icon(s_view.heart.card, 14, 6);
     /* 图标右侧写HEART RATE标题，红色。 */
@@ -2020,16 +2122,16 @@ static void heart_window(void)
     /* 卡片左下建BPM数值标签，初值"--"，红色大号字。 */
     s_view.heart.value = ui_label(s_view.heart.card, "--", 14, 25, &lv_font_montserrat_30, UI_RED);
     /* 数值右侧标单位BPM。 */
-    ui_label(s_view.heart.card, "BPM", 78, 40, &lv_font_montserrat_10, UI_MUTED);
+    s_view.heart.unit = ui_label(s_view.heart.card, "BPM", 0, 0, &lv_font_montserrat_10, UI_MUTED);
     /* 卡片底部建状态摘要标签，初值STANDBY。 */
-    s_view.heart.summary = ui_label(s_view.heart.card, "STANDBY", 14, 60, &lv_font_montserrat_10, UI_MUTED);
+    s_view.heart.summary = ui_badge(s_view.heart.card, "STANDBY", 8, 57, UI_MUTED);
     /* 卡片右侧建START按钮文字，尺寸82x36。 */
-    s_view.heart.button = ui_label(s_view.heart.card, "START", 118, 27, &lv_font_montserrat_14, UI_BG);
+    s_view.heart.button = ui_label(s_view.heart.card, "START", 118, 27, &lv_font_montserrat_14, UI_BLUE);
     lv_obj_set_size(s_view.heart.button, 82, 36);
     /* 按钮底色蓝色、不透明、圆角12像素，顶部内边距10像素，文字居中。 */
-    lv_obj_set_style_bg_color(s_view.heart.button, lv_color_hex(UI_BLUE), 0);
+    lv_obj_set_style_bg_color(s_view.heart.button, lv_color_hex(UI_BORDER), 0);
     lv_obj_set_style_bg_opa(s_view.heart.button, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(s_view.heart.button, 12, 0);
+    lv_obj_set_style_radius(s_view.heart.button, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_top(s_view.heart.button, 10, 0);
     lv_obj_set_style_text_align(s_view.heart.button, LV_TEXT_ALIGN_CENTER, 0);
     /* 按钮可点击，点击切换手动测量。 */
@@ -2037,25 +2139,26 @@ static void heart_window(void)
     lv_obj_add_event_cb(s_view.heart.button, heart_toggle_cb, LV_EVENT_CLICKED, NULL);
     /* 卡片下方建心率趋势图，每UI_TREND_SAMPLE_MS(1秒)一格。 */
     ui_trend_create(&s_view.heart.trend, s_body, "HEART RATE TREND / BPM", 84, 98, UI_RED, UI_TREND_SAMPLE_MS);
-    /* 趋势图下方建带边框212x28的DETAILS开关条。 */
-    toggle = ui_card(s_body, 0, 190, 212, 28, UI_CARD_ALT, UI_BORDER_STRONG, 12);
+    /* 趋势图下方建圆角212x28的DETAILS开关条。 */
+    toggle = ui_card(s_body, 0, 190, 212, 28, UI_CARD_ALT, 0, 12);
     /* 条内写DETAILS文字加向右箭头。 */
     s_view.heart.details_title = ui_label(toggle, "DETAILS  " LV_SYMBOL_RIGHT, 14, 8, &lv_font_montserrat_10, UI_TEXT);
     /* 文字不接收点击，点击落到开关条底框。 */
     lv_obj_clear_flag(s_view.heart.details_title, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(toggle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(toggle, heart_details_cb, LV_EVENT_CLICKED, NULL);
-    /* 后台自动心率独立开关；按当前RAM状态显示，开机默认ON。 */
-    s_view.heart.auto_button = ui_card(s_body, 0, 226, 212, 28, UI_CARD_ALT, UI_BORDER_STRONG, 12);
-    /* 开关条内写自动测量文案并居中。 */
-    s_view.heart.auto_label = ui_label(s_view.heart.auto_button, auto_text, 0, 0, &lv_font_montserrat_10, auto_color);
-    lv_obj_center(s_view.heart.auto_label);
-    /* 文字不接收点击，底框可点击切换自动测量。 */
-    lv_obj_clear_flag(s_view.heart.auto_label, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(s_view.heart.auto_button, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_view.heart.auto_button, heart_auto_cb, LV_EVENT_CLICKED, NULL);
-    /* 最下方建带边框212x76详情卡，默认隐藏。 */
-    s_view.heart.details = ui_card(s_body, 0, 262, 212, 76, UI_CARD, UI_BORDER, 16);
+    /* 两个互斥周期按钮，选中态由refresh_heart按当前周期更新。 */
+    for (i = 0; i < 2; ++i)
+    {
+        s_view.heart.auto_buttons[i] = ui_card(s_body, i * 110, 226, 102, 32, UI_CARD_ALT, 0, 12);
+        s_view.heart.auto_labels[i] = ui_label(s_view.heart.auto_buttons[i], auto_text[i], 0, 0, &lv_font_montserrat_10, UI_MUTED);
+        lv_obj_center(s_view.heart.auto_labels[i]);
+        lv_obj_clear_flag(s_view.heart.auto_labels[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(s_view.heart.auto_buttons[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(s_view.heart.auto_buttons[i], heart_auto_interval_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+    }
+    /* 最下方建圆角212x76详情卡，默认隐藏。 */
+    s_view.heart.details = ui_card(s_body, 0, 266, 212, 76, UI_CARD_SOFT, 0, 16);
     /* 详情卡内建状态标签，初值STANDBY，宽184像素。 */
     s_view.heart.status = ui_label(s_view.heart.details, "STANDBY", 14, 12, &lv_font_montserrat_10, UI_MUTED);
     lv_obj_set_width(s_view.heart.status, 184);
@@ -2067,6 +2170,10 @@ static void refresh_heart(void)
 {
     /* 本轮心率快照。 */
     app_heart_struct heart;
+    app_heart_auto_interval interval;
+    uint8_t i;
+    uint32_t bg_color, border_color, text_color;
+    lv_coord_t border_width;
     /* 摘要行文本，默认STANDBY。 */
     const char *status = "STANDBY";
     /* 心率页控件未创建(不在本页)时直接返回。 */
@@ -2115,6 +2222,8 @@ static void refresh_heart(void)
             break;
         }
     }
+    lv_obj_update_layout(s_view.heart.value);
+    lv_obj_set_pos(s_view.heart.unit, lv_obj_get_x(s_view.heart.value) + lv_obj_get_width(s_view.heart.value) + 4, 42);
     /* 把摘要文本写到卡片底部。 */
     ui_set_label_text(s_view.heart.summary, status);
     /* 有效为绿色，故障为红色，测量中/无信号为橙色，其余灰色。 */
@@ -2206,26 +2315,37 @@ static void refresh_heart(void)
         lv_obj_clear_state(s_view.heart.button, LV_STATE_DISABLED);
         ui_set_label_text(s_view.heart.button, "START");
     }
-    /* 独立显示后台自动心率开关，不依赖heart.enabled。 */
-    if (app_heart_get_auto_enabled() != 0)
+    interval = app_heart_get_auto_interval();
+    for (i = 0; i < 2; ++i)
     {
-        /* 自动测量已开：文案ON，绿色。 */
-        ui_set_label_text(s_view.heart.auto_label, "AUTO / 10 MIN: ON");
-        ui_set_text_color(s_view.heart.auto_label, UI_GREEN);
-    }
-    else
-    {
-        /* 自动测量已关：文案OFF，灰色。 */
-        ui_set_label_text(s_view.heart.auto_label, "AUTO / 10 MIN: OFF");
-        ui_set_text_color(s_view.heart.auto_label, UI_MUTED);
+        bg_color = UI_CARD_ALT;
+        border_width = 0;
+        border_color = UI_BORDER_STRONG;
+        text_color = UI_MUTED;
+        if (interval == (app_heart_auto_interval)i)
+        {
+            border_width = 1;
+            bg_color = border_color = UI_BLUE;
+            text_color = UI_BG;
+        }
+        if (lv_obj_get_style_bg_color(s_view.heart.auto_buttons[i], LV_PART_MAIN).full != lv_color_hex(bg_color).full)
+        {
+            lv_obj_set_style_bg_color(s_view.heart.auto_buttons[i], lv_color_hex(bg_color), 0);
+            lv_obj_set_style_border_color(s_view.heart.auto_buttons[i], lv_color_hex(border_color), 0);
+        }
+        if (lv_obj_get_style_border_width(s_view.heart.auto_buttons[i], 0) != border_width)
+        {
+            lv_obj_set_style_border_width(s_view.heart.auto_buttons[i], border_width, 0);
+        }
+        ui_set_text_color(s_view.heart.auto_labels[i], text_color);
     }
 }
 
 /* 显示设置页：建亮度卡片，用滑条调整背光亮度，并在卡片下方显示重启后恢复的说明。 */
 static void display_page(void)
 {
-    /* 亮度设置卡片，位于内容区顶部，尺寸212x128像素(保持滑条点击位置兼容)。 */
-    lv_obj_t *obj = ui_card(s_body, 0, 4, 212, 128, UI_CARD, UI_BORDER, 16);
+    /* 亮度设置卡片，位于内容区顶部，尺寸212x160像素。 */
+    lv_obj_t *obj = ui_card(s_body, 0, 4, 212, 160, UI_CARD_SOFT, 0, 16);
     /* 亮度滑条句柄，创建后逐项设置位置、范围与各部分样式。 */
     lv_obj_t *slider;
     /* 卡片左上角写蓝色DISPLAY标题。 */
@@ -2233,17 +2353,20 @@ static void display_page(void)
     /* 标题下方写Brightness说明文字。 */
     ui_label(obj, "Brightness", 14, 38, &lv_font_montserrat_14, UI_TEXT);
     /* 卡片右侧建亮度百分比标签，初值空串，由下一行填入。 */
-    s_view.display.brightness = ui_label(obj, "", 151, 38, &lv_font_montserrat_14, UI_ORANGE);
-    /* 按当前亮度s_brightness显示"NN%"，只读显示，不在这里改背光。 */
-    ui_set_label_text_fmt(s_view.display.brightness, "%d%%", (int)s_brightness);
+    s_view.display.brightness = ui_label(obj, "", 120, 29, &lv_font_montserrat_30, UI_TEXT);
+    lv_obj_set_width(s_view.display.brightness, 60);
+    lv_obj_set_style_text_align(s_view.display.brightness, LV_TEXT_ALIGN_RIGHT, 0);
+    ui_label(obj, "%", 184, 42, &lv_font_montserrat_14, UI_MUTED);
+    /* 按当前亮度s_brightness显示数值，只读显示，不在这里改背光。 */
+    ui_set_label_text_fmt(s_view.display.brightness, "%d", (int)s_brightness);
     /* 在卡片内创建亮度滑条。 */
     slider = lv_slider_create(obj);
     /* 清掉默认主题样式，轨道、指示器和旋钮全部由下面逐项指定。 */
     lv_obj_remove_style_all(slider);
-    /* 滑条相对卡片定位到(24,82)。 */
-    lv_obj_set_pos(slider, 24, 82);
-    /* 滑条尺寸164x10像素。 */
-    lv_obj_set_size(slider, 164, 10);
+    /* 滑条相对卡片定位到(24,76)。 */
+    lv_obj_set_pos(slider, 24, 76);
+    /* 滑条尺寸164x22像素。 */
+    lv_obj_set_size(slider, 164, 22);
     /* 值域限定为UI_MIN_BRIGHTNESS..100，与亮度百分比一致。 */
     lv_slider_set_range(slider, UI_MIN_BRIGHTNESS, 100);
     /* 用当前亮度初始化滑块位置，关闭动画。 */
@@ -2262,12 +2385,12 @@ static void display_page(void)
     lv_obj_set_style_radius(slider, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
     /* 旋钮(KNOB)背景完全不透明。 */
     lv_obj_set_style_bg_opa(slider, LV_OPA_COVER, LV_PART_KNOB);
-    /* 旋钮用橙色UI_ORANGE突出显示。 */
-    lv_obj_set_style_bg_color(slider, lv_color_hex(UI_ORANGE), LV_PART_KNOB);
+    /* 旋钮使用白色UI_TEXT。 */
+    lv_obj_set_style_bg_color(slider, lv_color_hex(UI_TEXT), LV_PART_KNOB);
     /* 旋钮做成圆形。 */
     lv_obj_set_style_radius(slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
-    /* 旋钮四周设7像素内边距。 */
-    lv_obj_set_style_pad_all(slider, 7, LV_PART_KNOB);
+    /* 旋钮四周设2像素内边距。 */
+    lv_obj_set_style_pad_all(slider, 2, LV_PART_KNOB);
     /* 把可点击范围向外扩16像素，细轨道也容易按住拖动。 */
     lv_obj_set_ext_click_area(slider, 16);
     /* A brightness adjustment must not navigate to another page. */
@@ -2276,7 +2399,10 @@ static void display_page(void)
     /* 值变化事件绑定brightness_cb，由它保存新亮度并立即控制背光。 */
     lv_obj_add_event_cb(slider, brightness_cb, LV_EVENT_VALUE_CHANGED, NULL);
     /* 卡片下方加灰色说明：亮度设置只在本次运行内有效，重启后恢复。 */
-    ui_note(s_body, "Brightness resets after restart.", 150);
+    slider = ui_panel(obj, 8, 116, 196, 34, UI_CARD_ALT);
+    lv_obj_set_style_radius(slider, 12, 0);
+    obj = ui_label(slider, "Resets to 35% after restart", 0, 0, &lv_font_montserrat_10, UI_MUTED);
+    lv_obj_center(obj);
 }
 
 static const char *humidity_comfort_text(int32_t rh_percent)
@@ -2301,9 +2427,9 @@ static void climate_page(void)
 {
     lv_obj_t *unit, *telemetry;
     /* 顶部212x136主卡: 左侧88x88湿度圆环，右侧气温与舒适度。 */
-    s_view.climate.card = ui_card(s_body, 0, 2, 212, 136, UI_CARD, UI_BORDER, 18);
+    s_view.climate.card = ui_card(s_body, 0, 2, 212, 136, UI_CARD_SOFT, 0, 18);
     ui_label(s_view.climate.card, "CLIMATE", 14, 10, &lv_font_montserrat_10, UI_CYAN);
-    s_view.climate.comfort_label = ui_label(s_view.climate.card, "--", 118, 10, &lv_font_montserrat_10, UI_MUTED);
+    s_view.climate.comfort_label = ui_badge(s_view.climate.card, "--", 118, 6, UI_MUTED);
     lv_obj_set_width(s_view.climate.comfort_label, 80);
     lv_obj_set_style_text_align(s_view.climate.comfort_label, LV_TEXT_ALIGN_RIGHT, 0);
 
@@ -2322,9 +2448,9 @@ static void climate_page(void)
     ui_label(s_view.climate.card, "DEG C", 112, 94, &lv_font_montserrat_10, UI_MUTED);
 
     /* 底部212x68传感器状态与采样频次卡，整体高度212像素无需滚动。 */
-    telemetry = ui_card(s_body, 0, 144, 212, 68, UI_CARD_ALT, UI_BORDER, 16);
+    telemetry = ui_card(s_body, 0, 144, 212, 68, UI_CARD_ALT, 0, 16);
     ui_label(telemetry, "AHT21 SENSOR", 14, 10, &lv_font_montserrat_10, UI_MUTED);
-    s_view.climate.status = ui_label(telemetry, "WAITING", 14, 26, &lv_font_montserrat_14, UI_MUTED);
+    s_view.climate.status = ui_badge(telemetry, "WAITING", 14, 24, UI_MUTED);
     lv_obj_set_width(s_view.climate.status, 184);
     s_view.climate.samples = ui_label(telemetry, "SAMPLES 0 / 1s", 14, 46, &lv_font_montserrat_10, UI_MUTED);
     lv_obj_set_width(s_view.climate.samples, 184);
@@ -2339,8 +2465,8 @@ static void settings_page(void)
     /* 卡片显示名称，顺序与destinations一致。 */
     static const char *const titles[] = {"Heart rate", "Motion", "Barometer", "Climate", "Weather", "Bluetooth", "Display", "Sport mode"};
     /* 卡片图标，使用LVGL内置符号字体。 */
-    static const char *const icons[] = {LV_SYMBOL_TINT, LV_SYMBOL_REFRESH, LV_SYMBOL_UP, LV_SYMBOL_TINT,
-                                        LV_SYMBOL_IMAGE, LV_SYMBOL_BLUETOOTH, LV_SYMBOL_SETTINGS, LV_SYMBOL_PLAY};
+    static const char *const icons[] = {"", "", "", "",
+                                        "", LV_SYMBOL_BLUETOOTH, LV_SYMBOL_SETTINGS, LV_SYMBOL_PLAY};
     /* 每个功能磁贴使用与语义匹配的强调色。 */
     static const uint32_t accents[] = {UI_ROSE, UI_BLUE, UI_CYAN, UI_BATTERY_GREEN,
                                        UI_AMBER, UI_BLUE, UI_ORANGE, UI_GREEN};
@@ -2372,15 +2498,17 @@ static void weather_page(void)
 {
     /* 天气页在内容区顶部建"PHONE WEATHER"指标卡，单位标注BLE。 */
     s_view.weather.value = metric("PHONE WEATHER", "BLE", 4, UI_BLUE);
-    /* 把指标卡的父卡片高度改为132像素，容纳图标与文字。 */
-    lv_obj_set_height(lv_obj_get_parent(s_view.weather.value), 132);
+    /* 把指标卡的父卡片高度改为174像素，容纳图标与文字。 */
+    lv_obj_t *card = lv_obj_get_parent(s_view.weather.value);
+    lv_obj_t *strip;
+    lv_obj_set_height(card, 174);
     /* 天气数值右移到(88,48)，宽度110像素，留出左侧图标位置。 */
     lv_obj_set_pos(s_view.weather.value, 88, 48);
     lv_obj_set_width(s_view.weather.value, 110);
     /* 数值改用20号字体。 */
     lv_obj_set_style_text_font(s_view.weather.value, &lv_font_montserrat_20, 0);
     /* 卡片左侧建64x64透明图标容器，背景透明以便自绘天气图标。 */
-    s_view.weather.icon = ui_panel(lv_obj_get_parent(s_view.weather.value), 14, 27, 64, 64, UI_CARD);
+    s_view.weather.icon = ui_panel(lv_obj_get_parent(s_view.weather.value), 14, 27, 64, 64, UI_CARD_SOFT);
     lv_obj_set_style_bg_opa(s_view.weather.icon, LV_OPA_TRANSP, 0);
     /* 图标只做显示，不响应点击。 */
     lv_obj_clear_flag(s_view.weather.icon, LV_OBJ_FLAG_CLICKABLE);
@@ -2390,8 +2518,13 @@ static void weather_page(void)
     s_view.weather.condition = ui_label(lv_obj_get_parent(s_view.weather.value), "--", 14, 100, &lv_font_montserrat_20, UI_TEXT);
     lv_obj_set_width(s_view.weather.condition, 184);
     /* 卡片外先写等待手机的提示，收到数据后由refresh_weather改写。 */
-    s_view.weather.label = ui_note(s_body, "WAITING FOR PHONE", 148);
-    ui_note(s_body, "Weather comes from your phone. Connect the app to sync.", 190);
+    strip = ui_panel(card, 8, 130, 196, 36, UI_CARD_ALT);
+    lv_obj_set_style_radius(strip, 12, 0);
+    s_view.weather.label = ui_label(strip, "WAITING FOR PHONE", 6, 6, &lv_font_montserrat_10, UI_MUTED);
+    lv_obj_set_width(s_view.weather.label, 184);
+    strip = ui_panel(s_body, 0, 188, 212, 50, UI_CARD_ALT);
+    card = ui_label(strip, "Weather comes from your phone. Connect the app to sync.", 12, 10, &lv_font_montserrat_10, UI_MUTED);
+    lv_obj_set_width(card, 188);
 }
 
 static void refresh_motion(void);
@@ -2431,6 +2564,12 @@ static void clear_page_refs(void)
     s_view.motion.compass_heading = -1;
     s_view.motion.compass_tick = lv_tick_get();
     s_view.watch.last_second = UINT32_MAX;
+}
+
+/* 仅表盘允许自动熄屏，功能菜单与详情页保持常亮。 */
+static uint8_t page_allows_auto_sleep(ui_page_t page)
+{
+    return page == PAGE_WATCH;
 }
 
 /* 屏幕加载完成回调：切页动画结束时清除s_transition。 */
@@ -2547,6 +2686,11 @@ static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
     clear_page_refs();
     /* 记录当前页枚举，后续刷新和返回逻辑据此分支。 */
     s_page = page;
+    /* 返回表盘时重新计满10秒，不沿用功能页停留期间的空闲时长。 */
+    if (old_screen != NULL && page_allows_auto_sleep(old_page) == 0 && page_allows_auto_sleep(page) != 0)
+    {
+        lv_disp_trig_activity(NULL);
+    }
     /* 目标页是缓存主页且已有保存的屏幕时，直接恢复缓存，不重建控件。 */
     if (page <= PAGE_SETTINGS && s_main_pages[page].screen != NULL)
     {
@@ -2629,8 +2773,8 @@ static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
         lv_obj_set_style_pad_right(s_body, 0, LV_PART_SCROLLBAR);
         /* 每页的标题、创建和刷新入口统一在s_pages登记。 */
         s_pages[page].create();
-        /* 非表盘页在屏幕底部画两个页签圆点和返回文字。 */
-        if (page != PAGE_WATCH)
+        /* 仅两个主页面显示页签点。 */
+        if (page <= PAGE_SETTINGS)
         {
             /* 两个圆点分别代表表盘和APPS两级。 */
             for (i = 0; i < 2; ++i)
@@ -2645,11 +2789,14 @@ static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back)
                     dot_color = UI_BLUE;
                 }
                 /* 以屏幕水平中心为基准，第i个圆点右移16*i像素，纵向贴近底部。 */
-                dot = ui_panel(s_screen, width / 2 - 12 + i * 16, height - 14, dot_width, 5, dot_color);
+                dot = ui_panel(s_screen, width / 2 - 26 + i * 42, height - 14, dot_width, 5, dot_color);
                 /* 圆点两端做成圆形，且不接收点击。 */
                 lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
                 lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
             }
+        }
+        if (page != PAGE_WATCH)
+        {
             /* 左下角写"< BACK"返回文字。 */
             navigation = ui_label(s_screen, LV_SYMBOL_LEFT " BACK", 14, height - 17, &lv_font_montserrat_10, UI_BLUE);
             /* 文字可点击，点击范围外扩8像素，点击触发back_cb。 */
@@ -2966,8 +3113,8 @@ static void refresh_weather(void)
     }
 }
 
-/* 电量与步数摘要：valid才显示电压/百分比，否则按result区分"--%"与"ADC ERR"；
- * 电压单位mV，表盘页额外显示V(保留两位小数)，低电量阈值20%改红色。
+/* 电量与步数摘要：valid才显示百分比，否则按result区分"--%"与"ADC ERR"；
+ * 低电量阈值20%改红色，电压仍通过电池快照和日志提供。
  * 刷新电量时一并取IMU快照显示表盘步数。 */
 static void refresh_battery(void)
 {
@@ -3012,18 +3159,7 @@ static void refresh_battery(void)
         {
             lv_obj_clear_flag(s_view.battery.bar, LV_OBJ_FLAG_HIDDEN);
         }
-        /* 表盘页同时显示百分比和电压，电压由mV拆成V与两位小数。 */
-        if (s_page == PAGE_WATCH)
-        {
-            /* voltage_mv/1000得整数伏，%1000/10得两位小数的毫伏部分。 */
-            ui_set_label_text_fmt(s_view.battery.label, "~%u%% %lu.%02luV", (unsigned int)battery.percent,
-                               (unsigned long)(battery.voltage_mv / 1000), (unsigned long)(battery.voltage_mv % 1000 / 10));
-        }
-        /* 其他页只显示百分比，节省顶部空间。 */
-        else
-        {
-            ui_set_label_text_fmt(s_view.battery.label, "~%u%%", (unsigned int)battery.percent);
-        }
+        ui_set_label_text_fmt(s_view.battery.label, "~%u%%", (unsigned int)battery.percent);
         /* 电量不高于20%时文字和电量圆环都改为红色。 */
         if (battery.percent <= 20)
         {
@@ -3276,6 +3412,8 @@ static void refresh_baro(void)
                 ui_set_label_text(s_view.baro.pressure, "--");
                 ui_set_label_text(s_view.baro.altitude, "--");
             }
+            lv_obj_update_layout(s_view.baro.altitude);
+            lv_obj_set_x(s_view.baro.unit, lv_obj_get_x(s_view.baro.altitude) + lv_obj_get_width(s_view.baro.altitude) + 4);
         }
     }
 }
@@ -3494,11 +3632,12 @@ static uint8_t touch_pressed(void)
     return 0;
 }
 
-/* 触摸(含持续按住)刷新活动时间；超时后与PA4一样走完整熄屏流程。 */
+/* 表盘触摸(含持续按住)刷新活动时间；超时后与PA4一样走完整熄屏流程。 */
 static void poll_touch_idle(void)
 {
-    /* 仅亮屏时检查LVGL记录的无操作时长，超过UI_TOUCH_IDLE_MS就走熄屏流程。 */
-    if (s_screen_on != 0 && lv_disp_get_inactive_time(NULL) >= UI_TOUCH_IDLE_MS)
+    /* 功能页与切页动画期间不自动熄屏，手动电源请求仍由原路径处理。 */
+    if (s_screen_on != 0 && s_transition == 0 && page_allows_auto_sleep(s_page) != 0 &&
+        lv_disp_get_inactive_time(NULL) >= UI_TOUCH_IDLE_MS)
     {
         /* 请求熄屏，背光、触摸和刷新定时器由set_screen_on统一关闭。 */
         set_screen_on(0);

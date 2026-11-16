@@ -55,22 +55,17 @@
 #define APP_SENSOR_SPORT_PERIOD_MS          10
 #define APP_SENSOR_SLEEP_WINDOW_MS          1600 /* 等待1Hz气压新转换。 */
 #define APP_SENSOR_BACKGROUND_IMU_PERIOD_MS 200 /* 后台5Hz加速度循环，用于计步和辅助抬腕。 */
-#define APP_SENSOR_BACKGROUND_IMU_IDLE_MS   1000 /* 静止时的软件读取周期；MPU硬件仍为5Hz。 */
 #define APP_SENSOR_SLEEP_POLL_MS            200  /* 与后台5Hz采样合并，保留sensor进度检查。 */
-#define APP_SENSOR_SLEEP_IDLE_POLL_MS       1000 /* 静止慢待机时放宽熄屏后台读取与LVGL稳定等待；心率10ms/姿态20ms/环境100ms不变。 */
 #define APP_SENSOR_ENVIRONMENT_POLL_MS      100  /* AHT转换/恢复窗口仍在200ms读回期限内推进。 */
 #define APP_SENSOR_BARO_PERIOD_MS           300000
 #define APP_TOUCH_TASK_PRIO                 1    /* 触摸采集低于sensor；LVGL只消费缓存。 */
 #define APP_WATCHDOG_FEED_PERIOD_MS         100
 #define APP_WATCHDOG_SENSOR_STARTUP_MS      5000
 #define APP_WATCHDOG_RENDER_TIMEOUT_MS      5000
-#define APP_WATCHDOG_STOP_WINDOW_MS         200 /* 授权tickless暂停外部看门狗的喂狗新鲜度窗口，为100ms喂狗周期的两倍。 */
 
 /* sensor 单写、LVGL 单读；Cortex-M4 对齐的 32 位访问不会撕裂，不共享复合快照。
  * 该计数只用于判断sensor主循环是否仍在推进，不承载任何业务数据。 */
 static volatile uint32_t app_sensor_watchdog_progress;
-/* sensor 单写、LVGL 单读：熄屏后台稳定等待节拍，静止慢待机时放宽到1000ms与sensor同步。 */
-static volatile uint32_t s_sleep_poll_ms = APP_SENSOR_SLEEP_POLL_MS;
 /* UI单写；电源标志打包在对齐32位值中，由各任务一次读取。
  * 该值只表达UI的意图，不代表屏幕/触摸的实际硬件状态。 */
 static volatile uint32_t s_power_state;
@@ -134,11 +129,10 @@ uint8_t app_task_is_screen_off(void)
     return (s_power_state & APP_POWER_SCREEN_OFF) != 0;
 }
 
-/* 返回sensor最近发布的熄屏等待毫秒(200或1000)，LVGL用作通知等待超时。 */
+/* 熄屏等待与后台5Hz加速度读取保持一致，避免静止后漏掉短动作。 */
 uint32_t app_task_sleep_poll_ms(void)
 {
-    /* 原样返回sensor最近发布的等待毫秒数(200或1000)，不做换算。 */
-    return s_sleep_poll_ms;
+    return APP_SENSOR_SLEEP_POLL_MS;
 }
 
 /* 看门狗状态：started_ms用于sensor启动宽限，render_started_ms记录本轮渲染起点，
@@ -180,39 +174,14 @@ void App_Task_Create(void)
     }
 }
 
-/* 启动调度器；正常永不返回，返回说明内核异常，原地死守等看门狗。 */
+/* 启动调度器；正常永不返回，返回说明内核异常，记录后主动复位。 */
 void App_Task_Start(void)
 {
     vTaskStartScheduler(); /* 正常永不返回 */
-    /* 调度器异常返回时不再做任何初始化，原地空转等待外部看门狗复位。 */
-    for (;;)
-    {
-    } /* 调度器异常返回时死守 */
+    Error_Handler();
 }
 
 /* 空闲合并时钟由app_tickless统一处理；喂狗只认LVGL与sensor两个任务的进度。 */
-
-/* 仅返回授权，不喂狗、不改写last_feed_ms：喂狗时刻只由app_watchdog_begin初始化、
-   app_watchdog_service在确认新的sensor进度后真实喂狗时更新。 */
-uint8_t app_task_watchdog_stop_allowed(void)
-{
-    /* sensor尚未启动，没有可供判定的真实喂狗进度，拒绝暂停。 */
-    if (app_watchdog.sensor_started == 0)
-    {
-        return 0;
-    }
-    /* 距最近一次由新sensor进度确认的喂狗超过授权窗口：不续期，拒绝暂停。 */
-    if ((uint32_t)(HAL_GetTick() - app_watchdog.last_feed_ms) > APP_WATCHDOG_STOP_WINDOW_MS)
-    {
-        return 0;
-    }
-    /* 只有静止慢待机的1000ms节拍才需要跨过TPS3823约900ms的硬件超时。 */
-    if (app_task_sleep_poll_ms() != APP_SENSOR_SLEEP_IDLE_POLL_MS)
-    {
-        return 0;
-    }
-    return 1;
-}
 
 /**********************
  *   STATIC FUNCTIONS
@@ -308,7 +277,7 @@ static void app_lvgl_wait(uint32_t period_ms, uint8_t rtc_finished)
         }
         else
         {
-            /* PA4/UART立即通知；稳定熄屏由sensor按发布节拍通知，静止慢待机放宽到1000ms同步。 */
+            /* PA4/UART立即通知；稳定熄屏由sensor每200ms通知，静止时保持同一节拍。 */
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(app_task_sleep_poll_ms()));
         }
     }
@@ -488,6 +457,7 @@ static void app_sensor_task(void *pvParameters)
     uint8_t cal_finished = 0; /* 零偏已恢复，或本轮校准流程已结束（成功/失败）。 */
     uint8_t imu_saving = 0, mag_saving = 0; /* IMU零偏/磁校准的EEPROM保存进度。 */
     uint8_t uptime_saving = 0, weather_saving = 0; /* 开机秒数/天气的保存进度。 */
+    uint8_t heart_saving = 0; /* 心率周期EEPROM保存进度。 */
     uint8_t ota_saving = 0; /* OTA标志保存进度；非0时其他保存让路。 */
     uint32_t baro_ms, baro_window_ms, battery_ms, now_ms, power_state; /* 气压周期起点、气压窗口起点、电池节拍、当前毫秒、电源状态快照。 */
     uint32_t period_ms = APP_SENSOR_TASK_PERIOD; /* 本轮调度周期，初值20ms。 */
@@ -504,8 +474,6 @@ static void app_sensor_task(void *pvParameters)
     uint32_t environment_ms = 0, window_ms = 0; /* 温湿度节拍起点与本次窗口起点。 */
     uint32_t imu_cycle_ms = 0, imu_wake_ms = 0; /* 上次IMU采样时刻与预热起点。 */
     uint32_t imu_warmup_ms, imu_period_ms; /* 预热时长与本轮IMU采样周期(ms)。 */
-    uint32_t sensor_poll_ms = APP_SENSOR_SLEEP_POLL_MS, imu_read_period_ms = APP_SENSOR_BACKGROUND_IMU_PERIOD_MS; /* 熄屏轮询节拍与后台IMU读取周期。 */
-    uint8_t stationary_slow = 0, stationary_slow_prev = 0, stationary_slow_entry = 0; /* 慢待机条件、上一轮慢待机、本次是否刚进入。 */
 
     (void)pvParameters; /* 未使用任务参数。 */
     /* 记录sensor任务启动时刻到启动诊断。 */
@@ -579,8 +547,9 @@ static void app_sensor_task(void *pvParameters)
             sporting = sport_ready;
             app_heart_set_sport_mode(sporting);
         }
-        /* 非运动、无IMU/开机秒数/天气保存在途，且本sensor任务取到UI提交的校准请求时，重新开始零偏校准。 */
-        if (sporting == 0 && imu_saving == 0 && uptime_saving == 0 && weather_saving == 0 && app_diag_take_imu_calibration() != 0)
+        /* 非运动且IMU/开机秒数/天气/心率保存空闲，取到UI提交的请求时重新开始零偏校准。 */
+        if (sporting == 0 && imu_saving == 0 && uptime_saving == 0 && weather_saving == 0 && heart_saving == 0 &&
+            app_diag_take_imu_calibration() != 0)
         {
             /* 清零校准完成标志，让后续按未校准路径重新走一遍。 */
             cal_finished = 0;
@@ -707,36 +676,9 @@ static void app_sensor_task(void *pvParameters)
             imu_wake_ms = now_ms;
             imu_warming = 1;
         }
-        /* 仅正常熄屏、无心率/运动/姿态/校准/保存且加速度连续稳定时才进入慢待机；
-         * 任一活动或运动(新鲜帧清零stationary)立即回到200ms，计步与抬腕状态保持不变。 */
-        stationary_slow = sleeping != 0 && imu_background != 0 && cal_finished != 0 && heart.enabled == 0 &&
-                          heart_pending == 0 && sporting == 0 && imu_saving == 0 && mag_saving == 0 &&
-                          uptime_saving == 0 && weather_saving == 0 && ota_saving == 0 && mpu_recovering == 0 &&
-                          environment_active == 0 && baro_active == 0 && baro_sleep_pending == 0 &&
-                          app_imu_is_calibrating() == 0 && app_imu_is_stationary() != 0;
-        stationary_slow_entry = 0;
-        if (stationary_slow != 0)
-        {
-            /* 满足慢待机条件：轮询节拍放宽到1000ms，后台IMU读取也放宽到1000ms。 */
-            sensor_poll_ms = APP_SENSOR_SLEEP_IDLE_POLL_MS;
-            imu_read_period_ms = APP_SENSOR_BACKGROUND_IMU_IDLE_MS;
-            /* 转入慢待机的第一轮先取一帧新加速度再等1000ms：上一帧可能只过了200ms，
-             * 直接改阈值会让真实读间隔达到1200ms并触发静止连续性上限、清掉计步/抬腕状态。 */
-            stationary_slow_entry = stationary_slow_prev == 0;
-            /* 记下已处于慢待机，供下一轮判断是否刚进入。 */
-            stationary_slow_prev = 1;
-        }
-        else
-        {
-            /* 任一活动出现：轮询与后台IMU读取都回到200ms，并清除慢待机历史。 */
-            sensor_poll_ms = APP_SENSOR_SLEEP_POLL_MS;
-            imu_read_period_ms = APP_SENSOR_BACKGROUND_IMU_PERIOD_MS;
-            stationary_slow_prev = 0;
-        }
-        s_sleep_poll_ms = sensor_poll_ms; /* 发布给LVGL，稳定等待与sensor读节拍同步。 */
-        /* 后台模式下没有待取帧，且刚进入慢待机或已到读取周期：标一个待取帧并重排起点。 */
+        /* 静止时也按200ms读取最新加速度，保持计步与辅助抬腕的5Hz输入。 */
         if (imu_background != 0 && imu_sample_pending == 0 &&
-            (stationary_slow_entry != 0 || (uint32_t)(now_ms - imu_cycle_ms) >= imu_read_period_ms))
+            (uint32_t)(now_ms - imu_cycle_ms) >= APP_SENSOR_BACKGROUND_IMU_PERIOD_MS)
         {
             imu_cycle_ms = now_ms; /* 超期只取最新一帧，不补跑休眠期间的旧采样。 */
             imu_sample_pending = 1;
@@ -850,8 +792,8 @@ static void app_sensor_task(void *pvParameters)
         }
         else if (sleeping != 0)
         {
-            /* 不需要IMU且处于熄屏：按熄屏轮询节拍(200/1000ms)等待。 */
-            period_ms = sensor_poll_ms;
+            /* 不需要IMU且处于熄屏：按熄屏轮询节拍200ms等待。 */
+            period_ms = APP_SENSOR_SLEEP_POLL_MS;
         }
         /* 心率开启时统一用10ms，满足心率服务30ms读取下限的整除关系。 */
         if (heart.enabled != 0)
@@ -905,7 +847,7 @@ static void app_sensor_task(void *pvParameters)
             /* 熄屏且无心率测量：按熄屏轮询节拍调度。 */
             if (heart.enabled == 0)
             {
-                period_ms = sensor_poll_ms;
+                period_ms = APP_SENSOR_SLEEP_POLL_MS;
             }
             /* 温湿度窗口激活：本拍服务一次温湿度。 */
             if (environment_active != 0)
@@ -954,7 +896,7 @@ static void app_sensor_task(void *pvParameters)
             app_aht21_service(); /* 转换等待仍分步检查，避开气压/电池读取轮次。 */
         }
         /* IMU零偏等待保存且其他保存都空闲：启动一次EEPROM写入，状态推进到2。 */
-        if (imu_saving == 1 && mag_saving == 0 && uptime_saving == 0 && weather_saving == 0 && ota_saving == 0)
+        if (imu_saving == 1 && mag_saving == 0 && uptime_saving == 0 && weather_saving == 0 && heart_saving == 0 && ota_saving == 0)
         {
             store_result = app_imu_store_save_begin(&offset);
             imu_saving = 2;
@@ -979,49 +921,33 @@ static void app_sensor_task(void *pvParameters)
             }
         }
         /* 其他保存都空闲，且(非运动或磁保存已在进行)时，推进磁校准保存。 */
-        else if (uptime_saving == 0 && weather_saving == 0 && ota_saving == 0 && (sporting == 0 || mag_saving != 0))
+        else if (uptime_saving == 0 && weather_saving == 0 && heart_saving == 0 && ota_saving == 0 && (sporting == 0 || mag_saving != 0))
         {
             mag_saving = App_IMU_SaveService();
         }
-        /* 校准、开机时间、天气和OTA共用EEPROM；在途事务必须完成后才允许下一方开始。
+        /* 校准、开机时间、天气、心率周期和OTA共用EEPROM；在途事务完成后才允许下一方开始。
          * OTA标志写入并读回确认后，其余保存都不再启动，等待复位进入升级。 */
         /* 开机秒数保存：OTA未在写、校准完成、其他保存在途为0时才允许启动。 */
-        uptime_saving = app_uptime_service(ota_saving == 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && weather_saving == 0 &&
-                                          app_imu_is_calibrating() == 0);
+        uptime_saving = app_uptime_service(ota_saving == 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 &&
+                                          weather_saving == 0 && heart_saving == 0 && app_imu_is_calibrating() == 0);
         /* 天气保存：同样让开OTA与其余在途保存，且校准已完成。 */
-        weather_saving = app_weather_store_service(ota_saving == 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && uptime_saving == 0 &&
-                                                  app_imu_is_calibrating() == 0);
+        weather_saving = app_weather_store_service(ota_saving == 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 &&
+                                                  uptime_saving == 0 && heart_saving == 0 && app_imu_is_calibrating() == 0);
+        heart_saving = app_heart_store_service(ota_saving == 0 && cal_finished != 0 && imu_saving == 0 && mag_saving == 0 && uptime_saving == 0 &&
+                                              weather_saving == 0 && app_imu_is_calibrating() == 0);
         /* OTA标志保存优先级最高：其他保存在途为0时启动。 */
-        ota_saving = app_ota_storage_service(imu_saving == 0 && mag_saving == 0 && uptime_saving == 0 && weather_saving == 0);
+        ota_saving = app_ota_storage_service(imu_saving == 0 && mag_saving == 0 && uptime_saving == 0 && weather_saving == 0 && heart_saving == 0);
         /* OTA未在写时，按开机秒数服务电池记录。 */
         if (ota_saving == 0)
         {
             app_battery_log_service(app_uptime_get_seconds());
-        }
-        /* 采样与EEPROM服务之后重判当轮节拍：本拍读到运动、MPU仍在恢复、采样还欠账、心率启动或有任何在途保存时，
-         * 当轮就退出慢待机，等待时长与发布给LVGL的节拍一起回到200ms，不被上一拍的1000ms覆盖。 */
-        if (stationary_slow != 0 &&
-            (app_imu_is_stationary() == 0 || mpu_recovering != 0 || imu_sample_pending != 0 || heart.enabled != 0 ||
-             imu_saving != 0 || mag_saving != 0 || uptime_saving != 0 || weather_saving != 0 || ota_saving != 0 ||
-             environment_active != 0 || baro_active != 0 || baro_sleep_pending != 0))
-        {
-            /* 本拍周期仍是慢待机节拍时，只把它改回200ms；更短的环境/心率周期不动。 */
-            if (period_ms == sensor_poll_ms)
-            {
-                period_ms = APP_SENSOR_SLEEP_POLL_MS; /* 只缩短1000ms稳态等待，环境/心率等更短周期保持不变。 */
-            }
-            /* 慢待机参数一并回到活跃档，并重新发布给LVGL。 */
-            sensor_poll_ms = APP_SENSOR_SLEEP_POLL_MS;
-            imu_read_period_ms = APP_SENSOR_BACKGROUND_IMU_PERIOD_MS;
-            s_sleep_poll_ms = sensor_poll_ms;
-            stationary_slow_prev = 0; /* 再次静止时按慢待机入口重取新帧，跨切换读间隔仍不超过1000ms。 */
         }
         /* 记录本轮诊断结束及实际周期。 */
         app_diag_task_end(APP_DIAG_SENSOR_TASK, period_ms);
         /* 递增看门狗进度计数，表示本轮循环已完成。 */
         ++app_sensor_watchdog_progress;
         /* 熄屏且本轮按熄屏节拍等待(或蓝牙还有待收字节)：通知LVGL推进一拍。 */
-        if (sleeping != 0 && (period_ms == sensor_poll_ms || kt6368a_rx_pending() != 0) && s_lvgl_task_handle != NULL)
+        if (sleeping != 0 && (period_ms == APP_SENSOR_SLEEP_POLL_MS || kt6368a_rx_pending() != 0) && s_lvgl_task_handle != NULL)
         {
             xTaskNotifyGive(s_lvgl_task_handle);
         }
@@ -1042,7 +968,7 @@ static void app_sensor_task(void *pvParameters)
 
 /**********************
  *  栈溢出安全网 (configCHECK_FOR_STACK_OVERFLOW=1)
- *  触发说明: 某一任务栈越界, 停死便于调试器定位, 避免静默破坏。
+ *  触发说明: 某一任务栈越界，保存现场后主动复位，避免静默破坏。
  *********************/
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
@@ -1061,8 +987,9 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
             task_tag |= (uint32_t)(uint8_t)pcTaskName[i] << (8 * i);
         }
     }
-    /* 以栈溢出类型、pc=0和任务名标签写入复位记录，然后死循环等待看门狗复位。 */
+    /* 以栈溢出类型、pc=0和任务名标签写入复位记录，然后主动复位。 */
     app_reset_capture_stop(APP_RESET_STACK_OVERFLOW, 0, task_tag);
+    NVIC_SystemReset();
     for (;;)
     {
     }

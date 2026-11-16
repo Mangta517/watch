@@ -310,8 +310,8 @@ static void lv_lru_remove_lru_item(lv_lru_t * cache)
 {
     lv_lru_item_t * min_item = NULL, *min_prev = NULL;
     lv_lru_item_t * item = NULL, *prev = NULL;
-    uint32_t i = 0, min_index = -1;
-    uint64_t min_access_count = -1;
+    uint32_t i = 0, min_index = UINT32_MAX;
+    uint64_t min_access_count = UINT64_MAX;
 
     for(; i < cache->hash_table_size; i++) {
         item = cache->items[i];

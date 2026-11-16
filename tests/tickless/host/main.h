@@ -31,7 +31,7 @@ extern Host_Cycle_Type host_cycles;
 #define SCB_SCR_SLEEPDEEP_Msk (1UL << 2)
 typedef struct
 {
-    uint32_t CCR3, CNT, CR2, SR, CR, CFGR, APB2ENR, ODR, IMR, PR;
+    uint32_t CCR3, CNT, CR2, SR, CR, CFGR, APB2ENR, ODR, IMR, PR, CSR;
 } Host_Peripheral_Type;
 extern Host_Peripheral_Type host_tim2, host_tim3, host_rcc, host_spi, host_dma, host_adc, host_gpio, host_exti;
 #define TIM2 (&host_tim2)
@@ -44,6 +44,9 @@ extern Host_Peripheral_Type host_tim2, host_tim3, host_rcc, host_spi, host_dma, 
 #define DMA2_Stream2 (&host_dma)
 #define ADC1 (&host_adc)
 #define EXTI (&host_exti)
+extern Host_Peripheral_Type host_pwr;
+#define PWR (&host_pwr)
+#define PWR_CSR_PVDO (1U << 2)
 #define BLE_EN_GPIO_Port (&host_gpio)
 #define BLE_EN_Pin (1U << 8)
 #define RCC_APB2ENR_USART1EN (1U << 4)
@@ -72,5 +75,31 @@ void host_barrier(void);
 #define __WFI() host_sleep()
 #define __DSB() host_barrier()
 #define __ISB() host_barrier()
+typedef Host_Peripheral_Type GPIO_TypeDef;
+typedef struct
+{
+    uint32_t Pin, Mode, Pull, Speed;
+} GPIO_InitTypeDef;
+typedef enum
+{
+    GPIO_PIN_RESET = 0,
+    GPIO_PIN_SET = 1
+} GPIO_PinState;
+extern GPIO_TypeDef host_watchdog_gpio;
+#define WDI_GPIO_Port (&host_watchdog_gpio)
+#define WDI_Pin (1U << 2)
+#define WDG_EN_GPIO_Port (&host_watchdog_gpio)
+#define WDG_EN_Pin (1U << 1)
+#define GPIO_MODE_INPUT 0
+#define GPIO_MODE_OUTPUT_PP 1
+#define GPIO_NOPULL 0
+#define GPIO_SPEED_FREQ_LOW 0
+void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *gpio);
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
+uint32_t host_get_primask(void);
+void host_set_primask(uint32_t mask);
+#define __get_PRIMASK() host_get_primask()
+#define __set_PRIMASK(mask) host_set_primask(mask)
+#define __NOP() ((void)0)
 typedef int HAL_StatusTypeDef;
 #endif

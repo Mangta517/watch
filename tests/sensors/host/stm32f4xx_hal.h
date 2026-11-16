@@ -36,6 +36,9 @@ extern GPIO_TypeDef host_gpio_a, host_gpio_b;
 #define GPIO_PIN_15          (1U << 15)
 #define GPIO_MODE_INPUT      0U
 #define GPIO_MODE_ANALOG     3U
+#define GPIO_MODE_AF_PP      2U
+#define GPIO_SPEED_FREQ_VERY_HIGH 3U
+#define GPIO_AF5_SPI1        5U
 #define GPIO_MODE_OUTPUT_PP  1U
 #define GPIO_NOPULL          0U
 #define GPIO_SPEED_FREQ_LOW  0U
@@ -55,7 +58,7 @@ typedef enum
 } HAL_StatusTypeDef;
 typedef struct
 {
-    uint32_t Pin, Mode, Pull, Speed;
+    uint32_t Pin, Mode, Pull, Speed, Alternate;
 } GPIO_InitTypeDef;
 typedef struct
 {
@@ -117,10 +120,24 @@ typedef struct
 } ADC_HandleTypeDef;
 typedef struct
 {
-    uint32_t CR2;
+    uint32_t CR2, CCR;
 } Host_ADC_TypeDef;
 extern Host_ADC_TypeDef host_adc1;
 #define ADC1 (&host_adc1)
+#define ADC (&host_adc1)
+#define ADC_CCR_TSVREFE (1U << 23)
+#define ADC_CHANNEL_1 1
+#define ADC_CHANNEL_VREFINT 17
+#define ADC_SAMPLETIME_480CYCLES 480
+extern uint32_t SystemCoreClock;
+#ifndef __NOP
+#define __NOP() ((void)0)
+#endif
+typedef struct
+{
+    uint32_t Channel, Rank, SamplingTime;
+} ADC_ChannelConfTypeDef;
+HAL_StatusTypeDef HAL_ADC_ConfigChannel(ADC_HandleTypeDef *adc, ADC_ChannelConfTypeDef *config);
 #define ADC_CR2_ADON 1
 HAL_StatusTypeDef HAL_ADC_Start(ADC_HandleTypeDef *adc);
 HAL_StatusTypeDef HAL_ADC_PollForConversion(ADC_HandleTypeDef *adc, uint32_t timeout_ms);
@@ -132,6 +149,7 @@ void __disable_irq(void);
 void __set_PRIMASK(uint32_t mask);
 void HAL_Delay(uint32_t ms);
 uint32_t HAL_GetTick(void);
+void NVIC_SystemReset(void);
 void __DMB(void);
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config);
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);

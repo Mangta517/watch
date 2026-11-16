@@ -5,9 +5,9 @@
  *          移植自旧工程 flight_hal/interface/my_mpu6050.c：
  *          手表±1000°/s、±4g；初始化100Hz，sensor按使用状态切换50/25Hz六轴或5Hz加速度低功耗。
  *          数据就绪中断: 器件 DATA_RDY 输出仍使能 —— INT_ENABLE(0x38)=0x01，
- *          器件 INT_PIN_CFG 仍为 0x20 (高有效/推挽/锁存, 读 0x3A 清除)；
+ *          INT_PIN_CFG=0xC0 (低有效/开漏/50µs脉冲)，空闲释放外部4.7k上拉，避免持续灌电流；
  *          main 启动即持续屏蔽 PB12 EXTI（早于稍后的 sensor 初始化，避免倒置时序），
- *          sensor 任务按周期轮询 INT_STATUS 的 DATA_RDY 取最新帧，读 0x3A 同时释放器件锁存。
+ *          INT_RD_CLEAR=0，sensor按周期轮询INT_STATUS的DATA_RDY取最新帧，仅读0x3A清状态。
  *          下方 ISR 边沿计数与标志 API 仅为兼容旧调用方保留，正常运行不再有 PB12 中断进入。
  ******************************************************************************
  */
@@ -146,7 +146,7 @@ uint8_t my_mpu6050_recover_step(uint32_t now_ms)
         {MPU6050_REG_PWR_MGMT_1, 0x00},
         {MPU6050_GYRO_CONFIG, MPU6050_GYRO_RANGE},
         {MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE},
-        {MPU6050_INT_PIN_CFG, 0x20},
+        {MPU6050_INT_PIN_CFG, 0xC0},
         {MPU6050_INT_ENABLE, 0x01},
         {MPU6050_FIFO_EN, 0x00},
         {MPU6050_USER_CTRL, 0x00},
@@ -239,7 +239,7 @@ uint8_t my_mpu6050_recover_step(uint32_t now_ms)
         }
         return 2;
     case MPU_RECOVER_CLEAR:
-        /* 读一次 INT_STATUS，释放器件锁存的中断并清掉上电残留状态。 */
+        /* 读一次 INT_STATUS，清掉上电残留的数据就绪状态。 */
         if (my_mpu6050_read_reg(MPU6050_INT_STATUS, &data) != 0)
         {
             return mpu6050_recover_failed();
@@ -889,11 +889,11 @@ uint32_t my_mpu6050_sample_ms(void)
 }
 
 /* ------------------------------------------------------------ 数据就绪中断 */
-/* 器件 DATA_RDY 输出仍使能 (INT_ENABLE=0x01, INT_PIN_CFG=0x20)；main 启动即持续屏蔽 PB12 EXTI，
+/* 器件 DATA_RDY 输出使能 (INT_ENABLE=0x01, INT_PIN_CFG=0xC0)；main 启动即持续屏蔽 PB12 EXTI，
  * 正常运行不再进入本回调，以下 ISR 边沿计数与标志 API 仅为兼容旧调用方保留。
  * HAL 已清 STM32 EXTI PR；这里只记事件，绝不抢 SENSOR 总线。
- * 器件 INT 锁存在 sensor 任务 my_mpu6050_get_data() 轮询 INT_STATUS 时读取 0x3A 释放。
- * 锁存期间多次 DATA_RDY 会合并，边沿计数不是器件采样率。 */
+ * INT脚每次输出50µs低脉冲，DATA_RDY状态在sensor读取0x3A时清除。
+ * 两次轮询间的多次DATA_RDY合并，主机边沿计数不作为器件采样率。 */
 
 /**
  * @brief HAL GPIO EXTI 回调 (强符号覆盖 hal_gpio.c 中的 __weak 版本)

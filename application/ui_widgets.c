@@ -72,33 +72,42 @@ lv_obj_t *ui_panel(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
 
 lv_obj_t *ui_card(lv_obj_t *parent, int x, int y, int w, int h, uint32_t bg_color, uint32_t border_color, lv_coord_t radius)
 {
-    /* 在ui_panel基础上添加圆角和1像素描边，适配方形屏卡片网格风格。 */
+    /* border_color为0时使用无边框分层，非0用于显式选中态。 */
     lv_obj_t *obj = ui_panel(parent, x, y, w, h, bg_color);
     lv_obj_set_style_radius(obj, radius, 0);
-    lv_obj_set_style_border_width(obj, 1, 0);
-    lv_obj_set_style_border_color(obj, lv_color_hex(border_color), 0);
-    lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+    if (border_color != 0)
+    {
+        lv_obj_set_style_border_width(obj, 1, 0);
+        lv_obj_set_style_border_color(obj, lv_color_hex(border_color), 0);
+        lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+    }
     return obj;
 }
+
+/* 保留lv_bar数值接口与生命周期，仅跳过它的矩形指示器绘制。 */
+static void ring_gauge_class_event(const lv_obj_class_t *class_p, lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_DRAW_MAIN)
+    {
+        lv_obj_event_base(&lv_bar_class, event);
+    }
+    else
+    {
+        lv_obj_event_base(class_p, event);
+    }
+}
+
+static const lv_obj_class_t s_ring_gauge_class =
+{
+    .base_class = &lv_bar_class,
+    .event_cb = ring_gauge_class_event,
+    .instance_size = sizeof(lv_bar_t),
+};
 
 /* LV_USE_ARC已关闭以节省Flash；借用lv_bar保存百分比/颜色并在DRAW_MAIN自绘圆环。 */
 static void ring_gauge_event_cb(lv_event_t *event)
 {
     lv_event_code_t code = lv_event_get_code(event);
-    if (code == LV_EVENT_DRAW_PART_BEGIN)
-    {
-        lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(event);
-        /* 屏蔽lv_bar默认的矩形指示器绘制，但保留控件样式值供外部读取与静态刷新比对。 */
-        if (dsc != NULL && dsc->part == LV_PART_INDICATOR && dsc->rect_dsc != NULL)
-        {
-            dsc->rect_dsc->bg_opa = LV_OPA_TRANSP;
-            dsc->rect_dsc->bg_img_opa = LV_OPA_TRANSP;
-            dsc->rect_dsc->border_opa = LV_OPA_TRANSP;
-            dsc->rect_dsc->outline_opa = LV_OPA_TRANSP;
-            dsc->rect_dsc->shadow_opa = LV_OPA_TRANSP;
-        }
-        return;
-    }
     if (code == LV_EVENT_DRAW_MAIN)
     {
         lv_obj_t *obj = lv_event_get_target(event);
@@ -114,7 +123,7 @@ static void ring_gauge_event_cb(lv_event_t *event)
         lv_obj_get_coords(obj, &coords);
         w = lv_area_get_width(&coords);
         h = lv_area_get_height(&coords);
-        radius = (w < h ? w : h) / 2 - 1;
+        radius = LV_MIN(w, h) / 2 - 1;
         if (draw_ctx == NULL || radius <= 2)
         {
             return;
@@ -153,7 +162,7 @@ static void ring_gauge_event_cb(lv_event_t *event)
                 {
                     sweep = 356U;
                 }
-                arc.rounded = (arc_width >= 4U) ? 1U : 0U;
+                arc.rounded = 1;
                 lv_draw_arc(draw_ctx, &arc, &center, (uint16_t)radius, 270U, (uint16_t)((270U + sweep) % 360U));
             }
         }
@@ -162,7 +171,8 @@ static void ring_gauge_event_cb(lv_event_t *event)
 
 lv_obj_t *ui_create_ring_gauge(lv_obj_t *parent, lv_coord_t size, uint32_t track_color, uint32_t arc_color, uint16_t arc_width)
 {
-    lv_obj_t *ring = lv_bar_create(parent);
+    lv_obj_t *ring = lv_obj_class_create_obj(&s_ring_gauge_class, parent);
+    lv_obj_class_init_obj(ring);
     lv_obj_remove_style_all(ring);
     lv_obj_set_size(ring, size, size);
     lv_bar_set_range(ring, 0, 100);
@@ -176,7 +186,6 @@ lv_obj_t *ui_create_ring_gauge(lv_obj_t *parent, lv_coord_t size, uint32_t track
     lv_obj_set_style_bg_color(ring, lv_color_hex(arc_color), LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, LV_PART_INDICATOR);
     lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(ring, ring_gauge_event_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
     lv_obj_add_event_cb(ring, ring_gauge_event_cb, LV_EVENT_DRAW_MAIN, (void *)(uintptr_t)arc_width);
     return ring;
 }
@@ -192,8 +201,16 @@ void ui_update_ring_gauge(lv_obj_t *ring, int32_t percent, uint8_t valid, uint32
     {
         return;
     }
-    target_value = valid ? LV_CLAMP(0, percent, 100) : 0;
-    target_opa = (valid != 0 && target_value > 0) ? LV_OPA_COVER : LV_OPA_TRANSP;
+    target_value = 0;
+    target_opa = LV_OPA_TRANSP;
+    if (valid != 0)
+    {
+        target_value = LV_CLAMP(0, percent, 100);
+        if (target_value > 0)
+        {
+            target_opa = LV_OPA_COVER;
+        }
+    }
     target_color = lv_color_hex(arc_color);
 
     if (lv_bar_get_value(ring) != target_value)
@@ -236,6 +253,17 @@ lv_obj_t *ui_label(lv_obj_t *parent, const char *text, int x, int y, const lv_fo
     return obj;
 }
 
+lv_obj_t *ui_badge(lv_obj_t *parent, const char *text, int x, int y, uint32_t color)
+{
+    lv_obj_t *badge = ui_label(parent, text, x, y, &lv_font_montserrat_10, color);
+    lv_obj_set_style_bg_color(badge, lv_color_hex(UI_CARD_ALT), 0);
+    lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(badge, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_hor(badge, 6, 0);
+    lv_obj_set_style_pad_ver(badge, 4, 0);
+    return badge;
+}
+
 lv_obj_t *ui_note(lv_obj_t *parent, const char *text, int y)
 {
     /* 用10号灰色字体创建说明标签，x固定为4，y由调用方给出。 */
@@ -248,11 +276,41 @@ lv_obj_t *ui_note(lv_obj_t *parent, const char *text, int y)
     return obj;
 }
 
+static void trend_draw_cb(lv_event_t *event)
+{
+    lv_obj_t *chart = lv_event_get_target(event);
+    if (lv_event_get_code(event) == LV_EVENT_DRAW_PART_BEGIN)
+    {
+        lv_obj_draw_part_dsc_t *part = lv_event_get_draw_part_dsc(event);
+        if (part->part == LV_PART_ITEMS && part->rect_dsc != NULL)
+        {
+            part->rect_dsc->bg_opa = LV_OPA_60;
+            if (part->id == UI_TREND_POINTS - 1)
+            {
+                part->rect_dsc->bg_opa = LV_OPA_COVER;
+            }
+        }
+    }
+    else
+    {
+        lv_area_t area;
+        lv_point_t start, end;
+        lv_draw_line_dsc_t line;
+        lv_obj_get_coords(chart, &area);
+        start = (lv_point_t){area.x1, area.y2};
+        end = (lv_point_t){area.x2, area.y2};
+        lv_draw_line_dsc_init(&line);
+        line.color = lv_color_hex(UI_BORDER_STRONG);
+        line.width = 1;
+        lv_draw_line(lv_event_get_draw_ctx(event), &line, &start, &end);
+    }
+}
+
 /* 心率每秒、海拔每10分钟记录，最右为最新值；海拔历史由sensor持续维护。 */
 void ui_trend_create(ui_trend_struct *trend, lv_obj_t *parent, const char *title, int y, int height, uint32_t color, uint32_t sample_ms)
 {
-    /* 在parent的y位置建高度为height的带描边卡片，承载标题、刻度和图表。 */
-    lv_obj_t *card = ui_card(parent, 0, y, 212, height, UI_CARD, UI_BORDER, 16);
+    /* 在parent的y位置建高度为height的无边框卡片，承载标题、刻度和图表。 */
+    lv_obj_t *card = ui_card(parent, 0, y, 212, height, UI_CARD_SOFT, 0, 16);
     /* 图表下方采样间隔说明标签。 */
     lv_obj_t *caption;
     /* 卡片左上角写曲线标题，使用该曲线的主题色。 */
@@ -299,6 +357,8 @@ void ui_trend_create(ui_trend_struct *trend, lv_obj_t *parent, const char *title
     lv_chart_set_type(trend->chart, LV_CHART_TYPE_BAR);
     /* 固定保存UI_TREND_POINTS个点，滚动覆盖最旧值。 */
     lv_chart_set_point_count(trend->chart, UI_TREND_POINTS);
+    lv_obj_add_event_cb(trend->chart, trend_draw_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+    lv_obj_add_event_cb(trend->chart, trend_draw_cb, LV_EVENT_DRAW_POST, NULL);
     /* 只画3条水平分割线，不画垂直分割线。 */
     lv_chart_set_div_line_count(trend->chart, 3, 0);
     /* 主Y轴初始范围0..200，随后由trend_update_range按数据调整。 */

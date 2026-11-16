@@ -68,6 +68,8 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
   if(uartHandle->Instance==USART1)
   {
   /* USER CODE BEGIN USART1_MspInit 0 */
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
   /* 入参: uartHandle 为正在初始化的串口句柄；返回: 无。
    * 只对 USART1 打开时钟、配置 PA9/PA10 复用功能和 NVIC，其他实例不处理。 */
   /* USER CODE END USART1_MspInit 0 */
@@ -87,7 +89,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /* USART1 interrupt Init */
-    HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(USART1_IRQn, 12, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
   /* USER CODE BEGIN USART1_MspInit 1 */
         /* 蓝牙默认断电且电源被BL1551B接地，驱动上电前避免TX高电平反向供电。 */
@@ -98,6 +100,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
             GPIO_InitStruct.Pull = GPIO_PULLDOWN;
             HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
         }
+    __set_PRIMASK(mask);
   /* USER CODE END USART1_MspInit 1 */
   }
 }
@@ -108,6 +111,8 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
   if(uartHandle->Instance==USART1)
   {
   /* USER CODE BEGIN USART1_MspDeInit 0 */
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
   /* 入参: uartHandle 为要反初始化的串口句柄；返回: 无。
    * 只处理 USART1，关闭外设时钟、释放 PA9/PA10 并关闭其中断。 */
   /* USER CODE END USART1_MspDeInit 0 */
@@ -124,6 +129,7 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     HAL_NVIC_DisableIRQ(USART1_IRQn);
   /* USER CODE BEGIN USART1_MspDeInit 1 */
 
+    __set_PRIMASK(mask);
   /* USER CODE END USART1_MspDeInit 1 */
   }
 }

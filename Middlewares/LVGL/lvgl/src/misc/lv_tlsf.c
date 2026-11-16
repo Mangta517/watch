@@ -895,7 +895,7 @@ void lv_tlsf_walk_pool(lv_pool_t pool, lv_tlsf_walker walker, void * user)
 {
     lv_tlsf_walker pool_walker = walker ? walker : default_walker;
     block_header_t * block =
-        offset_to_block(pool, -(int)block_header_overhead);
+        offset_to_block(pool, (size_t)-(tlsfptr_t)block_header_overhead);
 
     while(block && !block_is_last(block)) {
         pool_walker(
@@ -997,7 +997,7 @@ lv_pool_t lv_tlsf_add_pool(lv_tlsf_t tlsf, void * mem, size_t bytes)
     ** so that the prev_phys_block field falls outside of the pool -
     ** it will never be used.
     */
-    block = offset_to_block(mem, -(tlsfptr_t)block_header_overhead);
+    block = offset_to_block(mem, (size_t)-(tlsfptr_t)block_header_overhead);
     block_set_size(block, pool_bytes);
     block_set_free(block);
     block_set_prev_used(block);
@@ -1015,7 +1015,7 @@ lv_pool_t lv_tlsf_add_pool(lv_tlsf_t tlsf, void * mem, size_t bytes)
 void lv_tlsf_remove_pool(lv_tlsf_t tlsf, lv_pool_t pool)
 {
     control_t * control = tlsf_cast(control_t *, tlsf);
-    block_header_t * block = offset_to_block(pool, -(int)block_header_overhead);
+    block_header_t * block = offset_to_block(pool, (size_t)-(tlsfptr_t)block_header_overhead);
 
     int fl = 0, sl = 0;
 

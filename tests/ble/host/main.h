@@ -61,6 +61,7 @@ extern Host_BLE_RCC_TypeDef host_ble_rcc;
 #define GPIO_AF7_USART1                7U
 #define __HAL_UART_CLEAR_OREFLAG(uart) ((void)(uart))
 uint32_t HAL_GetTick(void);
+void NVIC_SystemReset(void);
 void HAL_Delay(uint32_t ms);
 uint32_t __get_PRIMASK(void);
 void __disable_irq(void);

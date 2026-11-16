@@ -64,13 +64,13 @@ void app_fault_stop(const uint32_t *stack, uint32_t exc_return, uint32_t kind)
 {
     /* 入参: stack 为异常压栈帧地址，exc_return 为 EXC_RETURN，kind 为故障类型编号；
      * 返回: 不返回。记录故障类型、SP 和 EXC_RETURN，并在压栈帧可采信时提取 LR/PC/xPSR；
-     * 完成后原地空转，本路径没有喂狗或主动复位动作，若外部看门狗已启用，则由它超时复位。 */
+     * 完成后主动复位，不依赖外部看门狗是否已启用。 */
     __disable_irq();                                  /* 仅屏蔽可屏蔽中断，避免采集期间被中断打断。 */
     app_reset_capture_fault(kind, stack, exc_return); /* 把故障类型、SP 和 EXC_RETURN 写入备份域，并按需提取 LR/PC/xPSR。 */
+    NVIC_SystemReset();
     for (;;)
     {
-        /* 现场已提交；此处原地空转，本路径没有喂狗或主动复位动作，
-         * 若外部看门狗已启用，则由它超时复位。 */
+        /* 仅在系统复位请求未生效时保留停机。 */
     }
 }
 
@@ -96,8 +96,9 @@ void NMI_Handler(void)
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
-    /* 本工程不区分 NMI 来源；进入后没有恢复路径，直接原地空转，
-     * 本路径没有喂狗或主动复位动作，若外部看门狗已启用，则由它超时复位。 */
+    __disable_irq();
+    app_reset_capture_stop(APP_RESET_ERROR_HANDLER, 0, 0x00494D4E); /* task_tag小端字节为NMI。 */
+    NVIC_SystemReset();
     while (1)
     {
     }

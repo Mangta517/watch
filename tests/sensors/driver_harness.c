@@ -57,6 +57,7 @@ static unsigned spi_calls, spi_address_calls, spi_address_length;
 static HAL_StatusTypeDef dma_start_result = HAL_OK;
 static unsigned dma_starts, dma_stops, spi_aborts, flush_completions;
 static uint8_t dma_stuck;
+static uint32_t lcd_bus_mode = GPIO_MODE_AF_PP;
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *spi);
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *spi);
 
@@ -70,6 +71,7 @@ void host_lcd_clock_set(uint32_t clock, uint8_t enabled)
     {
         assert(host_dma_stream.CR == 0 && (host_spi.SR & SPI_SR_BSY) == 0);
         assert(htim3.compare == 0 && (host_tim3.CR1 & TIM_CR1_CEN) == 0);
+        assert(lcd_bus_mode == GPIO_MODE_ANALOG);
         lcd_clock_mask &= ~clock;
     }
 }
@@ -112,8 +114,20 @@ void Error_Handler(void)
 }
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
+    if (port == GPIOB && config->Pin == (LCD_CLK_Pin | LCD_SDA_Pin))
+    {
+        assert(primask == 1 && config->Pull == GPIO_NOPULL);
+        assert(config->Mode == GPIO_MODE_ANALOG || config->Mode == GPIO_MODE_AF_PP);
+        if (config->Mode == GPIO_MODE_AF_PP)
+        {
+            assert(config->Alternate == GPIO_AF5_SPI1 && config->Speed == GPIO_SPEED_FREQ_VERY_HIGH);
+        }
+        lcd_bus_mode = config->Mode;
+        return;
+    }
     assert(primask && port == TP_SDA_GPIO_Port && config->Pin == TP_SDA_Pin);
-    if (handoff_active != 0 && config->Mode == GPIO_MODE_OUTPUT_PP)
+    assert(config->Mode == GPIO_MODE_INPUT || config->Mode == GPIO_MODE_OUTPUT_OD);
+    if (handoff_active != 0 && config->Mode == GPIO_MODE_OUTPUT_OD)
     {
         assert(handoff_clocks % 9 == 8 && sda_latch == GPIO_PIN_RESET);
     }
@@ -133,7 +147,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
                 }
                 else
                 {
-                    assert(sda_mode == GPIO_MODE_OUTPUT_PP && sda_latch == GPIO_PIN_RESET);
+                    assert(sda_mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_RESET);
                 }
                 ++handoff_clocks;
             }
@@ -152,7 +166,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
     }
     else if (port == TP_SDA_GPIO_Port && pin == TP_SDA_Pin)
     {
-        if (handoff_active != 0 && sda_mode == GPIO_MODE_OUTPUT_PP)
+        if (handoff_active != 0 && sda_mode == GPIO_MODE_OUTPUT_OD)
         {
             assert(state == GPIO_PIN_RESET); /* 连两拍间的短暂推挽高电平也不可接受。 */
         }
@@ -616,7 +630,14 @@ static void lcd_dma_error_tests(void)
     HAL_SPI_ErrorCallback(&hspi1);
     assert(spi_aborts == starts && flush_completions == before);
     dma_stuck = 1;
-    assert(LCD_Flush_Service() == 0 && flush_completions == before);
+    error_expected = 1;
+    if (setjmp(error_jump) == 0)
+    {
+        (void)LCD_Flush_Service();
+        assert(0 && "stuck DMA must enter Error_Handler");
+    }
+    error_expected = 0;
+    assert(flush_completions == before && (host_dma_stream.CR & DMA_SxCR_EN) != 0);
     dma_stuck = 0;
     assert(LCD_Flush_Service() == 1 && flush_completions == before + 1);
     HAL_SPI_ErrorCallback(&hspi1);
@@ -649,7 +670,8 @@ static void lcd_dma_error_tests(void)
 static void lcd_dma_timeout_tests(void)
 {
     static uint16_t pixels[4];
-    unsigned int before, stops, wrap;
+    unsigned int before, stops;
+    volatile unsigned int wrap;
     for (wrap = 0; wrap < 2; ++wrap)
     {
         elapsed_ms = 1000;
@@ -664,7 +686,14 @@ static void lcd_dma_timeout_tests(void)
         assert(LCD_Flush_Service() == 0 && dma_stops == stops);
         ++elapsed_ms;
         dma_stuck = 1;
-        assert(LCD_Flush_Service() == 0 && flush_completions == before);
+        error_expected = 1;
+        if (setjmp(error_jump) == 0)
+        {
+            (void)LCD_Flush_Service();
+            assert(0 && "stuck DMA must enter Error_Handler");
+        }
+        error_expected = 0;
+        assert(flush_completions == before && (host_dma_stream.CR & DMA_SxCR_EN) != 0);
         dma_stuck = 0;
         assert(LCD_Flush_Service() == 1 && flush_completions == before + 1);
         HAL_SPI_TxCpltCallback(&hspi1);

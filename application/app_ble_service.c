@@ -3,7 +3,7 @@
  * @brief 显示任务串行执行的蓝牙业务协调；不依赖LVGL控件或页面状态。
  *
  * AT初始化仍由app_task推进；正常业务是唯一UART接收消费者。各解析器保留原协议，
- * 丢字节仅废弃残行，真实空闲边界和到达时间由驱动提供。ECO等待1000ms安静期，
+ * 丢字节仅废弃残行，真实空闲边界和到达时间由驱动提供。ECO未确认手机时等待1秒，合法校时后等待30秒安静期，
  * SPORT强制断电；各发送者的异步缓冲及完成结果仍由原发起者保有。
  */
 #include "app_ble_service.h"
@@ -26,7 +26,8 @@
 #define APP_BLE_READ_SIZE      64
 #define APP_BLE_RX_BUDGET      256
 #define APP_BLE_TX_TIMEOUT_MS  20
-#define APP_BLE_ECO_QUIET_MS   1000
+#define APP_BLE_ECO_QUIET_MS        1000
+#define APP_BLE_ECO_PHONE_QUIET_MS  30000
 
 /* LVGL当前直接使用1kHz FreeRTOS tick，与天气/校时的业务毫秒时基相同。 */
 static struct
@@ -450,6 +451,7 @@ void app_ble_update_power(uint8_t screen_on, uint8_t sport_mode, uint8_t restart
     uint8_t enabled = sport_mode == 0;
     /* 取一次当前毫秒tick，作为安静期判断和重置的统一时间基准。 */
     uint32_t now_ms = (uint32_t)xTaskGetTickCount();
+    uint32_t quiet_ms = APP_BLE_ECO_QUIET_MS;
     if (restart_quiet != 0)
     {
         s_ble.quiet_tick = now_ms;
@@ -471,8 +473,12 @@ void app_ble_update_power(uint8_t screen_on, uint8_t sport_mode, uint8_t restart
                 s_ble.quiet_tick = now_ms;
                 return;
             }
-            /* 空闲时间还不足APP_BLE_ECO_QUIET_MS，本轮继续等待，不改电源状态。 */
-            if ((uint32_t)(now_ms - s_ble.quiet_tick) < APP_BLE_ECO_QUIET_MS)
+            /* 手机已用合法校时确认通信时，给熄屏后选BIN并发送OTA请求留出时间。 */
+            if (s_ble.phone_ready != 0)
+            {
+                quiet_ms = APP_BLE_ECO_PHONE_QUIET_MS;
+            }
+            if ((uint32_t)(now_ms - s_ble.quiet_tick) < quiet_ms)
             {
                 return;
             }

@@ -3,6 +3,14 @@
 
 typedef struct
 {
+    uint32_t CSR;
+} Host_PVD_TypeDef;
+extern Host_PVD_TypeDef host_pvd;
+#define PWR (&host_pvd)
+#define PWR_CSR_PVDO (1U << 2)
+
+typedef struct
+{
     uint32_t TypeErase, Sector, NbSectors, VoltageRange;
 } FLASH_EraseInitTypeDef;
 

@@ -95,13 +95,10 @@ extern "C"
     uint32_t app_imu_set_sample_period(uint32_t period_ms);
     /* 仅sensor任务：先设置请求，再调用set_sample_period；心率参考不启动姿态/磁融合。 */
     void app_imu_set_accel_reference(uint8_t enabled);
-    /* 兼容器件完全休眠接口；唤醒只丢弃旧时间/磁参考，保留四元数。 */
+    /* 兼容器件完全休眠接口；唤醒重建重力方向并等待新磁场对齐，无磁时保留已有航向。 */
     void app_imu_set_sleep(uint8_t sleeping);
     /* 校准命令、采集或校准记录保存尚未完成时返回1。 */
     uint8_t app_imu_is_calibrating(void);
-    /* 仅sensor任务：后台新鲜加速度连续约10秒稳定时返回1，供放宽读取节拍；
-     * 无有效帧、样本过期(超过活动最大间隔)或读失败后未重新稳定均返回0。 */
-    uint8_t app_imu_is_stationary(void);
     /* 仅sensor任务调用；与MPU零偏保存串行，返回1表示磁记录仍在保存。 */
     uint8_t App_IMU_SaveService(void);
 

@@ -190,6 +190,10 @@ static void mag_cal_command(uint8_t command)
     }
     else if (command == APP_MAG_CMD_FINISH && s_mag_cal_state == APP_MAG_CAL_RUNNING)
     {
+        /* 成功或失败结束都等新磁帧对齐，缓存不得提前消耗一次性请求。 */
+        Common_IMU_ReseedYaw(0);
+        s_mag_valid = 0;
+        s_mag_poll_tick = xTaskGetTickCount() - pdMS_TO_TICKS(s_mag_poll_ms);
         /* 先置失败, 后续覆盖范围检查通过才改回 DONE。 */
         s_mag_cal_state = APP_MAG_CAL_FAILED;
         if (s_mag_cal_samples < APP_MAG_CAL_SAMPLES)
@@ -424,33 +428,7 @@ uint8_t app_imu_is_calibrating(void)
     return calibrating; /* 1=仍有校准/保存事务, 0=EEPROM可让给其他用途。 */
 }
 
-uint8_t app_imu_is_stationary(void)
-{
-    /* max_gap_ms: 与common_activity_update一致的断采上限，已静止放宽到1200ms。 */
-    uint32_t max_gap_ms;
-    /* s_activity 仅由 sensor 任务写、sensor 任务读，无需加锁。
-     * 只有新鲜有效的加速度帧才允许放宽读节拍：无有效帧，或最近一帧已超过活动模块容忍的最大间隔
-     * (离线、总线恢复中、任务被长时间抢占)，一律回到200ms重新取帧，再连续稳定约10秒才可慢待机。 */
-    if (s_activity.stationary != 0)
-    {
-        /* 静止慢待机每秒一帧：允许多等一帧宽度的时间再加调度抖动。 */
-        max_gap_ms = COMMON_ACTIVITY_STATIONARY_MAX_GAP_MS;
-    }
-    else
-    {
-        /* 尚未静止：沿用600ms快速连续性上限。 */
-        max_gap_ms = COMMON_ACTIVITY_MAX_GAP_MS;
-    }
-    if (s_activity.have_sample == 0 ||
-        (uint32_t)(HAL_GetTick() - s_activity.sample_ms) > max_gap_ms)
-    {
-        /* 无有效帧或最近帧已超时: 不能确认静止, 返回0让调用方保持正常读节拍。 */
-        return 0;
-    }
-    return s_activity.stationary; /* 帧新鲜时返回活动模块最近一次的静止结论。 */
-}
-
-/* 仅sensor任务：切换MPU/LSM休眠，唤醒时丢弃旧时间基准与磁新鲜度，保留四元数。 */
+/* 仅sensor任务：切换MPU/LSM休眠，唤醒时丢弃旧时间/磁参考，并重建当前重力方向。 */
 void app_imu_set_sleep(uint8_t sleeping)
 {
     /* 按目标休眠状态分别写MPU6050与LSM303DLHC, 并把写入结果记入诊断。 */
@@ -458,7 +436,8 @@ void app_imu_set_sleep(uint8_t sleeping)
     app_diag_sensor_init(APP_DIAG_MAG, lsm303dlhc_mag_set_sleep(sleeping));
     if (sleeping == 0)
     {
-        /* 间歇采样保留四元数；只丢弃旧时间基准，避免每次后台唤醒把航向重新拉回0。 */
+        /* 首份有效加速度先重建俯仰/横滚，再由新磁帧对齐；无磁时保留已有航向。 */
+        Common_IMU_ReseedYaw(1);
         s_have_sample = s_have_euler = s_mag_valid = 0;
         /* 让磁轮询立即到期: 把上次轮询时刻回拨一个轮询周期。 */
         s_mag_poll_tick = xTaskGetTickCount() - pdMS_TO_TICKS(s_mag_poll_ms);
@@ -508,6 +487,11 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
             imu_lock();
             s_online = 0;
             imu_unlock();
+            if (accel_only == 0)
+            {
+                /* 断采期间倾角可能已变：先重建当前重力方向，再用新磁场对齐航向。 */
+                Common_IMU_ReseedYaw(1);
+            }
         }
         /* 记录新档位参数, 解算间隔上限取周期5倍, 并丢弃旧时间基准等待新帧。 */
         s_sample_period_ms = period_ms;
@@ -557,6 +541,11 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
             s_mag_poll_ms = 160;
             s_mag_max_age_ms = 400;
         }
+    }
+    if (previous_accel_only != 0)
+    {
+        /* 刚从纯加速度模式恢复时允许下一拍立即轮询磁力计。 */
+        s_mag_poll_tick = xTaskGetTickCount() - pdMS_TO_TICKS(s_mag_poll_ms);
     }
     return period_ms; /* 返回应用侧后续采用的调度周期(ms)；重配置失败时回落20ms继续恢复。 */
 }
@@ -621,11 +610,6 @@ void App_IMU_Service(uint8_t read_mag)
     if (s_sample_period_ms == 200 || s_accel_reference != 0)
     {
         /* 纯加速度档: 只发布加速度、步数与抬腕, 不推进四元数与磁融合。 */
-        if (read_result != 0)
-        {
-            /* 无新帧/离线不能确认稳定，取消静止并重启稳定计时，后台回到200ms尽快重获新鲜加速度。 */
-            common_activity_stationary_cancel(&s_activity);
-        }
         if (read_result == 0 && s_accel_reference != 0)
         {
             /* 心率参考档有新帧: 把原始加速度与帧时刻交给心率运动判定。 */

@@ -43,6 +43,7 @@ void __set_PRIMASK(uint32_t mask)
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
     assert(port == GPIOB && primask == 1);
+    assert(config->Pull == GPIO_NOPULL);
     if (config->Mode == GPIO_MODE_ANALOG)
     {
         assert(config->Pull == GPIO_NOPULL);
@@ -186,6 +187,13 @@ static void read_pid(uint8_t pid, uint8_t ack)
 int main(int argc, char **argv)
 {
     my_i2c_init(MY_I2C_BUS_SENSOR);
+    nop_count = 0;
+    my_i2c_stop(MY_I2C_BUS_SENSOR);
+#if defined(F411_BOOTLOADER)
+    assert(nop_count == 3 * 160);
+#else
+    assert(nop_count == 3 * 134);
+#endif
     if (argc > 1 && strcmp(argv[1], "suspend") == 0)
     {
         my_i2c_suspend(MY_I2C_BUS_SENSOR);

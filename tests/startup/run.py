@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
     ], cwd=root, check=True)
     for mode in ["ok", "devices_failed", "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
                  "cal_success", "cal_failed", "save_error", "manual_cal", "watchdog_progress", "watchdog_wrap",
-                 "watchdog_startup", "watchdog_startup_wrap", "watchdog_stop", "watchdog_stop_wrap",
+                 "watchdog_startup", "watchdog_startup_wrap", "watchdog_sleep_stall", "watchdog_sleep_stall_wrap",
                  "first_frame_stall", "first_frame_slow",
                  "first_frame_deadline", "first_frame_sparse", "runtime_slow", "runtime_sparse",
                  "runtime_sensor_stalled", "runtime_deadline", "baro_cadence", "baro_calibration", "baro_calibration_boundary", "baro_calibration_boundary_wrap",
@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
                  "sleep_cycle", "sleep_wrap", "sleep_calibration", "sleep_heart_early", "sleep_heart_offset",
                  "sleep_stationary", "sleep_stationary_wrap", "sleep_stationary_recovery", "sleep_stationary_wake", "sleep_stationary_heart",
                  "sleep_recovery", "sleep_recovery_wrap",
-                 "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime", "sport_weather", "touch_sleep", "touch_sleep_early",
+                 "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime", "sport_weather", "sport_heart", "touch_sleep", "touch_sleep_early",
                  "background_cycle", "background_wrap", "background_calibration", "lvgl_wake",
                  "sensor_timing", "sensor_timing_overload", "sensor_timing_wrap", "sensor_timing_exact"]:
         subprocess.run([exe, mode], cwd=root, check=True)

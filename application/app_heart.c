@@ -4,6 +4,7 @@
  */
 #include "app_heart.h"
 #include "app_diag.h"
+#include "bl24c02.h"
 #include "em7028.h"
 #include "imu_types.h"
 #include "main.h"
@@ -98,11 +99,30 @@ static heart_detector_struct detector;
 static uint8_t requested; /* UI最近一次手动启动/停止请求，1为要求测量。 */
 static uint8_t running; /* 器件当前是否处于已启动测量状态。 */
 static volatile uint8_t s_stop_pending; /* 上一拍停测写失败，1表示下轮service需重试待机。 */
-#define APP_HEART_SLEEP_PERIOD_MS  600000
 #define APP_HEART_SLEEP_TIMEOUT_MS 10000
+#define APP_HEART_STORE_BASE       0xF0
+#define APP_HEART_STORE_BYTES      8
+#define APP_HEART_STORE_RETRY_MS   1000
+static const uint32_t heart_auto_periods_ms[2] = {600000, 60000};
 static uint8_t s_sleep_mode, s_sleep_active; /* 熄屏模式；后台自动测量窗口是否进行中。 */
 static uint8_t s_sport_mode, s_sport_failed; /* 运动模式；运动模式下启动失败锁存。 */
-static uint8_t s_auto_enabled = 1; /* 后台自动心率开关；开机默认开启每10分钟测量，不写EEPROM。 */
+static app_heart_auto_interval s_auto_interval = APP_HEART_AUTO_INTERVAL_10MIN;
+static uint8_t s_store_dirty; /* 与周期请求一起由heart_mutex保护。 */
+static struct
+{
+    bl24c02_transfer_struct io;
+    app_heart_auto_interval saved_interval, writing_interval;
+    uint32_t retry_ms;
+    uint8_t record[APP_HEART_STORE_BYTES], verify[2 * APP_HEART_STORE_BYTES];
+    uint8_t loaded, valid, sequence, target, retry_pending;
+    enum
+    {
+        HEART_STORE_IDLE,
+        HEART_STORE_LOAD,
+        HEART_STORE_WRITE,
+        HEART_STORE_VERIFY
+    } phase;
+} s_store; /* 仅sensor任务推进EEPROM事务；两个8字节槽共享末页。 */
 static uint32_t s_sleep_cycle_ms, s_sleep_started_ms; /* 后台周期起点与本轮窗口起点，单位ms。 */
 static uint32_t poll_tick; /* 上一次进入PPG读取的tick，用于30ms节流。 */
 static uint32_t good_tick; /* 最近一次成功读到原始值的tick。 */
@@ -676,12 +696,156 @@ static void heart_process(uint16_t raw, uint32_t now, uint32_t elapsed, app_hear
     }
 }
 
+/* HR、周期和8位序号共4字节，CRC32与现有校准记录使用同一反射多项式。 */
+static uint32_t heart_store_crc(const uint8_t *record)
+{
+    uint32_t crc = UINT32_MAX;
+    uint8_t i, bit;
+    for (i = 0; i < 4; ++i)
+    {
+        crc ^= record[i];
+        for (bit = 0; bit < 8; ++bit)
+        {
+            if ((crc & 1) != 0)
+            {
+                crc = (crc >> 1) ^ 0xEDB88320U;
+            }
+            else
+            {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc ^ UINT32_MAX;
+}
+
+/* 仅解析已完整读出的两槽；相同序号选槽0，8位序号回绕仍按半范围比较。 */
+static void heart_store_restore(const uint8_t *records)
+{
+    uint8_t valid[2], i, latest = 0, difference;
+    uint32_t crc;
+    const uint8_t *record;
+    for (i = 0; i < 2; ++i)
+    {
+        record = records + i * APP_HEART_STORE_BYTES;
+        crc = (uint32_t)record[4] | ((uint32_t)record[5] << 8) | ((uint32_t)record[6] << 16) | ((uint32_t)record[7] << 24);
+        valid[i] = record[0] == 'H' && record[1] == 'R' && record[2] <= APP_HEART_AUTO_INTERVAL_1MIN && crc == heart_store_crc(record);
+    }
+    difference = (uint8_t)(records[APP_HEART_STORE_BYTES + 3] - records[3]);
+    if (valid[1] != 0 && (valid[0] == 0 || (difference != 0 && difference < 128)))
+    {
+        latest = 1;
+    }
+    s_store.valid = valid[latest];
+    s_store.target = 0;
+    s_store.sequence = 0;
+    if (s_store.valid != 0)
+    {
+        record = records + latest * APP_HEART_STORE_BYTES;
+        s_store.saved_interval = (app_heart_auto_interval)record[2];
+        s_store.sequence = record[3];
+        s_store.target = latest ^ 1;
+    }
+}
+
+/* sensor独占总线，页写及读回均分拍进行；失败后重新读清两槽再判断是否需要写入。 */
+uint8_t app_heart_store_service(uint8_t allow_start)
+{
+    app_heart_auto_interval interval;
+    uint8_t dirty, result, i;
+    uint32_t crc;
+    if (heart_mutex == NULL)
+    {
+        return 0;
+    }
+    if (s_store.phase == HEART_STORE_IDLE)
+    {
+        if (allow_start == 0)
+        {
+            return 0;
+        }
+        xSemaphoreTake(heart_mutex, portMAX_DELAY);
+        dirty = s_store_dirty;
+        interval = s_auto_interval;
+        xSemaphoreGive(heart_mutex);
+        if (dirty == 0 || (s_store.retry_pending != 0 && (uint32_t)(HAL_GetTick() - s_store.retry_ms) < APP_HEART_STORE_RETRY_MS))
+        {
+            return 0;
+        }
+        s_store.retry_pending = 0;
+        if (s_store.loaded == 0)
+        {
+            bl24c02_transfer_begin(&s_store.io, APP_HEART_STORE_BASE, s_store.verify, sizeof(s_store.verify), 0);
+            s_store.phase = HEART_STORE_LOAD;
+            return 1;
+        }
+        if (s_store.valid != 0 && interval == s_store.saved_interval)
+        {
+            xSemaphoreTake(heart_mutex, portMAX_DELAY);
+            s_store_dirty = s_auto_interval != interval;
+            xSemaphoreGive(heart_mutex);
+            return 0;
+        }
+        s_store.writing_interval = interval;
+        s_store.record[0] = 'H';
+        s_store.record[1] = 'R';
+        s_store.record[2] = (uint8_t)interval;
+        s_store.record[3] = (uint8_t)(s_store.sequence + 1);
+        crc = heart_store_crc(s_store.record);
+        for (i = 0; i < 4; ++i)
+        {
+            s_store.record[4 + i] = (uint8_t)(crc >> (8 * i));
+        }
+        bl24c02_transfer_begin(&s_store.io, APP_HEART_STORE_BASE + s_store.target * APP_HEART_STORE_BYTES,
+                               s_store.record, APP_HEART_STORE_BYTES, 1);
+        s_store.phase = HEART_STORE_WRITE;
+        return 1;
+    }
+    result = bl24c02_transfer_step(&s_store.io);
+    if (result == 2)
+    {
+        return 1;
+    }
+    if (result != 0 || (s_store.phase == HEART_STORE_VERIFY && memcmp(s_store.record, s_store.verify, APP_HEART_STORE_BYTES) != 0))
+    {
+        /* 写完成但读回失败时，落盘值可能已改变；重新扫描后才能消除待存请求。 */
+        s_store.loaded = 0;
+        s_store.retry_pending = 1;
+        s_store.retry_ms = HAL_GetTick();
+        s_store.phase = HEART_STORE_IDLE;
+        return 0;
+    }
+    if (s_store.phase == HEART_STORE_LOAD)
+    {
+        heart_store_restore(s_store.verify);
+        s_store.loaded = 1;
+        s_store.phase = HEART_STORE_IDLE;
+        return 0;
+    }
+    if (s_store.phase == HEART_STORE_WRITE)
+    {
+        bl24c02_transfer_begin(&s_store.io, APP_HEART_STORE_BASE + s_store.target * APP_HEART_STORE_BYTES,
+                               s_store.verify, APP_HEART_STORE_BYTES, 0);
+        s_store.phase = HEART_STORE_VERIFY;
+        return 1;
+    }
+    s_store.saved_interval = s_store.writing_interval;
+    s_store.sequence = s_store.record[3];
+    s_store.valid = 1;
+    s_store.target ^= 1;
+    s_store.phase = HEART_STORE_IDLE;
+    xSemaphoreTake(heart_mutex, portMAX_DELAY);
+    s_store_dirty = s_auto_interval != s_store.writing_interval;
+    xSemaphoreGive(heart_mutex);
+    return 0;
+}
+
 void app_heart_init_hw(void)
 {
     app_diag_sensor_init(APP_DIAG_HEART, em7028_init());
 }
 
-/* 创建快照锁并保留启动时的器件故障；器件待机配置由sensor启动流程完成。 */
+/* 恢复周期、创建快照锁并保留启动故障；器件待机配置由sensor启动流程完成。 */
 void app_heart_init(void)
 {
     /* 发布快照锁前保存启动故障，UI此时仍按未初始化处理。 */
@@ -692,7 +856,19 @@ void app_heart_init(void)
         heart_data.state = APP_HEART_ERROR;
         app_diag_heart_fault((uint8_t)heart_data.fault.kind, heart_data.fault.reg, heart_data.fault.value);
     }
-    /* 创建快照互斥锁，供后续跨任务读写heart_data。 */
+    memset(&s_store, 0, sizeof(s_store));
+    s_store_dirty = 0;
+    s_auto_interval = APP_HEART_AUTO_INTERVAL_10MIN;
+    if (bl24c02_read(APP_HEART_STORE_BASE, s_store.verify, sizeof(s_store.verify)) == 0)
+    {
+        heart_store_restore(s_store.verify);
+        s_store.loaded = 1;
+        if (s_store.valid != 0)
+        {
+            s_auto_interval = s_store.saved_interval;
+        }
+    }
+    /* 恢复周期后再发布快照互斥锁，供后续跨任务读写heart_data。 */
     heart_mutex = xSemaphoreCreateMutex();
 }
 
@@ -710,71 +886,63 @@ void app_heart_set_sleep_mode(uint8_t sleeping)
     s_sleep_mode = sleeping;
     /* 任何亮熄屏切换都结束在途后台窗口。 */
     s_sleep_active = 0;
-    s_sleep_cycle_ms = HAL_GetTick(); /* 熄屏时把周期起点对齐到本次熄屏，配合启用起点满足“启用/熄屏起等10分钟”。 */
+    s_sleep_cycle_ms = HAL_GetTick(); /* 从本次亮熄屏切换起等待完整的所选周期。 */
     /* 丢弃旧样本，避免亮屏手动波形串到熄屏导出。 */
     sample_head = sample_count = 0;
     /* 释放快照锁。 */
     xSemaphoreGive(heart_mutex);
 }
 
-/* 后台自动心率开关；只提交请求，启用时把周期起点对齐到此刻，实际停测由sensor下一轮完成。 */
-void app_heart_set_auto_enabled(uint8_t enabled)
+/* 周期变化立即生效并重新计时；重复选择同一周期不写EEPROM，也不推迟截止时间。 */
+void app_heart_set_auto_interval(app_heart_auto_interval interval)
 {
-    if (heart_mutex == NULL)
+    if (heart_mutex == NULL || (interval != APP_HEART_AUTO_INTERVAL_10MIN && interval != APP_HEART_AUTO_INTERVAL_1MIN))
     {
-        /* 锁未创建时无法提交请求，直接返回。 */
         return;
     }
-    /* 取快照锁后更新自动开关。 */
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
-    /* 归一化为0/1保存。 */
-    s_auto_enabled = enabled != 0;
-    if (s_auto_enabled != 0)
+    if (s_auto_interval != interval)
     {
-        s_sleep_cycle_ms = HAL_GetTick(); /* 启用后从此刻起算10分钟，不在每轮service重置。 */
+        s_auto_interval = interval;
+        s_sleep_cycle_ms = HAL_GetTick();
+        s_store_dirty = 1;
     }
-    /* 释放快照锁。 */
     xSemaphoreGive(heart_mutex);
-    /* 只提交请求：关闭时在途后台测量由 sensor 任务在下一轮 service 停止并保留有效值。 */
 }
 
-/* 锁内读取后台自动心率开关；锁未建时按关闭处理。 */
-uint8_t app_heart_get_auto_enabled(void)
+app_heart_auto_interval app_heart_get_auto_interval(void)
 {
-    uint8_t enabled;
+    app_heart_auto_interval interval;
     if (heart_mutex == NULL)
     {
-        /* 锁未建时没有可读的共享开关，按关闭返回。 */
-        return 0;
+        return APP_HEART_AUTO_INTERVAL_10MIN;
     }
-    /* 取快照锁后读取开关副本。 */
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
-    enabled = s_auto_enabled;
-    /* 释放快照锁。 */
+    interval = s_auto_interval;
     xSemaphoreGive(heart_mutex);
-    return enabled;
+    return interval;
 }
 
 /* 供sensor判断本轮是否该提前收尾：在途测量/停测、后台窗口进行中或已到期都返回1；
- * 熄屏自动关闭或尚未到期返回0。锁内取模式与周期起点，避免读到半更新状态。 */
+ * 亮屏或尚未到期返回0。锁内取模式、周期与起点，避免读到半更新状态。 */
 uint8_t app_heart_sleep_pending(void)
 {
     uint8_t sleep_mode; /* 当前亮/熄屏模式副本。 */
     uint8_t sleep_active; /* 后台窗口是否进行中。 */
-    uint8_t auto_enabled; /* 后台自动开关副本。 */
     uint32_t cycle_ms; /* 后台周期起点副本，单位ms。 */
+    uint32_t period_ms;
 
-    /* 与UI写入AUTO及周期起点使用同一把锁；在途采样/关闭仍须由sensor完成。 */
+    /* 与UI更新周期起点使用同一把锁；在途采样/关闭仍须由sensor完成。 */
     if (heart_mutex == NULL)
     {
         /* 锁未建：只能看无锁的在途标志，有测量或待停就返回1。 */
         return running != 0 || s_stop_pending != 0;
     }
-    /* 锁内一次性取模式、窗口、自动开关和周期起点副本。 */
+    /* 锁内一次性取模式、窗口、周期和起点副本。 */
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
     sleep_mode = s_sleep_mode;
     sleep_active = s_sleep_active;
-    auto_enabled = s_auto_enabled;
+    period_ms = heart_auto_periods_ms[s_auto_interval];
     cycle_ms = s_sleep_cycle_ms;
     /* 释放快照锁，后续判断不再持锁。 */
     xSemaphoreGive(heart_mutex);
@@ -783,14 +951,14 @@ uint8_t app_heart_sleep_pending(void)
         /* 在途测量、待停或后台窗口进行中：sensor本轮需继续处理。 */
         return 1;
     }
-    if (auto_enabled == 0 || sleep_mode == 0)
+    if (sleep_mode == 0)
     {
-        /* 自动关闭或亮屏：没有待收尾的后台测量。 */
+        /* 亮屏：没有待收尾的后台测量。 */
         return 0;
     }
-    if ((uint32_t)(HAL_GetTick() - cycle_ms) >= APP_HEART_SLEEP_PERIOD_MS)
+    if ((uint32_t)(HAL_GetTick() - cycle_ms) >= period_ms)
     {
-        /* 距周期起点已满10分钟：后台窗口到期，需要开始测量。 */
+        /* 所选周期到期，需要开始后台测量窗口。 */
         return 1;
     }
     return 0;
@@ -868,7 +1036,7 @@ void app_heart_set_enabled(uint8_t enabled)
 }
 
 /* 展示口径在这里统一推导，UI不必自己组合这些标志：
- * enabled按运动/熄屏+自动开关覆盖；有请求但sensor尚未启动时先显示MEASURING；
+ * enabled按运动/熄屏窗口覆盖；有请求但sensor尚未启动时先显示MEASURING；
  * 亮屏且未在测量归OFF；VALID超过APP_HEART_STALE_MS未刷新结果降级为NO_SIGNAL。 */
 void app_heart_get_snapshot(app_heart_struct *heart)
 {
@@ -897,15 +1065,8 @@ void app_heart_get_snapshot(app_heart_struct *heart)
     }
     else if (s_sleep_mode != 0)
     {
-        if (s_auto_enabled != 0)
-        {
-            /* 熄屏且后台自动开启：只在窗口进行中显示启用。 */
-            heart->enabled = s_sleep_active;
-        }
-        else
-        {
-            heart->enabled = 0; /* 后台关闭时不显示继续采样，即便在途窗口尚未由 sensor 停止。 */
-        }
+        /* 熄屏时只在后台窗口进行中显示启用。 */
+        heart->enabled = s_sleep_active;
     }
     /* 只有熄屏且非运动模式才按“睡眠”口径处理显示。 */
     sleeping = s_sleep_mode != 0 && s_sport_mode == 0;
@@ -963,9 +1124,10 @@ uint8_t app_heart_service(void)
     app_heart_sample_struct sample;
     em7028_result result;
     uint16_t raw;
-    uint32_t now = HAL_GetTick(); /* 本轮统一使用的时间基准，单位ms。 */
+    uint32_t now; /* 取得快照锁后读取本轮时间基准，单位ms。 */
     uint32_t elapsed;
-    uint8_t enabled;
+    uint8_t enabled, sleep_active;
+    uint32_t sleep_started_ms;
     uint32_t read_started;
     if (heart_mutex == NULL)
     {
@@ -980,6 +1142,7 @@ uint8_t app_heart_service(void)
     }
     /* 锁内推导本轮是否应测量，并取一份共享快照副本。 */
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
+    now = HAL_GetTick(); /* 取得锁后再取时刻，避免UI刚更新的周期起点晚于now。 */
     enabled = requested;
     if (s_sport_mode != 0)
     {
@@ -988,27 +1151,22 @@ uint8_t app_heart_service(void)
     }
     else if (s_sleep_mode != 0)
     {
-        if (s_auto_enabled != 0)
+        if (s_sleep_active == 0 && (uint32_t)(now - s_sleep_cycle_ms) >= heart_auto_periods_ms[s_auto_interval])
         {
-            if (s_sleep_active == 0 && (uint32_t)(now - s_sleep_cycle_ms) >= APP_HEART_SLEEP_PERIOD_MS)
-            {
-                /* 熄屏且自动开启、距周期起点满10分钟：开启一轮后台窗口并记录起点。 */
-                s_sleep_cycle_ms = s_sleep_started_ms = now;
-                s_sleep_active = 1;
-            }
-        }
-        else
-        {
-            s_sleep_active = 0; /* 后台关闭：结束在途窗口，下面 enabled==0 流程负责停测关LED并保留 last_bpm。 */
+            /* 所选周期到期：开启一轮后台窗口并记录起点。 */
+            s_sleep_cycle_ms = s_sleep_started_ms = now;
+            s_sleep_active = 1;
         }
         /* 熄屏时启用状态只由后台窗口决定。 */
         enabled = s_sleep_active;
     }
     /* 拷贝共享快照作为本轮处理的基础。 */
     data = heart_data;
+    sleep_active = s_sleep_active != 0 && s_sleep_mode != 0 && s_sport_mode == 0;
+    sleep_started_ms = s_sleep_started_ms;
     /* 释放快照锁。 */
     xSemaphoreGive(heart_mutex);
-    if (s_sleep_active != 0 && (uint32_t)(now - s_sleep_started_ms) >= APP_HEART_SLEEP_TIMEOUT_MS)
+    if (sleep_active != 0 && (uint32_t)(now - sleep_started_ms) >= APP_HEART_SLEEP_TIMEOUT_MS)
     {
         /* 后台窗口已满10秒：无论是否得到有效值都在本拍收尾停测。 */
         heart_finish_sleep(&data);
@@ -1142,7 +1300,11 @@ uint8_t app_heart_service(void)
         }
         xSemaphoreGive(heart_mutex);
     }
-    if (s_sleep_active != 0 && data.state == APP_HEART_VALID)
+    /* 采样期间UI可能切入运动模式；按当前模式决定是否结束后台窗口。 */
+    xSemaphoreTake(heart_mutex, portMAX_DELAY);
+    sleep_active = s_sleep_active != 0 && s_sleep_mode != 0 && s_sport_mode == 0;
+    xSemaphoreGive(heart_mutex);
+    if (sleep_active != 0 && data.state == APP_HEART_VALID)
     {
         /* 后台窗口已得到有效结果：提前收尾停测。 */
         heart_finish_sleep(&data);

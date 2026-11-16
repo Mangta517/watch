@@ -8,21 +8,21 @@
  *   MY_I2C_BUS_TP     : SCL = PB6  (TP_SCL)      SDA = PB4  (TP_SDA)
  *   MY_I2C_BUS_EEPROM : SCL = PA12 (EEPROM_SCL) SDA = PA11 (EEPROM_SDA)，开漏+外部上拉
  *
- * SENSOR/EEPROM 使用开漏输出，必须有外部上拉到 3.3V；内部上拉不能替代外部上拉。
- * TP 保留原推挽发送实现；SDA 读 ACK/数据和发送 NACK 时切换为输入释放。
+ * 三条总线均使用开漏输出和外部上拉到3.3V；TP的4.7k上拉见Core原理图R4。
+ * SDA读ACK/数据和发送NACK时切换为输入释放。
  * SENSOR 总线将原位延时加倍，增加从机准备数据及线路稳定的余量；实际频率需实测。
  * TP/EEPROM 位延时保持原值；ACK拉低前预置输出，NACK以输入释放SDA。
  ******************************************************************************
  */
 #include "my_i2c.h"
 
-/* APP按64MHz缩放位延时，SENSOR仍加倍；Bootloader保留100MHz原值。 */
+/* APP按84MHz缩放位延时，SENSOR仍加倍；Bootloader保留100MHz原值。 */
 #if defined(F411_BOOTLOADER)
+#define MY_I2C_DELAY_LOOPS        80
+#define MY_I2C_SENSOR_DELAY_LOOPS 160
+#else
 #define MY_I2C_DELAY_LOOPS        67
 #define MY_I2C_SENSOR_DELAY_LOOPS 134
-#else
-#define MY_I2C_DELAY_LOOPS        51
-#define MY_I2C_SENSOR_DELAY_LOOPS 102
 #endif
 
 /* ================================================================ 总线表 */
@@ -108,7 +108,7 @@ static inline uint8_t sda_read(my_i2c_bus_t bus)
 }
 
 /**
- * @brief 切换SDA方向：0=输出(SENSOR/EEPROM开漏，TP推挽)，1=输入+上拉(读ACK/数据)
+ * @brief 切换SDA方向：0=开漏输出，1=输入+上拉(读ACK/数据)
  * @note  HAL_GPIO_Init 对 GPIOB 的 MODER/PUPDR 是非原子读-改-写; 本工程的
  *        touch.c 每个字节也会切 PB4 方向, sensor 任务会切 PB13 方向 ——
  *        两边互相可能把对方刚写入的位用旧快照覆盖。故整个切换用 PRIMASK
@@ -137,16 +137,11 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
     }
     else
     {
-        /* 先按推挽输出准备，TP 总线最终保持推挽发送 */
-        gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    }
-    /* SENSOR/EEPROM 发送时改用开漏输出，避免与从机拉低产生对顶电流 */
-    if (!as_input && bus != MY_I2C_BUS_TP)
-    {
+        /* 高电平释放总线，避免主机与从机拉低产生对顶电流。 */
         gpio.Mode = GPIO_MODE_OUTPUT_OD;
     }
-    /* 输入态靠上拉把空闲线保持为高；输出态该字段仍按上拉填写 */
-    gpio.Pull = GPIO_PULLUP;
+    /* 三条总线均有外部4.7k上拉，输入和开漏输出均关闭内部上拉。 */
+    gpio.Pull = GPIO_NOPULL;
     /* 高速档缩短引脚翻转时间，配合位延时满足时序 */
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
 
@@ -350,18 +345,12 @@ void my_i2c_init(my_i2c_bus_t bus)
         __HAL_RCC_GPIOB_CLK_ENABLE();
     }
 
-    /* SCL: SENSOR/EEPROM 开漏；SDA 方向随后由 sda_dir 逐相切换。 */
+    /* SCL开漏；SDA方向随后由sda_dir逐相切换。 */
     __disable_irq();
     gpio.Pin = my_i2c_pin[bus].scl_pin;
-    /* 默认先按推挽输出，TP 总线保持这种模式 */
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    /* SENSOR/EEPROM 的 SCL 改为开漏，高电平靠外部上拉 */
-    if (bus != MY_I2C_BUS_TP)
-    {
-        gpio.Mode = GPIO_MODE_OUTPUT_OD;
-    }
-    /* 使能内部上拉；开漏输出时仍需外部上拉才能得到可靠高电平 */
-    gpio.Pull = GPIO_PULLUP;
+    gpio.Mode = GPIO_MODE_OUTPUT_OD;
+    /* 空闲高电平由外部4.7k上拉提供。 */
+    gpio.Pull = GPIO_NOPULL;
     /* 高速档让边沿更快，实际速率仍由位延时决定 */
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
     /* 在临界区内写 SCL 引脚配置，避免与其它任务/ISR 的引脚操作交错 */

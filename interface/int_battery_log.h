@@ -12,7 +12,7 @@ void int_battery_log_set_rx_callbacks(uint8_t (*is_enabled)(void), void (*receiv
 void int_battery_log_read(uint32_t slot, uint8_t record[BATTERY_LOG_RECORD_BYTES]);
 /* 0=写入并读回校验成功，1=参数、Flash操作或读回校验失败。 */
 uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RECORD_BYTES]);
-/* 仅用于显式清空后重启的维护流程，调用方先屏蔽外部看门狗和中断。 */
-void int_battery_log_erase(void);
+/* 仅用于清空后重启；先启用外部看门狗、屏蔽中断，SRAM内限时等待并喂狗。0成功，1失败。 */
+uint8_t int_battery_log_erase(void);
 
 #endif

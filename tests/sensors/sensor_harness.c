@@ -825,7 +825,7 @@ static void fusion_startup_tests(void)
 
 static void fusion_tests(void)
 {
-    const float cases[][3] = {{0, 0, 90}, {35, 25, 90}, {-40, 30, -135}, {20, -55, 179}, {0, 0, -179}, {45, 45, 0}};
+    const float cases[][3] = {{0, 0, 90}, {35, 25, 90}, {-40, 30, -135}, {20, -55, 179}, {0, 0, -179}, {45, 45, 0}, {180, 0, 90}};
     Accel_Gyro_struct raw;
     Euler_struct euler = {0};
     float mag[3], gravity[3], without_mag, with_mag, before;
@@ -835,7 +835,11 @@ static void fusion_tests(void)
     {
         Common_IMU_Reset();
         truth(cases[c][0], cases[c][1], cases[c][2], &raw, mag, gravity);
-        for (n = 0; n < 12000; ++n)
+        assert(Common_IMU_GetEulerAngleWithMag(&raw, mag, &euler, .01f) == 1);
+        assert(angle_error(euler.roll, cases[c][0]) < .3f);
+        assert(angle_error(euler.pitch, cases[c][1]) < .3f);
+        assert(angle_error(euler.yaw, cases[c][2]) < .3f);
+        for (n = 1; n < 12000; ++n)
         {
             assert(Common_IMU_GetEulerAngleWithMag(&raw, mag, &euler, .01f) == 1);
         }
@@ -2271,6 +2275,7 @@ static void polling_tests(void)
     tick = 1000;
     memset(eeprom, 0xFF, sizeof(eeprom));
     assert(my_mpu6050_init() == 0);
+    assert(regs[MPU6050_ADDR][MPU6050_INT_PIN_CFG] == 0xC0); /* 低有效、开漏、脉冲，状态仅读0x3A清除。 */
     assert(regs[MPU6050_ADDR][MPU6050_INT_ENABLE] == 0x01); /* 保留器件DATA_RDY中断输出，主机侧靠PB12常驻屏蔽消除无用IRQ，sensor轮询INT_STATUS取帧。 */
     assert(regs[MPU6050_ADDR][MPU6050_FIFO_EN] == 0);
     assert(regs[MPU6050_ADDR][MPU6050_USER_CTRL] == 0);
@@ -2800,6 +2805,15 @@ static void activity_tests(void)
     assert(state.wrist_sequence == 2);
     common_activity_update(&state, 0.0f, 0.0f, -1.0f, now + 10000);
     assert(state.steps == before && state.wrist_sequence == 2 && state.wrist_armed == 0);
+    /* 600ms边界及跨tick回绕断采，累计计步和抬腕仍保留。 */
+    state.sample_ms = UINT32_MAX - 300;
+    state.peak_pending = 1;
+    state.peak_ms = state.sample_ms;
+    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 600);
+    assert(state.peak_pending == 1);
+    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 601);
+    assert(state.peak_pending == 0 && state.wrist_armed == 0);
+    assert(state.steps == before && state.wrist_sequence == 2);
     puts("PASS: stationary and isolated impacts do not count; 20 walking cycles count 20 across tick wrap; fresh down-to-view poses emit one raise and rearm.");
 
     memset(eeprom, 0xFF, sizeof(eeprom));
@@ -2848,9 +2862,11 @@ static void activity_tests(void)
     assert(app_imu_set_sample_period(20) == 20);
     assert(regs[MPU6050_ADDR][MPU6050_PWR_MGMT_1] == 1 && regs[MPU6050_ADDR][MPU6050_PWR_MGMT_2] == 0);
     assert(regs[MPU6050_ADDR][MPU6050_SMPLRT_DIV] == 19);
+    magnetic(-30.0f, 0.0f, 0.0f);
     tick += 100;
     App_IMU_Service(1);
     assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.steps == 20);
+    assert(snapshot.mag_fused != 0 && angle_error(snapshot.yaw_deg, 180.0f) < 0.5f);
     assert(heart_motion_frames == heart_before + 1);
     for (i = 0; i < 3; ++i)
     {
@@ -2862,259 +2878,6 @@ static void activity_tests(void)
         mpu_fail_write_at = -1;
     }
     puts("PASS: real 5Hz cycle registers, accelerometer-only burst, magnetic sleep, no fusion/heart reference in low power, full-mode restore, retained steps and partial-mode failures.");
-}
-
-/* 连续喂入frames帧稳定加速度(单轴ax叠加)，读节拍固定200ms即后台5Hz。 */
-static void activity_stationary_frames(common_activity_struct *state, uint32_t *now, unsigned frames, float ax)
-{
-    unsigned index;
-    for (index = 0; index < frames; ++index)
-    {
-        common_activity_update(state, ax, 0.0f, -1.0f, *now);
-        *now += 200;
-    }
-}
-
-/* 真实后台5Hz一拍：平放负1g，读时刻即HAL tick(总线事务不耗时)。 */
-static void stationary_service_frame(void)
-{
-    word(MPU6050_ADDR, MPU6050_ACCEL_XOUT_H, 0);
-    word(MPU6050_ADDR, MPU6050_ACCEL_YOUT_H, 0);
-    word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, -8192);
-    tick += 200;
-    App_IMU_Service(1);
-}
-
-/* 反复取帧直到静止标记变成expected，返回经历的帧数，用于确认必须重新累计约10秒。 */
-static unsigned stationary_service_wait(uint8_t expected, unsigned limit)
-{
-    unsigned frames = 0;
-    while (app_imu_is_stationary() != expected && frames < limit)
-    {
-        stationary_service_frame();
-        ++frames;
-    }
-    assert(app_imu_is_stationary() == expected);
-    return frames;
-}
-
-/* 静止标记判定：连续稳定约10秒才允许放宽读节拍，运动/无效帧/断采/失败取消后必须重新计时。 */
-static void stationary_flag_tests(void)
-{
-    common_activity_struct state = {0}, wrapped = {0};
-    uint32_t now = 0, wrap = UINT32_MAX - 2000, steps, wrist;
-    unsigned frames;
-
-    /* 1) 不足连续10秒稳定不报告静止：51帧(10.0s)仍为0，第52帧(10.2s)转1。 */
-    activity_stationary_frames(&state, &now, 51, 0.0f);
-    assert(state.stationary == 0 && state.have_sample == 1 && state.have_still_ref == 1);
-    activity_stationary_frames(&state, &now, 1, 0.0f);
-    assert(state.stationary == 1);
-    steps = state.steps;
-    wrist = state.wrist_sequence;
-
-    /* 2) 相邻帧单轴变化超过0.05g立即取消静止，并重新起算完整10秒。 */
-    activity_stationary_frames(&state, &now, 1, 0.1f);
-    assert(state.stationary == 0 && state.have_sample == 1);
-    activity_stationary_frames(&state, &now, 50, 0.0f);
-    assert(state.stationary == 0);
-    activity_stationary_frames(&state, &now, 1, 0.0f);
-    assert(state.stationary == 1);
-
-    /* 3) 合成幅值超出0.5~2.0g的无效帧取消静止并作废引用，其后一帧只重建参考。 */
-    activity_stationary_frames(&state, &now, 1, 2.5f);
-    assert(state.stationary == 0 && state.have_sample == 0 && state.have_still_ref == 0);
-    assert(state.steps == steps && state.wrist_sequence == wrist);
-    activity_stationary_frames(&state, &now, 1, 0.0f);
-    assert(state.stationary == 0 && state.have_sample == 1 && state.have_still_ref == 0);
-    activity_stationary_frames(&state, &now, 50, 0.0f);
-    assert(state.stationary == 0);
-    activity_stationary_frames(&state, &now, 1, 0.0f);
-    assert(state.stationary == 1);
-
-    /* 4) 静止慢待机每秒一帧不作废：已静止时最大间隔放宽到1200ms，恰好1200ms仍新鲜，
-     *    反复1秒新鲜帧维持静止；超过1200ms才整体作废引用，已累计步数与抬腕次数保留。 */
-    assert(state.stationary == 1);
-    for (frames = 0; frames < 10; ++frames)
-    {
-        common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 1000);
-        assert(state.stationary == 1 && state.have_sample == 1 && state.have_still_ref == 1);
-        assert(state.steps == steps && state.wrist_sequence == wrist);
-    }
-    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 1200);
-    assert(state.stationary == 1 && state.have_still_ref == 1);
-    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 1300);
-    assert(state.stationary == 0 && state.have_sample == 1 && state.have_still_ref == 0);
-    assert(state.steps == steps && state.wrist_sequence == wrist);
-    /* 作废后回到600ms窗口：静止结论已撤销，700ms间隔同样整体作废。 */
-    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 700);
-    assert(state.stationary == 0 && state.have_sample == 1 && state.have_still_ref == 0);
-    assert(state.steps == steps && state.wrist_sequence == wrist);
-    /* 重新对齐200ms读节拍；单个新鲜帧只重建差分参考，不得立即回到静止。 */
-    now = state.sample_ms + 200;
-    activity_stationary_frames(&state, &now, 1, 0.0f);
-    assert(state.stationary == 0 && state.have_sample == 1 && state.have_still_ref == 1);
-
-    /* 5) 模拟读失败/无新帧的取消：单帧新鲜稳定不得立即回到静止，须重新连续满10秒。 */
-    activity_stationary_frames(&state, &now, 51, 0.0f);
-    assert(state.stationary == 1);
-    common_activity_stationary_cancel(&state);
-    assert(state.stationary == 0 && state.have_still_ref == 0 && state.have_sample == 1);
-    assert(state.steps == steps && state.wrist_sequence == wrist);
-    activity_stationary_frames(&state, &now, 1, 0.0f);
-    assert(state.stationary == 0);
-    for (frames = 0; frames < 49; ++frames)
-    {
-        activity_stationary_frames(&state, &now, 1, 0.0f);
-        assert(state.stationary == 0);
-    }
-    activity_stationary_frames(&state, &now, 1, 0.0f);
-    assert(state.stationary == 1);
-
-    /* 6) 稳定计时起点跨tick回绕：仍按无符号差值判定，帧数与不回绕一致。 */
-    activity_stationary_frames(&wrapped, &wrap, 51, 0.0f);
-    assert(wrapped.stationary == 0);
-    activity_stationary_frames(&wrapped, &wrap, 1, 0.0f);
-    assert(wrapped.stationary == 1 && wrapped.steps == state.steps);
-    assert((int32_t)wrap > 0 && (int32_t)wrapped.still_since_ms < 0);
-    puts("PASS: stationary needs 10.2s of fresh stable frames; motion, invalid magnitude, 1200ms stationary dropout, 600ms non-stationary dropout and read-failure cancel restart the timer and keep steps/wrist.");
-
-    /* 7) 真实后台5Hz路径：只有新鲜有效帧才放宽节拍，过期样本即使标记仍为1也要拒绝。 */
-    memset(eeprom, 0xFF, sizeof(eeprom));
-    transfer_ms = 0;
-    mpu_auto_ready = 1;
-    mpu_fail_read_at = mpu_fail_write_at = -1;
-    fail_dev = -1;
-    fail_reg = -1;
-    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
-    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
-    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
-    assert(my_mpu6050_init() == 0 && lsm303dlhc_mag_init() == 0);
-    App_IMU_Init();
-    assert(app_imu_is_stationary() == 0);
-    assert(app_imu_set_sample_period(200) == 200);
-    for (frames = 0; frames < 51; ++frames)
-    {
-        stationary_service_frame();
-        assert(app_imu_is_stationary() == 0);
-    }
-    stationary_service_frame();
-    assert(app_imu_is_stationary() == 1);
-
-    /* 8) 器件无新帧(DATA_RDY=0)当拍取消静止，恢复后单帧不足以重新放宽。 */
-    mpu_auto_ready = 0;
-    tick += 200;
-    App_IMU_Service(1);
-    mpu_auto_ready = 1;
-    assert(app_imu_is_stationary() == 0);
-    stationary_service_frame();
-    assert(app_imu_is_stationary() == 0);
-    frames = stationary_service_wait(1, 60);
-    assert(frames >= 45 && frames <= 52);
-
-    /* 9) 读失败(NACK)同样取消静止并重启计时引用，单帧恢复不得放宽节拍。 */
-    mpu_fail_read_at = (int)mpu_reads;
-    tick += 200;
-    App_IMU_Service(1);
-    mpu_fail_read_at = -1;
-    assert(app_imu_is_stationary() == 0);
-    stationary_service_frame();
-    assert(app_imu_is_stationary() == 0);
-    frames = stationary_service_wait(1, 90);
-    assert(frames >= 45 && frames <= 56);
-
-    /* 10) 真实service路径的1秒新鲜度：静止后CPU每秒取一帧仍允许放宽节拍，恰好1200ms仍算新鲜，
-     *     超过1200ms才拒绝；过期后一拍取帧只重建参考，仍须重新连续稳定约10秒。 */
-    assert(app_imu_is_stationary() == 1);
-    for (frames = 0; frames < 3; ++frames)
-    {
-        tick += 1000;
-        App_IMU_Service(1);
-        assert(app_imu_is_stationary() == 1);
-    }
-    tick += 1200;
-    assert(app_imu_is_stationary() == 1);
-    ++tick;
-    assert(app_imu_is_stationary() == 0);
-    tick += 199;
-    App_IMU_Service(1);
-    assert(app_imu_is_stationary() == 0);
-    frames = stationary_service_wait(1, 90);
-    assert(frames >= 45 && frames <= 56);
-    puts("PASS: real 5Hz background keeps 1s idle reads fresh up to 1200ms and refuses stale, not-ready and NACKed frames; stationary only re-arms after another ~10s of fresh stability.");
-}
-
-/* 带非零计步/抬腕累计的静止放宽路径：1秒帧跨tick回绕仍维持静止，
- * 超过1200ms与作废后的600ms窗口只清连续性，步数与抬腕累计保留。 */
-static void stationary_idle_gap_tests(void)
-{
-    common_activity_struct idle = {0};
-    static const float walking[] = {1.25f, 1.0f, 0.75f, 1.0f};
-    uint32_t idle_now = UINT32_MAX - 19500, steps, wrist;
-    unsigned cycle, sample, frames;
-
-    /* 起点刻意放在UINT32_MAX-19500：下面95帧200ms恰好走到回绕前沿，随后的1秒帧必跨0xFFFFFFFF。 */
-    activity_sample(&idle, 0.0f, 0.0f, -1.0f, &idle_now);
-    for (cycle = 0; cycle < 5; ++cycle)
-    {
-        for (sample = 0; sample < 4; ++sample)
-        {
-            activity_sample(&idle, 0.0f, -walking[sample], 0.0f, &idle_now);
-        }
-    }
-    steps = idle.steps;
-    assert(steps == 5 && idle.wrist_sequence == 0);
-    for (cycle = 0; cycle < 3; ++cycle)
-    {
-        activity_sample(&idle, 0.0f, -1.0f, 0.0f, &idle_now);
-    }
-    for (cycle = 0; cycle < 12; ++cycle)
-    {
-        activity_sample(&idle, 0.0f, 0.0f, -1.0f, &idle_now);
-    }
-    assert(idle.wrist_sequence == 1 && idle.steps == steps);
-    for (cycle = 0; cycle < 4; ++cycle)
-    {
-        activity_sample(&idle, 0.0f, 0.0f, 1.0f, &idle_now);
-    }
-    for (cycle = 0; cycle < 3; ++cycle)
-    {
-        activity_sample(&idle, 0.0f, 0.0f, -1.0f, &idle_now);
-    }
-    wrist = idle.wrist_sequence;
-    assert(wrist == 2 && idle.stationary == 0 && idle.steps == steps);
-    for (cycle = 0; cycle < 52; ++cycle)
-    {
-        activity_stationary_frames(&idle, &idle_now, 1, 0.0f);
-    }
-    assert(idle.stationary == 1 && (int32_t)idle.still_since_ms < 0);
-    /* 反复1秒新鲜帧：无符号间隔判定下跨越tick回绕也不取消静止，累计值不动。 */
-    for (frames = 0; frames < 10; ++frames)
-    {
-        common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 1000);
-        assert(idle.stationary == 1 && idle.have_sample == 1 && idle.have_still_ref == 1);
-        assert(idle.steps == steps && idle.wrist_sequence == wrist);
-    }
-    assert((int32_t)idle.still_since_ms < 0 && (int32_t)idle.sample_ms > 0);
-    /* 恰好1200ms仍新鲜，1300ms作废：清连续性与静止计时，步数和抬腕序号保留。 */
-    common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 1200);
-    assert(idle.stationary == 1 && idle.have_still_ref == 1);
-    common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 1300);
-    assert(idle.stationary == 0 && idle.have_sample == 1 && idle.have_still_ref == 0);
-    assert(idle.steps == steps && idle.wrist_sequence == wrist);
-    /* 已回到非静止的600ms窗口：700ms同样整体作废，600ms以内不作废但仍是0。 */
-    common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 700);
-    assert(idle.stationary == 0 && idle.have_sample == 1 && idle.have_still_ref == 0);
-    common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 600);
-    assert(idle.stationary == 0 && idle.have_sample == 1 && idle.have_still_ref == 1);
-    /* 重新连续稳定约10秒才再次放宽，全程不清零步数与抬腕。 */
-    for (frames = 0; frames < 55 && idle.stationary == 0; ++frames)
-    {
-        common_activity_update(&idle, 0.0f, 0.0f, -1.0f, idle.sample_ms + 200);
-        assert(idle.steps == steps && idle.wrist_sequence == wrist);
-    }
-    assert(idle.stationary == 1 && frames >= 49 && frames <= 52);
-    puts("PASS: stationary 1s idle reads survive repeated frames across tick wrap; 1300ms stationary and 700ms non-stationary dropouts clear only continuity, keeping steps and wrist raises.");
 }
 
 static void accel_reference_tests(void)
@@ -3289,8 +3052,191 @@ static void background_mag_sleep_retry_tests(void)
     puts("PASS: failed magnetic sleep retries in the same background mode, stops writing after success and follows a changed active target.");
 }
 
+static void fusion_service_pose(float roll, float pitch, float yaw, float gyro_z, uint8_t publish_mag)
+{
+    Accel_Gyro_struct raw;
+    float mag[3], gravity[3];
+    truth(roll, pitch, yaw, &raw, mag, gravity);
+    word(MPU6050_ADDR, MPU6050_ACCEL_XOUT_H, raw.Accel.Accel_x);
+    word(MPU6050_ADDR, MPU6050_ACCEL_YOUT_H, raw.Accel.Accel_y);
+    word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, raw.Accel.Accel_z);
+    word(MPU6050_ADDR, MPU6050_GYRO_XOUT_H, 0);
+    word(MPU6050_ADDR, MPU6050_GYRO_YOUT_H, 0);
+    word(MPU6050_ADDR, MPU6050_GYRO_ZOUT_H, (int16_t)lroundf(gyro_z * MPU6050_GYRO_LSB_PER_DPS));
+    if (publish_mag != 0)
+    {
+        magnetic(mag[0], mag[1], mag[2]);
+    }
+}
+
+static void fusion_service_setup(void)
+{
+    const mpu6050_offset_struct zero = {{0, 0, 0}, {0, 0, 0}};
+    memset(eeprom, 0xFF, sizeof(eeprom));
+    regs[MPU6050_ADDR][MPU6050_WHO_AM_I] = 0x68;
+    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
+    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
+    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
+    assert(my_mpu6050_init() == 0 && lsm303dlhc_mag_init() == 0);
+    App_IMU_Init();
+    my_mpu6050_restore_offset(&zero);
+    assert(app_imu_set_sample_period(20) == 20);
+}
+
+static void fusion_resume_tests(void)
+{
+    app_imu_struct snapshot;
+    uint32_t mode;
+    fusion_service_setup();
+    for (mode = 0; mode < 3; ++mode)
+    {
+        Common_IMU_Reset();
+        fusion_service_pose(0.0f, 0.0f, 30.0f, 0.0f, 1);
+        tick += 40;
+        App_IMU_Service(1);
+        assert(App_IMU_GetSnapshot(&snapshot) != 0 && angle_error(snapshot.yaw_deg, 30.0f) < 0.3f);
+        if (mode == 0)
+        {
+            assert(app_imu_set_sample_period(200) == 200);
+        }
+        else if (mode == 1)
+        {
+            app_imu_set_accel_reference(1);
+            assert(app_imu_set_sample_period(10) == 10);
+        }
+        else
+        {
+            app_imu_set_sleep(1);
+        }
+        /* 断采期间改变横滚和航向，不能继续用休眠前的水平面投影磁场。 */
+        fusion_service_pose(60.0f, 0.0f, 90.0f, 0.0f, 0);
+        tick += 200;
+        if (mode < 2)
+        {
+            App_IMU_Service(1);
+            app_imu_set_accel_reference(0);
+            assert(app_imu_set_sample_period(20) == 20);
+        }
+        else
+        {
+            app_imu_set_sleep(0);
+        }
+        tick += 100;
+        App_IMU_Service(1);
+        assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_fused == 0);
+        assert(angle_error(snapshot.roll_deg, 60.0f) < 0.3f && fabsf(snapshot.pitch_deg) < 0.3f);
+        assert(angle_error(snapshot.yaw_deg, 30.0f) < 0.3f); /* 无新磁帧时保留原航向。 */
+        fusion_service_pose(60.0f, 0.0f, 90.0f, 0.0f, 1);
+        tick += 40;
+        App_IMU_Service(1);
+        assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_fused != 0);
+        assert(angle_error(snapshot.roll_deg, 60.0f) < 0.3f && angle_error(snapshot.yaw_deg, 90.0f) < 0.3f);
+        printf("PASS: resume mode %lu rebuilds roll=%.3f, preserves yaw without MAG and aligns fresh yaw=%.3f.\n",
+               (unsigned long)mode, snapshot.roll_deg, snapshot.yaw_deg);
+    }
+    app_imu_set_sleep(1);
+    tick += 200;
+    app_imu_set_sleep(0);
+    fusion_service_pose(180.0f, 0.0f, -45.0f, 0.0f, 1);
+    word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, -24576); /* 首帧3g不能作为恢复重力基准。 */
+    tick += 100;
+    App_IMU_Service(1);
+    assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_online != 0 && snapshot.mag_fused == 0);
+    assert(angle_error(snapshot.yaw_deg, 90.0f) < 0.3f);
+    fusion_service_pose(180.0f, 0.0f, -45.0f, 0.0f, 1);
+    tick += 40;
+    App_IMU_Service(1);
+    assert(App_IMU_GetSnapshot(&snapshot) != 0 && snapshot.mag_fused != 0);
+    assert(angle_error(snapshot.roll_deg, 180.0f) < 0.3f && angle_error(snapshot.yaw_deg, -45.0f) < 0.3f);
+    puts("PASS: resume defers magnetic alignment during 3g and seeds the next valid inverted pose.");
+}
+
+static void mag_reseed_tests(uint8_t successful_calibration)
+{
+    app_imu_struct snapshot;
+    uint32_t frame;
+    unsigned previous_mag_frames;
+    float sign;
+    fusion_service_setup();
+    fusion_service_pose(0.0f, 0.0f, 0.0f, 0.0f, 1);
+    tick += 40;
+    App_IMU_Service(1);
+    App_IMU_MagCalibrate(1);
+    if (successful_calibration != 0)
+    {
+        /* 覆盖各轴正负50uT，得到零偏0、比例1的有效校准系数。 */
+        for (frame = 0; frame < 120; ++frame)
+        {
+            sign = -50.0f;
+            if ((frame & 1) != 0)
+            {
+                sign = 50.0f;
+            }
+            if (frame % 6 < 2)
+            {
+                magnetic(sign, 0.0f, 0.0f);
+            }
+            else if (frame % 6 < 4)
+            {
+                magnetic(0.0f, sign, 0.0f);
+            }
+            else
+            {
+                magnetic(0.0f, 0.0f, sign);
+            }
+            tick += 40;
+            App_IMU_Service(1);
+        }
+    }
+    fusion_service_pose(0.0f, 0.0f, 0.0f, 0.0f, 1);
+    tick += 40;
+    App_IMU_Service(1);
+    for (frame = 1; frame <= 3; ++frame)
+    {
+        tick += 20;
+        fusion_service_pose(0.0f, 0.0f, (float)frame * 18.0f, 900.0f, 0);
+        App_IMU_Service(0);
+    }
+    App_IMU_GetSnapshot(&snapshot);
+    assert(angle_error(snapshot.yaw_deg, 54.0f) < 0.5f);
+    previous_mag_frames = mag_frames;
+    App_IMU_MagCalibrate(0);
+    tick += 20;
+    fusion_service_pose(0.0f, 0.0f, 54.0f, 0.0f, 0);
+    App_IMU_Service(0); /* 校准结束但磁事务延后，缓存仍在120ms新鲜度窗口内。 */
+    App_IMU_GetSnapshot(&snapshot);
+    assert(mag_frames == previous_mag_frames && snapshot.mag_online == 0 && snapshot.mag_fused == 0);
+    assert(angle_error(snapshot.yaw_deg, 54.0f) < 0.5f);
+    if (successful_calibration != 0)
+    {
+        assert(snapshot.mag_cal_state == APP_MAG_CAL_DONE && snapshot.mag_calibrated != 0);
+    }
+    else
+    {
+        assert(snapshot.mag_cal_state == APP_MAG_CAL_FAILED);
+    }
+    tick += 20;
+    fusion_service_pose(0.0f, 0.0f, 54.0f, 0.0f, 1);
+    App_IMU_Service(1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(mag_frames == previous_mag_frames + 1 && snapshot.mag_fused != 0);
+    assert(angle_error(snapshot.yaw_deg, 54.0f) < 0.3f);
+    printf("PASS: calibration success=%u rejects cached MAG and keeps reseed for fresh yaw=%.3f.\n",
+           successful_calibration, snapshot.yaw_deg);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "fusion_resume") == 0)
+    {
+        fusion_resume_tests();
+        return 0;
+    }
+    if (argc > 1 && strncmp(argv[1], "mag_reseed", 10) == 0)
+    {
+        mag_reseed_tests(strcmp(argv[1], "mag_reseed_failed") != 0);
+        return 0;
+    }
     if (argc > 1 && strncmp(argv[1], "mag_schedule", 12) == 0)
     {
         mag_schedule_tests(strcmp(argv[1], "mag_schedule") != 0, strcmp(argv[1], "mag_schedule_wrap") == 0);
@@ -3305,12 +3251,6 @@ int main(int argc, char **argv)
     {
         activity_tests();
         accel_reference_tests();
-        return 0;
-    }
-    if (argc > 1 && strcmp(argv[1], "stationary") == 0)
-    {
-        stationary_flag_tests();
-        stationary_idle_gap_tests();
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "mag_sleep_recovery") == 0)

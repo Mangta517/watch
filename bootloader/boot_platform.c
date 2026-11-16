@@ -64,7 +64,7 @@ void boot_platform_gpio_init(void)
 
 /* 引导阶段用内部 HSI 作 PLL 源（不依赖外部 HSE）：
  * 16MHz/8×100/2 = 100MHz 系统时钟，APB1 二分频，Flash 3 等待周期。
- * APP 运行时会自行重配为 64MHz，这里只为引导/保底提供一个确定时钟。 */
+ * APP 运行时会自行重配为 84MHz，这里只为引导/保底提供一个确定时钟。 */
 void boot_platform_clock_init(void)
 {
     /* 振荡器配置模板，先清零再逐项填写 HSI 与 PLL 参数。 */

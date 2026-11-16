@@ -30,6 +30,23 @@ static uint8_t track_checksum;
 static uint32_t checksum_bits;
 static uint32_t inject_at_bit;
 static uint32_t inject_kind;
+static uint8_t reset_expected;
+static uint32_t software_resets;
+
+void NVIC_SystemReset(void)
+{
+    assert(reset_expected != 0 && host_primask == 1);
+    assert(host_rtc.backup[1] == 0x52535431);
+    ++software_resets;
+    longjmp(assert_halt, 1);
+}
+
+typedef void *TaskHandle_t;
+void vTaskStartScheduler(void)
+{
+}
+
+#include "fatal_entries.inc"
 
 void host_reset_checksum_bit(void)
 {
@@ -383,15 +400,66 @@ static void test_lvgl_assert(void)
     host_tick = 375;
     if (setjmp(assert_halt) == 0)
     {
-        stop_at_commit = 1;
+        reset_expected = 1;
         LV_ASSERT(0);
         assert(0);
     }
     assert(host_primask == 1);
+    reset_expected = 0;
+    assert(software_resets == 1);
     info = reboot(1U << 26);
     assert(info.valid == 1 && info.kind == APP_RESET_LVGL_ASSERT);
     assert(info.pc != 0 && info.lr == 0 && info.xpsr == 0 && info.task_tag == 0);
     assert(info.uptime_ms == 375 && info.last_feed_ms == 100 && info.max_feed_gap_ms == 0);
+}
+
+static void test_fatal_entries(void)
+{
+    app_reset_info_struct info;
+    volatile uint32_t entry;
+    for (entry = 0; entry < 5; ++entry)
+    {
+        cold_boot();
+        reset_expected = 1;
+        if (setjmp(assert_halt) == 0)
+        {
+            switch (entry)
+            {
+            case 0:
+                Error_Handler();
+                break;
+            case 1:
+                app_fault_stop(NULL, 0xFFFFFFFD, APP_RESET_HARDFAULT);
+                break;
+            case 2:
+                NMI_Handler();
+                break;
+            case 3:
+                vApplicationStackOverflowHook(NULL, NULL);
+                break;
+            default:
+                App_Task_Start();
+                break;
+            }
+            assert(0 && "fatal entry must reach software reset");
+        }
+        reset_expected = 0;
+        info = reboot(1U << 28);
+        assert(info.valid == 1);
+        if (entry == 1)
+        {
+            assert(info.kind == APP_RESET_HARDFAULT);
+        }
+        else if (entry == 3)
+        {
+            assert(info.kind == APP_RESET_STACK_OVERFLOW);
+        }
+        else
+        {
+            assert(info.kind == APP_RESET_ERROR_HANDLER);
+        }
+    }
+    assert(software_resets == 6);
 }
 
 int main(void)
@@ -411,6 +479,7 @@ int main(void)
     test_bad_stack(sram);
     test_stops();
     test_lvgl_assert();
+    test_fatal_entries();
     assert(commit_count != 0);
 #ifdef _WIN32
     assert(VirtualFree(sram, 0, MEM_RELEASE) != 0);

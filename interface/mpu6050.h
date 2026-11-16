@@ -6,9 +6,9 @@
  *          沿用旧函数名；量程、采样与校准行为以本工程当前实现为准，便于旧上层代码直接复用。
  *
  * 中断说明：器件数据就绪中断输出仍使能 —— INT_ENABLE(0x38)=0x01；
- *          器件 INT_PIN_CFG(0x37) 仍为 0x20 (高有效/推挽/锁存, 读 0x3A 清除)；
+ *          INT_PIN_CFG(0x37)=0xC0，低有效/开漏/50µs脉冲，空闲由外部4.7k上拉；
  *          main 启动即持续屏蔽 PB12 EXTI（早于稍后的 sensor 初始化，避免倒置时序），
- *          sensor 任务按周期轮询 INT_STATUS 的 DATA_RDY，读 0x3A 同时释放器件锁存。
+ *          INT_RD_CLEAR=0，sensor按周期轮询INT_STATUS的DATA_RDY，仅读0x3A清状态。
  *          ISR 边沿计数/标志 API 仅为兼容旧调用方保留。
  ******************************************************************************
  */
@@ -171,14 +171,14 @@ extern "C"
     uint8_t my_mpu6050_get_temp(int16_t *temp_01c);
 
     /* ---------------------------------------- 数据就绪中断 (PB12 EXTI 上升沿) */
-    /* 器件 DATA_RDY 输出仍使能 (INT_ENABLE=0x01, INT_PIN_CFG=0x20)；main 启动即持续屏蔽 PB12，
+    /* 器件 DATA_RDY 输出使能 (INT_ENABLE=0x01, INT_PIN_CFG=0xC0)；main 启动即持续屏蔽 PB12，
      * 以下 ISR/计数 API 仅为兼容旧调用方保留，正常运行不再进入本驱动的中断回调；
-     * 器件锁存仍在 get_data 的任务事务中读取 INT_STATUS 释放。 */
+     * 脉冲结束后DATA_RDY状态保留，在get_data的任务事务中读取INT_STATUS清除。 */
 
     /* 任务上下文查询并清除"数据就绪"标志: 1=发生过(已清), 0=无。
  * 注意: 标志只有 1 位, 同一时刻窗口内多个中断会合并成一个, 不能用来计频! */
     uint8_t my_mpu6050_int_check_clear(void);
-    /* ISR 边沿计数快照；INT 锁存期间 DATA_RDY 合并，不能代表器件采样率 */
+    /* ISR边沿计数快照；PB12常驻屏蔽期间计数不推进，不能代表器件采样率。 */
     uint16_t my_mpu6050_int_count(void);
     /* 取 sensor 任务读回的 INT_STATUS 快照 (bit0=DATA_RDY) */
     uint8_t my_mpu6050_get_int_status(void);

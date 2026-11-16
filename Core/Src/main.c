@@ -70,7 +70,7 @@ static void watch_system_clock_config(void)
     /** Configure the main internal regulator output voltage
     */
     __HAL_RCC_PWR_CLK_ENABLE();                                        /* 打开 PWR 时钟，才能写电压调节相关寄存器。 */
-    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);     /* 选 Scale3 调压档。 */
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);     /* 选 Scale2 调压档。 */
 
     /** Initializes the RCC Oscillators according to the specified parameters
     * in the RCC_OscInitTypeDef structure.
@@ -81,9 +81,9 @@ static void watch_system_clock_config(void)
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;                       /* 打开主 PLL。 */
     RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;               /* PLL 输入选 HSI。 */
     RCC_OscInitStruct.PLL.PLLM = 8;                                    /* 输入分频 M=8，得到 2MHz 比较频率。 */
-    RCC_OscInitStruct.PLL.PLLN = 128;                                  /* 倍频 N=128，VCO 为 256MHz。 */
-    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;                        /* P 分频 4，系统时钟 64MHz。 */
-    RCC_OscInitStruct.PLL.PLLQ = 8;                                    /* Q 分频 8，PLLQ 输出 256/8=32MHz。 */
+    RCC_OscInitStruct.PLL.PLLN = 168;                                  /* 倍频 N=168，VCO 为 336MHz。 */
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;                        /* P 分频 4，系统时钟 84MHz。 */
+    RCC_OscInitStruct.PLL.PLLQ = 7;                                    /* Q 分频 7，PLLQ 输出 336/7=48MHz。 */
     /* 按上述参数启动 HSI 和 PLL；失败时不再继续切换时钟。 */
     if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
     {
@@ -95,9 +95,9 @@ static void watch_system_clock_config(void)
     /* 一次性声明要改的四类时钟：HCLK、SYSCLK、PCLK1、PCLK2。 */
     RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;          /* 系统时钟切到 PLL 输出。 */
-    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;                 /* AHB 不分频，HCLK=64MHz。 */
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;                  /* APB1 二分频，PCLK1=32MHz。 */
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;                  /* APB2 不分频，PCLK2=64MHz。 */
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;                 /* AHB 不分频，HCLK=84MHz。 */
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;                  /* APB1 二分频，PCLK1=42MHz。 */
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;                  /* APB2 不分频，PCLK2=84MHz。 */
 
     /* 应用分频并设置 2 个 Flash 等待周期；失败说明时钟切换未完成。 */
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
@@ -143,7 +143,7 @@ int main(void)
   /* USER CODE END Init */
 
   /* USER CODE BEGIN SysInit */
-    watch_system_clock_config();   /* 把系统时钟从复位默认值切到 HSI+PLL 的 64MHz。 */
+    watch_system_clock_config();   /* 把系统时钟从复位默认值切到 HSI+PLL 的 84MHz。 */
 
   /* USER CODE END SysInit */
 
@@ -175,8 +175,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-        /* 调度器启动成功后不会回到这里；若意外返回，本循环原地空转，
-         * 本路径没有喂狗或主动复位动作；若外部看门狗已启用，则由它超时复位。 */
+        /* App_Task_Start在调度器意外返回时调用Error_Handler记录并复位，正常不会到达此处。 */
     }
   /* USER CODE END 3 */
 }
@@ -193,7 +192,7 @@ void SystemClock_Config(void)
   /** Configure the main internal regulator output voltage
   */
   __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -205,9 +204,9 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 128;
+  RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
-  RCC_OscInitStruct.PLL.PLLQ = 8;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -230,7 +229,7 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 /* SystemClock_Config 是 CubeMX 生成区里的时钟配置函数：同时打开 HSI 与 LSE，
- * PLL 参数与 watch_system_clock_config 相同(M=8/N=128/P=4/Q=8)，
+ * PLL 参数与 watch_system_clock_config 相同(M=8/N=168/P=4/Q=7)，
  * 但本工程当前没有调用点，启动实际走 watch_system_clock_config。 */
 /* 本文件用户启动函数集中在原有 USER 区域，包含 watch_system_clock_config 等启动辅助函数。 */
 
@@ -244,8 +243,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  /* 入参: 无；返回: 不返回。关可屏蔽中断后把停机类型和返回地址写入备份域，再原地空转；
-   * 本路径没有喂狗或主动复位动作，若外部看门狗已启用，则由它超时复位。 */
+  /* 入参: 无；返回: 不返回。关可屏蔽中断后把停机类型和返回地址写入备份域，再主动复位。 */
     __disable_irq();   /* 仅屏蔽可屏蔽中断，保证下面的记录过程不被中断打断；NMI 和硬故障仍可进入。 */
 #if defined(__CC_ARM)
     /* ARMCC：取当前函数的返回地址作为停机现场 PC。 */
@@ -254,8 +252,8 @@ void Error_Handler(void)
     /* GCC/其他编译器：用内建函数取返回地址并转为 32 位值。 */
     app_reset_capture_stop(APP_RESET_ERROR_HANDLER, (uint32_t)(uintptr_t)__builtin_return_address(0), 0);
 #endif
-    /* 记录已提交；此处原地空转，没有喂狗或主动复位动作；
-     * 若外部看门狗已启用，则由它超时复位。 */
+    /* 初始化失败时外部看门狗可能尚未启用，记录后主动复位。 */
+    NVIC_SystemReset();
     while (1)
     {
     }

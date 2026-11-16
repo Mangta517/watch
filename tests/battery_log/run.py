@@ -21,6 +21,6 @@ with tempfile.TemporaryDirectory(prefix="watch-battery-log-") as output:
                     "tests/battery_log/battery_log_harness.c", "application/app_battery_log.c",
                     "application/app_battery_log_ble.c", "application/app_reset_ble.c",
                     "interface/int_battery_log.c", "-o", exe], cwd=root, check=True)
-    for mode in ["record", "uart_off", "unbound", "full", "faults", "unknown", "allocation", "ble", "clear", "erase_error",
+    for mode in ["low_voltage", "record", "uart_off", "unbound", "full", "faults", "unknown", "allocation", "ble", "clear", "erase_error", "erase_stuck", "erase_dwt_stuck",
                  "reset", "reset_torn", "reset_full", "reset_history"]:
         subprocess.run([exe, mode], cwd=root, check=True)

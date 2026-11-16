@@ -117,7 +117,7 @@ uint8_t int_bootloader_erase(uint32_t length)
     HAL_StatusTypeDef status;
 
     /* 长度不足以容纳向量表或超过APP区上限，直接判为参数错误。 */
-    if (length < sizeof(app_vectors) || length > APP_MAX_SIZE)
+    if (length < sizeof(app_vectors) || length > APP_MAX_SIZE || (PWR->CSR & PWR_CSR_PVDO) != 0)
     {
         return 1;
     }
@@ -148,7 +148,14 @@ uint8_t int_bootloader_erase(uint32_t length)
     __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
                            FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
     /* 执行扇区擦除。 */
-    status = HAL_FLASHEx_Erase(&erase, &sector_error);
+    if ((PWR->CSR & PWR_CSR_PVDO) != 0)
+    {
+        status = HAL_ERROR;
+    }
+    else
+    {
+        status = HAL_FLASHEx_Erase(&erase, &sector_error);
+    }
     /* 无论擦除结果如何都要加锁；加锁失败同样记为失败。 */
     if (HAL_FLASH_Lock() != HAL_OK)
     {
@@ -309,7 +316,7 @@ static uint8_t int_bootloader_program(uint32_t offset, uint16_t value)
     /* 把APP区偏移换算成实际Flash地址。 */
     uint32_t address = APP_START_ADDR + offset;
     /* 偏移超出APP区或剩余空间不足一个半字，拒绝编程。 */
-    if (offset >= APP_MAX_SIZE || APP_MAX_SIZE - offset < 2)
+    if (offset >= APP_MAX_SIZE || APP_MAX_SIZE - offset < 2 || (PWR->CSR & PWR_CSR_PVDO) != 0)
     {
         return 1;
     }

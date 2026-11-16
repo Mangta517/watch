@@ -3,5 +3,5 @@
 #include <stdint.h>
 typedef uint32_t TickType_t;
 #define configTICK_RATE_HZ 1000U
-#define configCPU_CLOCK_HZ 64000000U
+#define configCPU_CLOCK_HZ 84000000U
 #endif

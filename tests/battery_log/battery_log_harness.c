@@ -16,12 +16,16 @@
 #include <setjmp.h>
 #include <windows.h>
 
+Host_PVD_TypeDef host_pvd;
+
 FLASH_TypeDef host_flash;
+Host_Erase_Type host_erase_cycles, host_erase_gpio;
+uint32_t SystemCoreClock = 84000000;
 USART_TypeDef host_log_uart;
 static unsigned flash_poll_count, polled_bytes;
 static uint8_t receive_during_flash;
 static uint8_t mutex_locked, allocation_failed, flash_locked = 1, irq_mask;
-static uint8_t tps_disabled, erase_failed, unlock_failed, corrupt_write;
+static uint8_t tps_enabled, erase_failed, unlock_failed, corrupt_write;
 static int program_remaining = -1;
 static unsigned programs, erases, cache_resets;
 static app_battery_struct battery = {3900, 0, HAL_OK, 1, 70};
@@ -35,6 +39,13 @@ static char tx_copy[128], output[32768];
 static uint32_t tick;
 static unsigned tx_count;
 static app_reset_info_struct reset_info;
+static uint8_t erase_reported;
+
+void app_reset_capture_stop(uint32_t kind, uint32_t pc, uint32_t task_tag)
+{
+    assert(kind == APP_RESET_ERROR_HANDLER && pc == 0 && task_tag == 0x53415245);
+    erase_reported = 1;
+}
 
 void app_reset_get_info(app_reset_info_struct *info)
 {
@@ -107,13 +118,14 @@ void host_cache_reset(void)
     assert((FLASH->ACR & FLASH_ACR_DCEN) == 0);
     ++cache_resets;
 }
-void tps3823_disable(void)
+void tps3823_enable(void)
 {
-    tps_disabled = 1;
+    tps_enabled = 1;
 }
 void NVIC_SystemReset(void)
 {
-    assert(reset_expected && tps_disabled && irq_mask && flash_locked);
+    assert(reset_expected && tps_enabled && irq_mask);
+    assert(flash_locked || erase_failed >= 2);
     longjmp(reset_target, 1);
 }
 HAL_StatusTypeDef HAL_FLASH_Unlock(void)
@@ -176,6 +188,36 @@ void host_log_program(uint32_t address, uint16_t value)
 uint32_t host_log_poll(void)
 {
     assert(irq_mask != 0);
+    if (erases != 0)
+    {
+        ++flash_poll_count;
+        if (erase_failed != 3)
+        {
+            DWT->CYCCNT += SystemCoreClock / 10;
+        }
+        else if (flash_poll_count >= 10)
+        {
+            /* DWT故障时SRAM不再喂狗，模型模拟外部TPS3823到期。 */
+            NVIC_SystemReset();
+        }
+        if (flash_poll_count > 1 && erase_failed != 3)
+        {
+            assert(WDI_GPIO_Port->BSRR == (uint32_t)WDI_Pin << 16);
+        }
+        if (erase_failed < 2 && flash_poll_count >= 4)
+        {
+            FLASH->SR &= ~FLASH_SR_BSY;
+            if (erase_failed != 0)
+            {
+                FLASH->SR |= FLASH_FLAG_OPERR;
+            }
+            else
+            {
+                memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, BATTERY_LOG_END_ADDR - BATTERY_LOG_START_ADDR);
+            }
+        }
+        return FLASH->SR;
+    }
     host_log_uart.SR = 0;
     if (receive_during_flash != 0 && flash_poll_count < 3)
     {
@@ -189,18 +231,15 @@ uint32_t host_log_poll(void)
     return FLASH->SR;
 }
 
-HAL_StatusTypeDef HAL_FLASHEx_Erase(FLASH_EraseInitTypeDef *erase, uint32_t *error)
+void host_log_erase_begin(void)
 {
-    assert(tps_disabled && irq_mask && !flash_locked);
-    assert(erase->Sector == 7 && erase->NbSectors == 1 && erase->VoltageRange == 3);
+    assert(tps_enabled && irq_mask && !flash_locked);
+    assert((FLASH->CR & (FLASH_CR_SNB | FLASH_CR_PSIZE | FLASH_CR_SER | FLASH_CR_PG)) ==
+           ((7 << FLASH_CR_SNB_Pos) | FLASH_PSIZE_WORD | FLASH_CR_SER));
+    assert((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0);
     ++erases;
-    *error = UINT32_MAX;
-    if (erase_failed != 0)
-    {
-        return HAL_ERROR;
-    }
-    memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, BATTERY_LOG_END_ADDR - BATTERY_LOG_START_ADDR);
-    return HAL_OK;
+    flash_poll_count = 0;
+    FLASH->SR |= FLASH_SR_BSY;
 }
 uint8_t kt6368a_tx_is_busy(void)
 {
@@ -416,7 +455,7 @@ static void clear_tests(void)
     app_battery_log_service(60);
     command("BATLOG,CLEAR\n");
     pump(1);
-    assert(tx_active && erases == 0 && !tps_disabled);
+    assert(tx_active && erases == 0 && !tps_enabled);
     tx_done = 1;
     tick += 100;
     app_battery_log_ble_service(1, tick);
@@ -432,11 +471,14 @@ static void clear_tests(void)
         assert(0);
     }
     assert(erases == 1);
+    assert(erase_reported == (erase_failed == 1));
     for (uint32_t address = 0x08000000; address < BATTERY_LOG_START_ADDR; ++address)
     {
         assert(*(const uint8_t *)(uintptr_t)address == 0x5A);
     }
     mutex_locked = irq_mask = 0;
+    flash_locked = 1;
+    FLASH->SR &= ~FLASH_SR_BSY;
     app_battery_log_init();
     if (erase_failed != 0)
     {
@@ -446,7 +488,7 @@ static void clear_tests(void)
     {
         assert(status().samples == 0 && status().slots == 0);
     }
-    puts("PASS: clear waits for UART completion and mutex, masks TPS3823, erases only sector 7, resets even after erase failure.");
+    puts("PASS: clear preserves TPS3823, feeds from RAM with frozen HAL ticks, erases only sector 7 and resets on failure/permanent BSY.");
 }
 static void history_command(const char *text)
 {
@@ -703,7 +745,20 @@ int main(int argc, char **argv)
     memset(mapped, 0x5A, 0x60000);
     memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, 0x20000);
     FLASH->ACR = FLASH_ACR_DCEN;
-    if (strcmp(argv[1], "reset_history") == 0)
+    if (strcmp(argv[1], "low_voltage") == 0)
+    {
+        uint8_t record[BATTERY_LOG_RECORD_BYTES] = {0};
+        mutex_locked = 1;
+        host_pvd.CSR = PWR_CSR_PVDO;
+        assert(int_battery_log_write(0, record) == 1 && programs == 0 && flash_locked && irq_mask == 0);
+        assert(int_battery_log_erase() == 1 && erases == 0 && flash_locked);
+        assert(*(const uint8_t *)(uintptr_t)BATTERY_LOG_START_ADDR == 0xFF);
+        host_pvd.CSR = 0;
+        assert(int_battery_log_write(0, record) == 0 && programs == 4 && flash_locked);
+        mutex_locked = 0;
+        puts("PASS: PVD blocks log programming and erase without touching Flash; recovered supply permits the next write.");
+    }
+    else if (strcmp(argv[1], "reset_history") == 0)
     {
         reset_history_tests();
     }
@@ -788,6 +843,14 @@ int main(int argc, char **argv)
         if (strcmp(argv[1], "erase_error") == 0)
         {
             erase_failed = 1;
+        }
+        else if (strcmp(argv[1], "erase_stuck") == 0)
+        {
+            erase_failed = 2;
+        }
+        else if (strcmp(argv[1], "erase_dwt_stuck") == 0)
+        {
+            erase_failed = 3;
         }
         clear_tests();
     }

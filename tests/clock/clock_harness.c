@@ -8,7 +8,7 @@
 static uint32_t rtc_seconds;
 RTC_TypeDef host_rtc;
 Host_Cycle_Type host_cycles;
-uint32_t SystemCoreClock = 64000000;
+uint32_t SystemCoreClock = 84000000;
 #define backup host_rtc.BKP0R
 static uint32_t rtc_subsecond, prescaler_changes;
 static uint32_t tick, lse_ready, tick_reads;

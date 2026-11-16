@@ -14,7 +14,7 @@ public final class OtaUpgradeTest
     private static final String TIMEOUT = "!timeout";
     private static final String READY = "Flash erased, ready to receive data...";
     private static final int PINNED_TARGET = 7;
-    // 与固件application/app_ui.c的UI_BT_ECO_QUIET_MS一致：普通APP静默1秒即断电。
+    // 保留旧固件及未确认手机通信时的1秒ECO窗口，验证升级器仍兼容最短宽限。
     private static final int ECO_QUIET_MS = 1000;
 
     private static void check(boolean value, String message)

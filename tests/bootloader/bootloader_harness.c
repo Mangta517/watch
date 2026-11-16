@@ -12,6 +12,8 @@
 #include <setjmp.h>
 #include <windows.h>
 
+Host_PVD_TypeDef host_pvd;
+
 uint32_t test_dma_remaining;
 uint32_t test_dma_tc;
 static uint8_t *test_dma_data;
@@ -229,6 +231,12 @@ static void erase_tests(void)
     assert(int_bootloader_erase(7) == 1);
     assert(int_bootloader_erase(APP_MAX_SIZE + 1) == 1);
     assert(int_bootloader_erase(UINT32_MAX) == 1);
+    host_pvd.CSR = PWR_CSR_PVDO;
+    boundary = flash_erases;
+    length = eeprom_writes;
+    assert(int_bootloader_erase(100) == 1 && flash_erases == boundary && eeprom_writes == length);
+    assert(*(const uint8_t *)(uintptr_t)APP_START_ADDR == 0x5A && flash_locked);
+    host_pvd.CSR = 0;
     for (i = 5; i <= 7; ++i)
     {
         boundary = sector_addresses[i];
@@ -469,6 +477,19 @@ static void receive_error_tests(void)
     dma_feed(image, 100, 0);
     tick += 20;
     assert(int_bootloader_process() == 0);
+    before = program_count;
+    host_pvd.CSR = PWR_CSR_PVDO;
+    tick += 20;
+    assert(int_bootloader_process() == 1 && program_count == before && flash_locked);
+    assert(!int_bootloader_app_is_valid());
+    host_pvd.CSR = 0;
+    puts("PASS: PVD rejects APP erase before changing the boot flag and rejects programming without committing vectors.");
+
+    assert(int_bootloader_erase(100) == 0);
+    assert(bootloader_start_dma(100) == 0);
+    dma_feed(image, 100, 0);
+    tick += 20;
+    assert(int_bootloader_process() == 0);
     corrupt_write = 1;
     tick += 20;
     assert(int_bootloader_process() == 1 && flash_locked);
@@ -527,13 +548,16 @@ static void state_machine_tests(void)
     assert(boot_state == BOOTLOADER_STATE_INIT && rx_armed);
     command_feed("start:-1\n");
     assert(boot_state == BOOTLOADER_STATE_INIT);
+    command_feed("start:101\n");
+    assert(boot_state == BOOTLOADER_STATE_INIT && flash_erases == erase_before_info);
+    assert(strstr(last_uart_message, "Invalid") != NULL);
     command_feed("sta");
-    command_feed("rt:101");
+    command_feed("rt:101:98c60ddc");
     /* 分片间隔在命令静默阈值之内：半条命令不能被提前结算，更不能提前擦除。 */
     tick += BOOTLOADER_COMMAND_IDLE_MS - 1;
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_INIT && flash_erases == erase_before_info);
-    /* 满 BOOTLOADER_COMMAND_IDLE_MS 后按完整一行解析，保留旧主机不带换行的兼容路径。 */
+    /* 满 BOOTLOADER_COMMAND_IDLE_MS 后按完整一行解析，保留带CRC但不带换行的调试路径。 */
     ++tick;
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_RUN);
@@ -581,7 +605,7 @@ static void state_machine_tests(void)
     fixed_tick = 1;
     connected = 1;
     app_bootloader_init();
-    command_feed("start:101\n");
+    command_feed("start:101:98c60ddc\n");
     app_bootloader_work();
     dma_feed(image, 100, 0);
     app_bootloader_work();
@@ -600,7 +624,7 @@ static void state_machine_tests(void)
     }
     reset_expected = 0;
     assert(!int_bootloader_app_is_valid());
-    puts("PASS: legacy command, malformed length, erase-before-DMA, length completion, tick wrap, BLE reply window and partial transfer timeout");
+    puts("PASS: CRC-required command, malformed length, erase-before-DMA, length completion, tick wrap, BLE reply window and partial transfer timeout");
 }
 
 static void crc_error_tests(void)
@@ -742,7 +766,7 @@ static void timeout_and_pause_tests(void)
 {
     uint8_t image[101];
     make_image(image, sizeof(image));
-    start_command("start:101\n");
+    start_command("start:101:98c60ddc\n");
     /* 没有收到首字节时同样计时，且跨tick回绕仍能复位。 */
     tick = UINT32_MAX - 1000;
     assert(bootloader_start_dma(sizeof(image)) == 0);
@@ -759,7 +783,7 @@ static void timeout_and_pause_tests(void)
     reset_expected = 0;
     assert(!int_bootloader_app_is_valid());
 
-    start_command("start:101\n");
+    start_command("start:101:98c60ddc\n");
     dma_feed(image, 51, 0);
     app_bootloader_work();
     tick += 2500;
@@ -776,7 +800,7 @@ static void timeout_and_pause_tests(void)
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_JUMP_TO_APP && int_bootloader_app_is_valid());
 
-    start_command("start:101\n");
+    start_command("start:101:98c60ddc\n");
     dma_feed(image, sizeof(image), 0);
     drain();
     tick += BOOTLOADER_COMPLETE_IDLE_MS - 1;

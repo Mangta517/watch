@@ -11,7 +11,7 @@
 #include "lvgl.h"
 
 #define UI_BG                0x041426
-#define UI_CARD              0x0C2238
+#define UI_CARD_SOFT         0x0D2034
 #define UI_CARD_ALT          0x091A2C
 #define UI_BORDER            0x173B54
 #define UI_BORDER_STRONG     0x234E6E
@@ -47,6 +47,7 @@ lv_obj_t *ui_card(lv_obj_t *parent, int x, int y, int w, int h, uint32_t bg_colo
 lv_obj_t *ui_create_ring_gauge(lv_obj_t *parent, lv_coord_t size, uint32_t track_color, uint32_t arc_color, uint16_t arc_width);
 void ui_update_ring_gauge(lv_obj_t *ring, int32_t percent, uint8_t valid, uint32_t arc_color);
 lv_obj_t *ui_label(lv_obj_t *parent, const char *text, int x, int y, const lv_font_t *font, uint32_t color);
+lv_obj_t *ui_badge(lv_obj_t *parent, const char *text, int x, int y, uint32_t color);
 lv_obj_t *ui_note(lv_obj_t *parent, const char *text, int y);
 void ui_set_status(lv_obj_t *obj, uint8_t online);
 /* wrap非0时将角度折到(-180,180]；数值按原规则截断为一位小数。 */

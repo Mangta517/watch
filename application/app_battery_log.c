@@ -398,14 +398,17 @@ uint8_t app_battery_log_read_reset(uint32_t slot, uint32_t session, app_reset_in
 void app_battery_log_clear_and_reset(void)
 {
     /* 显式维护操作由LVGL发起：取得同一日志锁后擦除并立即重启，避免暂停造成HAL/RTOS时基失真。
-     * 擦除期间屏蔽外部看门狗；禁止升级程序擦除此扇区。 */
+     * 擦除期间保持外部看门狗和欠压复位接通；禁止升级程序擦除此扇区。 */
     /* 未建锁或锁忙时本轮不执行清空，直接返回。 */
     if (s_log_mutex == NULL || xSemaphoreTake(s_log_mutex, 0) == 0)
     {
         return;
     }
-    tps3823_disable(); /* 屏蔽外部看门狗复位输出，并把WDI置高阻，供擦除期间使用。 */
+    tps3823_enable(); /* 保持外部超时/欠压复位接通，SRAM擦除循环在有限期限内喂狗。 */
     __disable_irq(); /* 关闭中断，使擦除与重启之间不被其它任务打断。 */
-    int_battery_log_erase(); /* 擦除sector 7日志区。 */
+    if (int_battery_log_erase() != 0)
+    {
+        app_reset_capture_stop(APP_RESET_ERROR_HANDLER, 0, 0x53415245); /* task_tag小端字节为ERAS。 */
+    }
     NVIC_SystemReset(); /* 擦除后立即复位，由重启后的扫描重新建立日志状态。 */
 }

@@ -393,6 +393,68 @@ static void ownership_tests(void)
     puts("PASS: external TX ownership, debug/quiet gates and management cleanup after forced power-off.");
 }
 
+static void eco_phone_tests(uint8_t wrap)
+{
+    uint32_t ota_bytes;
+    if (wrap != 0)
+    {
+        host_tick = UINT32_MAX - 15000;
+    }
+    /* 模块响应或非法校时不能延长无人通信时的1秒断电策略。 */
+    host_feed("ER+7\r\n25:00\n");
+    host_service(1, 0);
+    app_ble_update_power(0, 0, 1);
+    host_tick += 999;
+    app_ble_update_power(0, 0, 0);
+    assert(host_snapshot().enabled != 0);
+    ++host_tick;
+    app_ble_update_power(0, 0, 0);
+    assert(host_snapshot().enabled == 0);
+
+    app_ble_update_power(1, 0, 1);
+    host_feed("12:34:56\n");
+    host_service(1, 0);
+    app_ble_update_power(0, 0, 1);
+    /* 模拟熄屏后花15秒选BIN，随后OTA请求仍应送到原接收者。 */
+    host_tick += 15000;
+    app_ble_update_power(0, 0, 0);
+    assert(host_snapshot().enabled != 0 && host_bt_powered != 0);
+    ota_bytes = host_rx[2];
+    host_feed("OTA,START\n");
+    host_service(0, 0);
+    assert(host_rx[2] == ota_bytes + strlen("OTA,START\n"));
+    /* 收包刷新30秒窗口，超过原熄屏截止点仍不断电，最后精确到期。 */
+    host_tick += 29999;
+    app_ble_update_power(0, 0, 0);
+    assert(host_snapshot().enabled != 0);
+    ++host_tick;
+    app_ble_update_power(0, 0, 0);
+    assert(host_snapshot().enabled == 0);
+
+    /* 真正断电后清除手机确认，重新上电但没有新校时时恢复1秒。 */
+    app_ble_update_power(1, 0, 1);
+    app_ble_update_power(0, 0, 1);
+    host_tick += 999;
+    app_ble_update_power(0, 0, 0);
+    assert(host_snapshot().enabled != 0);
+    ++host_tick;
+    app_ble_update_power(0, 0, 0);
+    assert(host_snapshot().enabled == 0);
+
+    app_ble_update_power(1, 0, 1);
+    host_feed("12:34:56\n");
+    host_service(1, 0);
+    app_ble_update_power(0, 0, 1);
+    host_busy[2] = 1;
+    host_service(0, 0);
+    host_tick += 30001;
+    app_ble_update_power(0, 0, 0);
+    assert(host_snapshot().enabled != 0); /* OTA仍忙时不受30秒截止限制。 */
+    app_ble_update_power(0, 1, 0);
+    assert(host_snapshot().enabled == 0); /* SPORT仍立即断电。 */
+    puts("PASS: ECO keeps 1s without valid phone input, allows sleeping OTA after 15s, refreshes a 30s grace, clears readiness on power-off and preserves OTA/SPORT gates across tick wrap.");
+}
+
 static void receive_power_tests(void)
 {
     app_ble_snapshot_struct before;
@@ -417,13 +479,13 @@ static void receive_power_tests(void)
     assert(host_temperature_valid != 0 && host_temperature_x10 == 263);
     assert(host_snapshot().log_revision != before.log_revision);
     app_ble_update_power(0, 0, 1);
-    host_tick += 999;
+    host_tick += 29999; /* 前面的完整校时已确认手机，使用30秒窗口。 */
     app_ble_update_power(0, 0, 0);
     assert(host_snapshot().enabled != 0);
     ++host_tick;
     app_ble_update_power(0, 0, 0);
     assert(host_snapshot().enabled == 0);
-    host_tick += 3600000 - 1000;
+    host_tick += 3600000 - 30000;
     host_service(0, 0);
     assert(host_temperature_valid == 0);
     for (i = 0; i < 3; ++i)
@@ -465,6 +527,14 @@ int main(int argc, char **argv)
     else if (strcmp(mode, "uptime_heart") == 0)
     {
         uptime_heart_tests();
+    }
+    else if (strcmp(mode, "eco_phone") == 0)
+    {
+        eco_phone_tests(0);
+    }
+    else if (strcmp(mode, "eco_phone_wrap") == 0)
+    {
+        eco_phone_tests(1);
     }
     else
     {

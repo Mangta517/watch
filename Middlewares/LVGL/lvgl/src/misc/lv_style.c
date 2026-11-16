@@ -71,7 +71,7 @@ lv_style_prop_t lv_style_register_prop(void)
 {
     static uint16_t act_id = (uint16_t)_LV_STYLE_LAST_BUILT_IN_PROP;
     act_id++;
-    return act_id;
+    return (lv_style_prop_t)act_id;
 }
 
 bool lv_style_remove_prop(lv_style_t * style, lv_style_prop_t prop)

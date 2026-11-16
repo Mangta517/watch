@@ -49,8 +49,11 @@ extern "C"
  * mag_uT=NULL 时六轴递推；euler=NULL只递推，不反解欧拉角。
  * 返回 1=本次用了有效水平磁场修正航向。 */
     uint8_t Common_IMU_GetEulerAngleWithMag(const Accel_Gyro_struct *raw, const float mag_uT[3], Euler_struct *euler, float dt);
-    /* 重置递推状态；下一份0.75～1.25g样本初始化俯仰/横滚，航向仍从0开始。 */
+    /* 重置递推状态；下一份0.75～1.25g样本初始化俯仰/横滚，首份有效水平磁场直接对齐磁北。 */
     void Common_IMU_Reset(void);
+    /* 请求下个有效水平磁场重对齐航向；reseed_gravity=1还要求首份有效加速度重建俯仰/横滚，
+     * 清除旧重力积分但保留已有航向；=0保留俯仰/横滚与积分，供连续采样的磁校准结束使用。 */
+    void Common_IMU_ReseedYaw(uint8_t reseed_gravity);
 
 #ifdef __cplusplus
 }

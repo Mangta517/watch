@@ -54,12 +54,12 @@ static uint8_t s_tp_addr8 = CST816_ADDR_1; /* 当前在用的 8bit 写地址 */
 volatile uint8_t g_tp_chip_id = 0; /* 诊断: 最近一次读到的 CST816 ChipID (0xB5/0xB7=正常) */
 
 /******************************************************************************
- * APP使用64MHz的51次位延时；volatile防止优化掉，实际总线频率需实测。
+ * APP使用84MHz的67次位延时；volatile防止优化掉，实际总线频率需实测。
  *****************************************************************************/
 static void tp_delay(void)
 {
     /* n 为循环次数；volatile 阻止编译器把这段空循环整体优化掉 */
-    volatile uint32_t n = 51;
+    volatile uint32_t n = 67;
     /* 逐次自减到 0，用空循环消耗时间，构成软 I2C 的半周期延时 */
     while (n--)
     {
@@ -78,8 +78,8 @@ static void tp_sda_out(void)
     uint32_t primask = __get_PRIMASK();
     /* 指定只重配 SDA 这一根引脚，不动同端口的其他引脚 */
     g.Pin = TP_SDA_Pin;
-    /* 推挽输出：主机需要主动把 SDA 拉低或拉高 */
-    g.Mode = GPIO_MODE_OUTPUT_PP;
+    /* 开漏只主动拉低，写高时交给Core板R4的4.7k上拉。 */
+    g.Mode = GPIO_MODE_OUTPUT_OD;
     /* 使能内部上拉，与后续输入态配置保持一致 */
     g.Pull = GPIO_PULLUP;
     /* 高速档，缩短引脚翻转时间，减小软 I2C 边沿延迟 */
@@ -121,7 +121,7 @@ static void iic_start(void)
 {
     /* 先把 SDA 预置高电平，保证下面切输出时不会误拉低总线 */
     TP_SDA_1();
-    /* 把 SDA 切成推挽输出，之后主机才能主动产生边沿 */
+    /* 把SDA切成开漏输出，拉低或释放数据线 */
     tp_sda_out();
     /* 释放 SCL 为高，准备在 SCL 高电平期间制造 START 条件 */
     TP_SCL_1();
@@ -140,7 +140,7 @@ static void iic_stop(void)
 {
     /* 先把 SDA 预置为低，切输出后即把总线数据线驱动为低 */
     TP_SDA_0();
-    /* SDA 切换为推挽输出，主机主动控制数据线 */
+    /* SDA切换为开漏输出，主机拉低或释放数据线 */
     tp_sda_out();
     /* 等待低电平建立 */
     tp_delay();

@@ -1,6 +1,6 @@
 /**
  * @file app_battery.c
- * @brief PA1/ADC1_IN1 单次转换：启动/亮屏1s，启动稳定后熄屏10s，不在UI中等待ADC。
+ * @brief VREFINT校准的PA1电池采样：启动/亮屏1s，启动稳定后熄屏10s，不在UI中等待ADC。
  */
 #include "app_battery.h"
 #include "app_diag.h"
@@ -19,6 +19,7 @@ static app_battery_struct s_battery_data;
 static uint32_t s_attempt_ms;      /* 上次发起转换的时刻，用于按周期判定到期 */
 static uint32_t s_filter_ms;       /* 上次推进低通的采样时刻，按经过秒数补步长 */
 static int32_t s_filtered_mv_q8;   /* 1/8指数低通的Q8定点状态，单位256分之一mV */
+static int32_t s_percent_mv_q8;    /* 电量专用1/256低通，约256s时间常数，减轻短时下探锁低百分比 */
 static uint32_t s_startup_sum_mv;  /* 启动末4次电压累加，用于低通初值 */
 static uint8_t s_startup_samples;  /* 启动阶段已完成次数，等于8后滤波才生效 */
 static uint8_t s_last_percent;     /* 本次开机已发布的电量下限(只降不升) */
@@ -26,12 +27,12 @@ static uint8_t s_sleep_mode;       /* sensor任务写入的熄屏标志，决定
 
 static uint8_t battery_percent(uint32_t voltage_mv)
 {
-    /* 2026-10-31按同电池未充电日志归一化：3.5V为0%，4.0V为100%，节点间线性插值。 */
-    /* 仅定义显示电量下限，不触发关机；31点中位数及计算依据见docs/battery-log.md。 */
-    static const uint16_t voltage_points_mv[] = {3500, 3550, 3600, 3650, 3700, 3750, 3800, 3850, 3900, 3950, 4000};
-    static const uint8_t percent_points[] = {0, 14, 24, 36, 51, 62, 69, 79, 88, 94, 100};
+    /* 2026-11-16按小时中位数及运行时间重标：校准电压3.50V为显示0%，4.20V为100%。 */
+    /* 3.85V以上保留原节点，以下采用估算尾段；计算依据与适用边界见docs/battery-log.md。 */
+    static const uint16_t voltage_points_mv[] = {3500, 3550, 3600, 3650, 3700, 3750, 3800, 3850, 3900, 3950, 4000, 4050, 4100, 4150, 4200};
+    static const uint8_t percent_points[] = {0, 2, 5, 9, 14, 20, 22, 24, 30, 41, 47, 58, 79, 91, 100};
     uint32_t i; /* 从第 1 个电压节点开始向后查找的数组下标。 */
-    /* 低于最低节点 3.5V 时直接返回 0%，不再插值。 */
+    /* 低于最低节点 3.50V 时直接返回 0%，不再插值。 */
     if (voltage_mv <= voltage_points_mv[0])
     {
         return 0;
@@ -48,11 +49,11 @@ static uint8_t battery_percent(uint32_t voltage_mv)
             return (uint8_t)(percent_points[i - 1] + (rise + span_mv / 2) / span_mv);
         }
     }
-    /* 高过最高节点 4.0V：按满电 100% 返回。 */
+    /* 高过最高节点 4.20V：按满电 100% 返回。 */
     return 100;
 }
 
-/* ADC通道由MX_ADC1_Init配置；电池分压倍率在换算中使用。本层只管节拍、滤波和快照。 */
+/* ADC驱动采内部参考及PA1；本层按1:2分压换算，并管理节拍、滤波和快照。 */
 void app_battery_init(void)
 {
     /* 先创建快照互斥锁；创建失败直接进错误处理，不再往下初始化。 */
@@ -84,12 +85,13 @@ void app_battery_set_sleep_mode(uint8_t sleeping)
     s_sleep_mode = sleeping != 0;
 }
 
-/* 每轮至多一笔转换。快照整体替换：本轮失败时valid清0，不向UI沿用旧电压。 */
+/* 每轮采内部参考与电池各一次。失败时valid清0，不向UI沿用旧电压。 */
 void app_battery_service(void)
 {
     app_battery_struct sample = {0}; /* 本轮结果先攒在局部，末尾整体替换快照。 */
     uint32_t now = HAL_GetTick();    /* 本轮进入时刻(ms)，用于周期判断与低通补步。 */
     uint16_t raw = 0;                /* 本次 12 位 ADC 原始值，0~4095。 */
+    uint32_t vdda_mv = 0;
     uint32_t read_started;           /* 采样开始时刻，仅用于诊断耗时。 */
     uint32_t period_ms = APP_BATTERY_PERIOD_MS; /* 当轮周期，默认亮屏/启动档 1s。 */
     uint32_t filter_steps;           /* 本次需要推进的低通步数，按经过的秒数折算。 */
@@ -107,13 +109,13 @@ void app_battery_service(void)
     /* 记录本次尝试时刻，下一轮从这里起算周期。 */
     s_attempt_ms = now;
     read_started = app_diag_clock_count();
-    sample.result = battery_adc_read_raw(APP_BATTERY_ADC_TIMEOUT_MS, &raw);
+    sample.result = battery_adc_read_raw(APP_BATTERY_ADC_TIMEOUT_MS, &raw, &vdda_mv);
     if (sample.result == HAL_OK)
     {
         /* 整条 ADC 流程成功：保存原始值供诊断显示。 */
         sample.adc_raw = (uint16_t)raw;
         /* 12位ADC满量程4095，按1:2分压还原电池端电压，+2047为四舍五入。 */
-        sample.voltage_mv = (raw * APP_BATTERY_VREF_MV * 2 + 2047) / 4095;
+        sample.voltage_mv = (raw * vdda_mv * 2 + 2047) / 4095;
         /* 启动前4次不入均值，后4次均值作为初值；沿用每秒调度，转换等待带有限超时。 */
         if (s_startup_samples < APP_BATTERY_STARTUP_SAMPLES)
         {
@@ -128,10 +130,11 @@ void app_battery_service(void)
             {
                 /* 第 8 帧到齐：4 帧均值转成 Q8(乘256)作为低通初值。 */
                 s_filtered_mv_q8 = (int32_t)(s_startup_sum_mv * 256 / APP_BATTERY_STARTUP_AVERAGE_SAMPLES);
+                s_percent_mv_q8 = s_filtered_mv_q8;
                 /* 记录低通基准时刻，并从此刻起允许熄屏降频。 */
                 s_filter_ms = now;
-                /* 用初值算出首个电量下限，+128 是把 Q8 四舍五入回 mV。 */
-                s_last_percent = battery_percent((uint32_t)(s_filtered_mv_q8 + 128) / 256);
+                /* 电量慢滤波与电压共用启动初值，+128 是把 Q8 四舍五入回 mV。 */
+                s_last_percent = battery_percent((uint32_t)(s_percent_mv_q8 + 128) / 256);
             }
         }
         else
@@ -147,6 +150,7 @@ void app_battery_service(void)
             {
                 /* 每步把 Q8 状态向本次电压靠拢 1/8：差值除以 8 后累加。 */
                 s_filtered_mv_q8 += ((int32_t)sample.voltage_mv * 256 - s_filtered_mv_q8) / 8;
+                s_percent_mv_q8 += ((int32_t)sample.voltage_mv * 256 - s_percent_mv_q8) / 256;
                 --filter_steps;
             }
             /* 低通已推进到当前时刻，刷新基准时间。 */
@@ -156,8 +160,8 @@ void app_battery_service(void)
         {
             /* 启动 8 帧完成：把 Q8 低通值四舍五入回 mV 作为对外电压。 */
             sample.voltage_mv = (uint32_t)(s_filtered_mv_q8 + 128) / 256;
-            /* 用滤波后电压查表得到本轮百分比。 */
-            sample.percent = battery_percent(sample.voltage_mv);
+            /* 百分比用慢滤波电压查表，显示/日志仍使用上面的1/8滤波电压。 */
+            sample.percent = battery_percent((uint32_t)(s_percent_mv_q8 + 128) / 256);
             /* 尚无充电状态输入：本次开机电量只降不升，电压回弹不代表补充了电荷。 */
             if (sample.percent < s_last_percent)
             {
