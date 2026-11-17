@@ -134,6 +134,8 @@ typedef struct
         lv_obj_t *second_hand;
         uint32_t refresh_tick;
         uint32_t last_second;
+        uint32_t displayed_steps;
+        uint8_t steps_valid;
     } watch;
     struct
     {
@@ -255,6 +257,7 @@ static void refresh_data(void);
 static void create_page(ui_page_t page, lv_coord_t scroll_y, uint8_t back);
 static void refresh_bluetooth(void);
 static void refresh_battery(void);
+static void refresh_steps(void);
 
 static void create_battery_ring(lv_obj_t *parent, int x, int y, lv_coord_t size, uint16_t arc_width)
 {
@@ -986,8 +989,8 @@ static void watch_page(void)
     lv_obj_clear_flag(hub, LV_OBJ_FLAG_CLICKABLE);
 }
 
-/* 表盘刷新：亮屏才读RTC，按秒值更新指针与摘要；未校时显示"--:--"并隐藏指针。
- * 同一秒内不重复取快照，熄屏直接返回。温湿度取AHT21快照，心率取最近有效BPM。 */
+/* 表盘步数每100ms按变化刷新，指针与其余摘要按秒刷新；熄屏直接返回。
+ * 未校时显示"--:--"并隐藏指针。温湿度取AHT21快照，心率取最近有效BPM。 */
 static void refresh_clock(void)
 {
     /* RTC读出的时/分/秒结构。 */
@@ -1013,6 +1016,7 @@ static void refresh_clock(void)
     {
         return; /* 熄屏不读取RTC、不更新指针；RTC硬件继续独立走时。 */
     }
+    refresh_steps();
     /* 读取当前RTC时间，结果同时用于判断是否已校时。 */
     status = watch_rtc_get_time(&time);
     /* RTC读取成功且已校时，才计算当天秒数并做同秒过滤。 */
@@ -3066,41 +3070,52 @@ static void refresh_weather(void)
     }
 }
 
-/* 电量与步数摘要：valid才显示百分比，否则按result区分"--%"与"ADC ERR"；
- * 低电量阈值20%改红色，电压仍通过电池快照和日志提供。
- * 刷新电量时一并取IMU快照显示表盘步数。 */
-static void refresh_battery(void)
+/* 步数变化才修改LVGL对象，覆盖RTC同秒、未校时、跨日归零和页面重建。 */
+static void refresh_steps(void)
 {
-    /* 本次读取的电量快照，含百分比、电压mV和采样结果。 */
-    app_battery_struct battery;
-    /* 电量条指示器颜色，默认电池绿色。 */
-    uint32_t color = UI_BATTERY_GREEN;
-    /* 电量标签未创建(不在本页)时直接返回。 */
-    if (s_view.battery.label == NULL)
+    app_imu_struct imu;
+    int32_t steps_pct;
+    uint8_t active = 0;
+    if (s_view.watch.steps == NULL)
     {
         return;
     }
-    /* 只有表盘页才有步数标签，存在时顺便刷新步数和步数圆环。 */
-    if (s_view.watch.steps != NULL)
+    App_IMU_GetSnapshot(&imu);
+    if (s_view.watch.steps_valid != 0 && imu.steps == s_view.watch.displayed_steps)
     {
-        /* 步数来自IMU快照的计步累计值。 */
-        app_imu_struct imu;
-        App_IMU_GetSnapshot(&imu);
-        /* 步数以无符号十进制显示。 */
-        ui_set_label_text_fmt(s_view.watch.steps, "%lu", (unsigned long)imu.steps);
-        if (s_view.watch.steps_ring != NULL)
+        return;
+    }
+    s_view.watch.displayed_steps = imu.steps;
+    s_view.watch.steps_valid = 1;
+    ui_set_label_text_fmt(s_view.watch.steps, "%lu", (unsigned long)imu.steps);
+    if (s_view.watch.steps_ring != NULL)
+    {
+        steps_pct = 100;
+        if (imu.steps < WATCH_STEPS_GOAL)
         {
-            int32_t steps_pct = (int32_t)((imu.steps * 100UL) / WATCH_STEPS_GOAL);
+            steps_pct = (int32_t)(imu.steps * 100 / WATCH_STEPS_GOAL);
             if (imu.steps > 0 && steps_pct == 0)
             {
                 steps_pct = 1;
             }
-            if (steps_pct > 100)
-            {
-                steps_pct = 100;
-            }
-            ui_update_ring_gauge(s_view.watch.steps_ring, steps_pct, imu.steps > 0 ? 1 : 0, UI_BATTERY_GREEN);
         }
+        if (imu.steps != 0)
+        {
+            active = 1;
+        }
+        ui_update_ring_gauge(s_view.watch.steps_ring, steps_pct, active, UI_BATTERY_GREEN);
+    }
+}
+
+/* valid才显示电量百分比，否则按result区分"--%"与"ADC ERR"。
+ * 低电量阈值20%改红色，电压仍通过电池快照和日志提供。 */
+static void refresh_battery(void)
+{
+    app_battery_struct battery;
+    uint32_t color = UI_BATTERY_GREEN;
+    if (s_view.battery.label == NULL)
+    {
+        return;
     }
     /* 取一次电量快照。 */
     app_battery_get_snapshot(&battery);

@@ -53,6 +53,7 @@ ui_args = [gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-Wal
 subprocess.run(ui_args + ["-DAPP_DEBUG_TELEMETRY=1"] + ui_sources + [str(library), "-lm", "-o", str(exe)],
                cwd=ROOT, check=True)
 subprocess.run([str(exe), "page_auto_sleep"], cwd=ROOT, check=True)
+subprocess.run([str(exe), "step_refresh"], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe), "cached_weather"], cwd=ROOT, check=True)
 subprocess.run([str(exe), "page_lifecycle"], cwd=ROOT, check=True)
@@ -62,6 +63,7 @@ quiet_exe = OUT / "ui_quiet.exe"
 subprocess.run(ui_args + ["-DAPP_DEBUG_TELEMETRY=0"] + ui_sources + [str(library), "-lm", "-o", str(quiet_exe)],
                cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe), "page_auto_sleep"], cwd=ROOT, check=True)
+subprocess.run([str(quiet_exe), "step_refresh"], cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe)], cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe), "page_lifecycle"], cwd=ROOT, check=True)
 from PIL import Image, ImageDraw, ImageFont

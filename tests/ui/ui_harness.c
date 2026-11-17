@@ -1118,11 +1118,51 @@ static void screenshot(const char *name)
     }
     fclose(file);
 }
+static void step_refresh_tests(void)
+{
+    uint32_t second, calls;
+    lv_point_t hand;
+    advance(250);
+    host_rtc_tick = host_tick;
+    host_rtc_seconds = 10 * 3600 + 10 * 60;
+    refresh_clock();
+    second = s_view.watch.last_second;
+    hand = s_second_points[1];
+    host_steps = 12345;
+    advance(100);
+    assert(strcmp(lv_label_get_text(s_view.watch.steps), "12345") == 0);
+    assert(lv_bar_get_value(s_view.watch.steps_ring) == 77);
+    assert(s_view.watch.last_second == second && memcmp(&hand, &s_second_points[1], sizeof(hand)) == 0);
+    assert_static_refresh();
+    host_steps = 0;
+    advance(100);
+    assert(strcmp(lv_label_get_text(s_view.watch.steps), "0") == 0 && lv_bar_get_value(s_view.watch.steps_ring) == 0);
+    host_rtc_synced = 0;
+    host_steps = 1;
+    advance(100);
+    assert(strcmp(lv_label_get_text(s_view.watch.steps), "1") == 0 && lv_bar_get_value(s_view.watch.steps_ring) == 1);
+    set_screen_on(0);
+    calls = host_flush_calls;
+    host_steps = 300;
+    advance(300);
+    assert(host_flush_calls == calls && strcmp(lv_label_get_text(s_view.watch.steps), "1") == 0);
+    set_screen_on(1);
+    advance(100);
+    assert(strcmp(lv_label_get_text(s_view.watch.steps), "300") == 0);
+    create_page(PAGE_SETTINGS, 0, 0);
+    advance(220);
+    host_steps = 321;
+    create_page(PAGE_WATCH, 0, 0);
+    advance(220);
+    assert(strcmp(lv_label_get_text(s_view.watch.steps), "321") == 0);
+    puts("PASS: real 100ms UI timer refreshes steps within the same RTC second, handles zero/unsynced RTC, transfers no unchanged pixels and restores after sleep/page cache.");
+}
+
 static void activity_ui_tests(void)
 {
     assert(s_page == PAGE_WATCH && s_view.watch.steps != NULL);
     host_steps = 12345;
-    refresh_battery();
+    refresh_clock();
     assert(strcmp(lv_label_get_text(s_view.watch.steps), "12345") == 0);
     assert(s_view.watch.steps_ring != NULL && lv_bar_get_value(s_view.watch.steps_ring) == 77);
     screenshot("watch_activity");
@@ -1776,6 +1816,11 @@ int main(int argc, char **argv)
     lv_port_indev_init();
     host_wake = GPIO_PIN_SET; /* 模拟按住 SW2 开机。 */
     App_UI_Create();
+    if (argc > 1 && strcmp(argv[1], "step_refresh") == 0)
+    {
+        step_refresh_tests();
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "page_auto_sleep") == 0)
     {
         page_auto_sleep_tests();

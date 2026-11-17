@@ -65,6 +65,7 @@ static TickType_t s_accel_sample_tick;
 static uint8_t s_compass_accel_valid, s_compass_accel_errors;
 static float s_activity_accel[3];
 static uint8_t s_activity_filter_valid;
+static uint32_t s_activity_elapsed_ms;
 static uint16_t s_activity_day, s_requested_day;
 static uint8_t s_calendar_restored, s_day_bound;
 
@@ -319,6 +320,7 @@ void App_IMU_Init(void)
     s_mag_poll_ms = APP_MAG_POLL_MS;
     s_mag_max_age_ms = APP_MAG_MAX_AGE_MS;
     s_compass_accel_valid = s_activity_filter_valid = 0;
+    s_activity_elapsed_ms = 0;
     s_day_bound = 0;
     app_battery_log_steps_load(&s_activity_day, &s_activity.steps);
     s_imu_data.steps = s_activity.steps;
@@ -363,7 +365,7 @@ uint8_t app_imu_is_calibrating(void)
     return calibrating; /* 1=仍有校准/保存事务, 0=EEPROM可让给其他用途。 */
 }
 
-/* 仅供旧维护调用方使用；日常熄屏仍保留MPU自主5Hz采样。 */
+/* 仅供旧维护调用方使用；日常熄屏保留MPU自主40Hz采样。 */
 void app_imu_set_sleep(uint8_t sleeping)
 {
     app_diag_sensor_init(APP_DIAG_MPU, my_mpu6050_set_sleep(sleeping));
@@ -383,15 +385,21 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
     }
     else
     {
-        period_ms = 200;
+        period_ms = MPU6050_SAMPLE_PERIOD_MS;
     }
     if (my_mpu6050_set_sample_mode(period_ms, s_accel_reference_requested) == 0 && period_ms != s_sample_period_ms)
     {
         s_sample_period_ms = period_ms;
         s_have_sample = 0;
         s_activity_filter_valid = 0;
+        s_activity_elapsed_ms = 0;
     }
     return s_sample_period_ms;
+}
+
+uint32_t app_imu_wrist_sequence(void)
+{
+    return s_activity.wrist_sequence;
 }
 
 /* 指南针的总线、恢复和采样单独调度，MPU故障不影响此链路。 */
@@ -502,7 +510,7 @@ uint8_t app_imu_compass_service(uint8_t active, uint8_t read_sensors)
     return pending;
 }
 
-/* 返回驱动读帧结果，调度器据NOT_READY保留5Hz待取帧。 */
+/* 返回驱动读帧结果，调度器据NOT_READY保留待取帧。 */
 uint8_t App_IMU_Service(uint8_t read_mag)
 {
     Accel_Gyro_struct raw;
@@ -528,7 +536,12 @@ uint8_t App_IMU_Service(uint8_t read_mag)
             {
                 s_activity_filter_valid = 0;
             }
-            alpha = (float)elapsed_ms / (90.0f + (float)elapsed_ms);
+            if (s_activity_filter_valid == 0)
+            {
+                s_activity_elapsed_ms = 0;
+            }
+            s_activity_elapsed_ms += elapsed_ms;
+            alpha = (float)elapsed_ms / (25.0f + (float)elapsed_ms);
             for (axis = 0; axis < 3; ++axis)
             {
                 if (s_activity_filter_valid == 0)
@@ -543,9 +556,11 @@ uint8_t App_IMU_Service(uint8_t read_mag)
             }
             s_activity_filter_valid = 1;
         }
-        if (s_sample_period_ms != 10 || s_activity.have_sample == 0 || (uint32_t)(sample_ms - s_activity.sample_ms) >= 200)
+        if (s_sample_period_ms != 10 || s_activity.have_sample == 0 || s_activity_elapsed_ms >= MPU6050_SAMPLE_PERIOD_MS)
         {
             common_activity_update(&s_activity, accel[0], accel[1], accel[2], sample_ms);
+            /* 100Hz输入按20/30ms交替消费新帧，保留余量以维持平均40Hz。 */
+            s_activity_elapsed_ms %= MPU6050_SAMPLE_PERIOD_MS;
         }
         s_last_sample_ms = sample_ms;
         s_have_sample = 1;
@@ -605,6 +620,8 @@ void app_imu_activity_service(void)
             s_activity.steps = 0;
             /* 清掉昨日尚未回补的步态，保留重力基线与抬腕事件。 */
             s_activity.walking_run = s_activity.peak_pending = 0;
+            s_activity.walking_confirmed = 0;
+            s_activity.step_interval_ms = 0;
         }
         s_activity_day = day;
         s_day_bound = 1;

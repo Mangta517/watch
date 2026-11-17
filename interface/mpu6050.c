@@ -151,7 +151,7 @@ uint8_t my_mpu6050_recover_step(uint32_t now_ms)
         {MPU6050_USER_CTRL, 0x00},
         {MPU6050_SMPLRT_DIV, 9},
         {MPU6050_CONFIG, MPU6050_DLPF_CFG},
-        {MPU6050_PWR_MGMT_2, 0x47},
+        {MPU6050_PWR_MGMT_2, 0xC7},
         {MPU6050_PWR_MGMT_1, 0x28}};
     /* 暂存单次寄存器读出的值（WHO_AM_I、PWR_MGMT_1、INT_STATUS 共用）。 */
     uint8_t data;
@@ -286,8 +286,8 @@ uint8_t my_mpu6050_set_sleep(uint8_t sleeping)
     uint8_t config = 0x08;
     /* now_ms 为本次操作时刻；elapsed_ms 为本次睡眠持续时长，用于补偿超时基准。 */
     uint32_t now_ms, elapsed_ms;
-    /* 200ms 低功耗循环模式：CYCLE=1、TEMP_DIS=1、内部 8MHz 时钟。 */
-    if (s_mpu_period_ms == 200)
+    /* 低功耗循环模式：CYCLE=1、TEMP_DIS=1、内部 8MHz 时钟。 */
+    if (s_mpu_period_ms == MPU6050_SAMPLE_PERIOD_MS)
     {
         config = 0x28;
     }
@@ -334,12 +334,12 @@ uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
     return my_mpu6050_set_sample_mode(period_ms, 0);
 }
 
-/* 只保留5Hz循环与100Hz连续加速度，三轴陀螺仪始终待机。 */
+/* 40Hz循环与100Hz连续加速度，三轴陀螺仪始终待机。 */
 uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference)
 {
     uint8_t power_2 = 0x07, power_1 = 0x08;
     (void)accel_reference;
-    if ((period_ms != 10 && period_ms != 200) || mpu6050_ready == 0)
+    if ((period_ms != 10 && period_ms != MPU6050_SAMPLE_PERIOD_MS) || mpu6050_ready == 0)
     {
         return 1;
     }
@@ -347,9 +347,9 @@ uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference)
     {
         return 0;
     }
-    if (period_ms == 200)
+    if (period_ms == MPU6050_SAMPLE_PERIOD_MS)
     {
-        power_2 = 0x47;
+        power_2 = 0xC7;
         power_1 = 0x28;
     }
     if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x08) != 0 ||
@@ -502,11 +502,11 @@ static mpu6050_cal_state mpu6050_zero_offset_update(Accel_Gyro_struct *raw, uint
         return s_cal.state;
     }
     /* 等待静止阶段按 3s 基准时间折算到当前采样周期。 */
-    timeout_ms = 3000 * s_mpu_period_ms / MPU6050_SAMPLE_PERIOD_MS;
+    timeout_ms = 3000 * s_mpu_period_ms / 10;
     /* 平均阶段按 2s 基准时间折算。 */
     if (s_cal.state == MPU6050_CAL_AVERAGING)
     {
-        timeout_ms = 2000 * s_mpu_period_ms / MPU6050_SAMPLE_PERIOD_MS;
+        timeout_ms = 2000 * s_mpu_period_ms / 10;
     }
     /* 用墙钟判断当前阶段是否超时；无符号减法可正确处理计时器回绕。 */
     if ((uint32_t)(wall_ms - s_cal.phase_ms) >= timeout_ms)
@@ -558,7 +558,7 @@ static mpu6050_cal_state mpu6050_zero_offset_update(Accel_Gyro_struct *raw, uint
         return s_cal.state;
     }
     /* 帧间隔不足一个标称采样周期时跳过，避免同一帧被重复累计。 */
-    if ((uint32_t)(now_ms - s_cal.last_sample_ms) < MPU6050_SAMPLE_PERIOD_MS)
+    if ((uint32_t)(now_ms - s_cal.last_sample_ms) < s_mpu_period_ms)
     {
         return s_cal.state;
     }

@@ -86,7 +86,7 @@ extern "C"
 /* 手表运动档：寄存器配置与解算/校准共同引用，改量程时须同步灵敏度。 */
 #define MPU6050_GYRO_RANGE       MPU6050_GYRO_RANGE_1000DPS
 #define MPU6050_ACCEL_RANGE      MPU6050_ACCEL_RANGE_4G
-#define MPU6050_SAMPLE_PERIOD_MS 200  /* 上电默认5Hz低功耗加速度循环。 */
+#define MPU6050_SAMPLE_PERIOD_MS 25   /* 上电默认40Hz低功耗加速度循环。 */
 #define MPU6050_DLPF_CFG         0x03 /* 陀螺仪42Hz、加速度44Hz */
 
     /* ------------------------------------------------------------ 接口函数 */
@@ -94,9 +94,9 @@ extern "C"
 
     /* 初始化 MPU6050 (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR)) */
     uint8_t my_mpu6050_init(void);
-    /* 仅sensor任务：10ms为100Hz纯加速度，200ms为5Hz低功耗循环。 */
+    /* 仅sensor任务：10ms为100Hz纯加速度，25ms为40Hz低功耗循环。 */
     uint8_t my_mpu6050_set_sample_period(uint32_t period_ms);
-    /* accel_reference=1连续采加速度，陀螺仪/温度待机；200ms仍使用原5Hz循环。 */
+    /* accel_reference=1连续采加速度，陀螺仪/温度待机；25ms使用40Hz循环。 */
     uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference);
     uint8_t my_mpu6050_set_sleep(uint8_t sleeping);
     /* 仅sensor任务：begin使数据无效，step每拍至多一笔事务；0=就绪，1=失败冷却，2=推进中。 */

@@ -1,31 +1,42 @@
 #include "common_activity.h"
 #include <math.h>
 
+static void activity_reset_gait(common_activity_struct *state)
+{
+    state->peak_pending = 0;
+    state->walking_run = 0;
+    state->walking_confirmed = 0;
+    state->step_interval_ms = 0;
+    state->confirmation_steps = 3;
+}
+
 void common_activity_update(common_activity_struct *state, float ax, float ay, float az, uint32_t sample_ms)
 {
-    float magnitude, dynamic;
-    uint32_t gap, interval;
+    float magnitude, filtered, dt, drop, swing, threshold, fall_threshold, direction_dot = 0.0f;
+    float accel[3] = {ax, ay, az};
+    uint32_t gap = 25, interval, quiet_hold_ms;
+    uint8_t axis, moving = 0, step_blocked;
     if (state->have_sample != 0)
     {
         gap = sample_ms - state->sample_ms;
-        if (gap < 140)
+        if (gap < 15)
         {
             return;
         }
         if (gap > COMMON_ACTIVITY_MAX_GAP_MS)
         {
-            /* 断采后重建重力基线与连续动作，保留累计步数和抬腕序号。 */
+            /* 断采后重建滤波与连续动作，保留累计步数和抬腕序号。 */
             state->have_sample = 0;
-            state->peak_pending = state->walking_run = 0;
-            state->down_frames = state->view_frames = state->wrist_armed = 0;
+            activity_reset_gait(state);
+            state->down_active = state->view_active = state->wrist_armed = 0;
         }
     }
     magnitude = sqrtf(ax * ax + ay * ay + az * az);
     state->sample_ms = sample_ms;
-    if (!(magnitude >= 0.45f && magnitude <= 2.2f))
+    if (!(magnitude >= 0.35f && magnitude <= 3.8f))
     {
         /* 单次冲击不拆散已确认的步态；正常帧仍按实际间隔处理峰值超时。 */
-        state->down_frames = state->view_frames = state->wrist_armed = 0;
+        state->down_active = state->view_active = state->wrist_armed = 0;
         return;
     }
     if (state->have_sample == 0)
@@ -34,52 +45,169 @@ void common_activity_update(common_activity_struct *state, float ax, float ay, f
         {
             return;
         }
-        state->gravity_g = magnitude;
+        state->mag_prev1 = state->mag_prev2 = state->fast_mag = magnitude;
+        state->peak_g = state->trough_g = magnitude;
+        for (axis = 0; axis < 3; ++axis)
+        {
+            state->motion_min[axis] = state->motion_max[axis] = accel[axis];
+            state->direction[axis] = accel[axis] / magnitude;
+        }
+        state->quiet_since_ms = state->direction_ms = sample_ms;
+        state->still = state->turn_active = 0;
+        activity_reset_gait(state);
         state->have_sample = 1;
         return;
     }
-    /* 动态分量 = 当前幅值 - 重力基线，用于步态峰值/谷值判定。 */
-    dynamic = magnitude - state->gravity_g;
-    /* 一阶低通更新重力基线(系数0.0625)，缓慢跟随佩戴姿态变化并减小对紧邻波谷的自吞噬。 */
-    state->gravity_g += dynamic * 0.0625f;
-    /* 正峰后必须出现负谷；连续3个有效步态后回补，过滤单次抬手冲击。
-     * shortcut: 5Hz针对日常步行，快速跑步可能混叠漏计，需提高采样率后再扩展。 */
+    /* 三轴各自的峰谷差检测静止，避免缓慢转腕在模长不变时被当成静止。 */
+    for (axis = 0; axis < 3; ++axis)
+    {
+        state->motion_min[axis] = fminf(state->motion_min[axis], accel[axis]);
+        state->motion_max[axis] = fmaxf(state->motion_max[axis], accel[axis]);
+        if (state->motion_max[axis] - state->motion_min[axis] > 0.045f)
+        {
+            moving = 1;
+        }
+        direction_dot += state->direction[axis] * accel[axis] / magnitude;
+    }
+    if (moving != 0)
+    {
+        state->quiet_since_ms = sample_ms;
+        for (axis = 0; axis < 3; ++axis)
+        {
+            state->motion_min[axis] = state->motion_max[axis] = accel[axis];
+        }
+    }
+    state->still = (uint32_t)(sample_ms - state->quiet_since_ms) >= 450;
+    /* 方向参考独立于模长滤波，约150ms内转动超过37度时取消未确认步态。 */
+    if (state->walking_confirmed == 0 && direction_dot < 0.80f)
+    {
+        activity_reset_gait(state);
+        state->turn_active = 1;
+        state->turn_ms = sample_ms;
+    }
+    if ((uint32_t)(sample_ms - state->direction_ms) >= 150)
+    {
+        for (axis = 0; axis < 3; ++axis)
+        {
+            state->direction[axis] = accel[axis] / magnitude;
+        }
+        state->direction_ms = sample_ms;
+    }
+    if (state->turn_active != 0 && (uint32_t)(sample_ms - state->turn_ms) >= 250)
+    {
+        state->turn_active = 0;
+    }
+    quiet_hold_ms = 1500;
+    if (state->step_interval_ms != 0)
+    {
+        quiet_hold_ms = state->step_interval_ms + 200;
+        if (quiet_hold_ms > 1500)
+        {
+            quiet_hold_ms = 1500;
+        }
+    }
+    /* 窄脉冲之间也可能平静450ms，按已测步频留出200ms余量再清连续状态。 */
+    if (state->walking_run != 0 &&
+        ((uint32_t)(sample_ms - state->last_step_ms) > 1500 ||
+         (state->still != 0 && (uint32_t)(sample_ms - state->last_step_ms) >= quiet_hold_ms)))
+    {
+        activity_reset_gait(state);
+    }
+    step_blocked = state->still != 0 || state->turn_active != 0;
+    /* 40Hz下三点二项式FIR压低近奈奎斯特振动，随后按实际毫秒间隔平滑。 */
+    filtered = 0.25f * (magnitude + 2.0f * state->mag_prev1 + state->mag_prev2);
+    state->mag_prev2 = state->mag_prev1;
+    state->mag_prev1 = magnitude;
+    dt = (float)gap;
+    if (dt > 200.0f)
+    {
+        dt = 200.0f;
+    }
+    state->fast_mag += dt / (12.0f + dt) * (filtered - state->fast_mag);
+    if (step_blocked != 0)
+    {
+        state->peak_pending = 0;
+        state->trough_g = state->fast_mag;
+    }
+    /* 正面朝上时提高峰谷门限；摆臂与较强落地信号仍可通过。 */
+    threshold = 0.080f;
+    if (az < -0.70f * magnitude)
+    {
+        threshold = 0.120f;
+    }
     if (state->peak_pending != 0 && (uint32_t)(sample_ms - state->peak_ms) > 1000)
     {
-        /* 峰值挂起超过1s仍未见负谷：只清本次挂起，连续步态超时由步间interval统一判定。 */
         state->peak_pending = 0;
+        state->trough_g = state->fast_mag;
     }
-    if (dynamic >= 0.065f)
+    if (state->peak_pending == 0)
     {
-        /* 首次达到正峰门限，或前一步浅谷漏检后跨步迎来新正峰：记录/刷新峰值时刻。 */
-        if (state->peak_pending == 0 || (uint32_t)(sample_ms - state->peak_ms) >= 300)
+        if (state->fast_mag < state->trough_g)
+        {
+            state->trough_g = state->fast_mag;
+        }
+        if (step_blocked == 0 && state->fast_mag - state->trough_g >= threshold)
         {
             state->peak_pending = 1;
+            state->peak_g = state->fast_mag;
             state->peak_ms = sample_ms;
         }
     }
-    else if (state->peak_pending != 0 && dynamic <= -0.025f)
+    else if (state->fast_mag > state->peak_g)
     {
-        /* 负谷出现：一次完整步态成立，计算本次与上一步的间隔。 */
+        state->peak_g = state->fast_mag;
+        state->peak_ms = sample_ms;
+    }
+    drop = state->peak_g - state->fast_mag;
+    swing = state->peak_g - state->trough_g;
+    fall_threshold = fmaxf(0.060f, 0.55f * swing);
+    if (state->walking_confirmed != 0)
+    {
+        /* 至少回落半个峰谷差，防止停走时的半个上升波在回到静止值后多算一步。 */
+        fall_threshold = fmaxf(0.045f, 0.50f * swing);
+    }
+    /* 已确认步行时提前落峰输出；起步仍等待较完整的峰谷以排除零散动作。 */
+    if (state->peak_pending != 0 && drop >= fall_threshold && swing >= threshold)
+    {
         state->peak_pending = 0;
+        state->trough_g = state->fast_mag;
         interval = state->peak_ms - state->last_step_ms;
-        if (state->walking_run == 0 || interval > 2400)
+        if (state->walking_run == 0 || interval > 1500 ||
+            (interval >= 250 && state->step_interval_ms != 0 &&
+             ((float)interval < 0.65f * (float)state->step_interval_ms ||
+              (float)interval > 1.55f * (float)state->step_interval_ms)))
         {
-            /* 首个步态或间隔超过2.4s：重新开始连续步态计数，本次不计步。 */
+            /* 断档或节律突变后重新确认，累计步数保留。 */
+            activity_reset_gait(state);
             state->walking_run = 1;
             state->last_step_ms = state->peak_ms;
-        }
-        else if (interval >= 280)
-        {
-            /* 步态间隔不小于280ms：更新上一步时刻，并按连续状态计步。 */
-            state->last_step_ms = state->peak_ms;
-            if (state->walking_run < 3)
+            if (swing < 0.14f)
             {
-                /* 前两步先累计连续数；第3步成立时一次性回补前3步。 */
-                ++state->walking_run;
-                if (state->walking_run == 3)
+                state->confirmation_steps = 5;
+            }
+        }
+        else if (interval >= 250)
+        {
+            state->last_step_ms = state->peak_ms;
+            if (state->step_interval_ms == 0)
+            {
+                state->step_interval_ms = interval;
+            }
+            else
+            {
+                state->step_interval_ms = (3 * state->step_interval_ms + interval) / 4;
+            }
+            if (state->walking_confirmed == 0)
+            {
+                if (swing < 0.14f)
                 {
-                    state->steps += 3;
+                    state->confirmation_steps = 5;
+                }
+                ++state->walking_run;
+                if (state->walking_run >= state->confirmation_steps)
+                {
+                    state->steps += state->walking_run;
+                    state->walking_confirmed = 1;
                 }
             }
             else
@@ -96,40 +224,40 @@ void common_activity_update(common_activity_struct *state, float ax, float ay, f
         /* 幅值接近1g：排除明显甩动或冲击后，再按重力方向判断手部朝向。 */
         if (az > -0.35f * magnitude)
         {
-            /* az大于-0.35倍合成幅值，视为放下候选，累计放下帧并清观看帧。 */
-            state->view_frames = 0;
-            if (state->down_frames < 3)
+            state->view_active = 0;
+            if (state->down_active == 0)
             {
-                ++state->down_frames;
+                state->down_active = 1;
+                state->down_since_ms = sample_ms;
             }
-            if (state->down_frames == 3)
+            if ((uint32_t)(sample_ms - state->down_since_ms) >= 400)
             {
-                /* 连续3帧放下后武装一次抬腕检测，等待随后出现观看姿态。 */
                 state->wrist_armed = 1;
             }
         }
         else if (state->wrist_armed != 0 && az < -0.75f * magnitude && fabsf(ax) < 0.65f * magnitude)
         {
-            /* 已武装且az小于-0.75倍合成幅值、|ax|小于0.65倍合成幅值：累计观看候选帧。 */
-            state->down_frames = 0;
-            if (++state->view_frames >= 3)
+            state->down_active = 0;
+            if (state->view_active == 0)
             {
-                /* 连续3帧观看姿态：确认一次抬腕，记录序号与时刻并解除武装。 */
+                state->view_active = 1;
+                state->view_since_ms = sample_ms;
+            }
+            if ((uint32_t)(sample_ms - state->view_since_ms) >= 400)
+            {
                 ++state->wrist_sequence;
                 state->wrist_ms = sample_ms;
                 state->wrist_armed = 0;
-                state->view_frames = 0;
+                state->view_active = 0;
             }
         }
         else
         {
-            /* 姿态不满足放下或观看条件：清空两侧帧计数，避免跨姿态拼接。 */
-            state->down_frames = state->view_frames = 0;
+            state->down_active = state->view_active = 0;
         }
     }
     else
     {
-        /* 幅值不在0.8~1.2g：视为剧烈运动或异常帧，清空抬腕帧计数。 */
-        state->down_frames = state->view_frames = 0;
+        state->down_active = state->view_active = 0;
     }
 }

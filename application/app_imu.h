@@ -94,8 +94,10 @@ extern "C"
     /* LVGL发布RTC日历，sensor执行跨天清零及Flash保存。day=0表示未校时。 */
     void app_imu_set_day(uint16_t day, uint8_t calendar_restored);
     void app_imu_activity_service(void);
-    /* 仅sensor任务：后台200ms低功耗，心率/SPORT 10ms连续加速度。 */
+    /* 仅sensor任务：后台25ms低功耗，心率/SPORT 10ms连续加速度。 */
     uint32_t app_imu_set_sample_period(uint32_t period_ms);
+    /* 仅sensor任务读取自有活动状态，用于新抬腕事件立即通知LVGL。 */
+    uint32_t app_imu_wrist_sequence(void);
     /* 仅sensor任务：先设置请求，再调用set_sample_period；心率参考不启动姿态/磁融合。 */
     void app_imu_set_accel_reference(uint8_t enabled);
     /* 兼容MPU完全休眠接口，唤醒后等待新的加速度帧。 */

@@ -44,9 +44,9 @@
 
 #define APP_SENSOR_TASK_PRIO                2   /* 低于LVGL，优先响应触摸和显示 */
 #define APP_SENSOR_TASK_STK                 512 /* 字 = 2KB，传感器采样和持久化路径。 */
-#define APP_SENSOR_TASK_PERIOD              40  /* 指南针按25Hz服务。 */
+#define APP_SENSOR_TASK_PERIOD              MPU6050_SAMPLE_PERIOD_MS /* 后台40Hz服务。 */
 #define APP_SENSOR_HEART_PERIOD_MS          10  /* 服务周期整除30ms心率读取下限，避免量化为40ms。 */
-#define APP_SENSOR_IDLE_PERIOD_MS           40  /* 普通亮屏后台服务；MPU另按200ms读取。 */
+#define APP_SENSOR_IDLE_PERIOD_MS           MPU6050_SAMPLE_PERIOD_MS /* 普通亮屏与后台加速度共用25ms节拍。 */
 #define APP_IDLE_POLL_MS                    20
 #define APP_POWER_IDLE                      1
 #define APP_POWER_MOTION                    2
@@ -54,8 +54,8 @@
 #define APP_POWER_SPORT                     8
 #define APP_SENSOR_SPORT_PERIOD_MS          10
 #define APP_SENSOR_SLEEP_WINDOW_MS          1600 /* 等待1Hz气压新转换。 */
-#define APP_SENSOR_BACKGROUND_IMU_PERIOD_MS 200 /* 后台5Hz加速度循环，用于计步和辅助抬腕。 */
-#define APP_SENSOR_SLEEP_POLL_MS            200  /* 与后台5Hz采样合并，保留sensor进度检查。 */
+#define APP_SENSOR_BACKGROUND_IMU_PERIOD_MS MPU6050_SAMPLE_PERIOD_MS /* 后台40Hz计步和辅助抬腕。 */
+#define APP_SENSOR_SLEEP_POLL_MS            200  /* LVGL熄屏基础服务与看门狗进度检查。 */
 #define APP_SENSOR_ENVIRONMENT_POLL_MS      100  /* AHT转换/恢复窗口仍在200ms读回期限内推进。 */
 #define APP_SENSOR_BARO_PERIOD_MS           300000
 #define APP_TOUCH_TASK_PRIO                 1    /* 触摸采集低于sensor；LVGL只消费缓存。 */
@@ -467,7 +467,7 @@ static void app_sensor_task(void *pvParameters)
     uint8_t heart_saving = 0; /* 心率周期EEPROM保存进度。 */
     uint8_t ota_saving = 0; /* OTA标志保存进度；非0时其他保存让路。 */
     uint32_t baro_ms, baro_window_ms, battery_ms, now_ms, power_state; /* 气压周期起点、气压窗口起点、电池节拍、当前毫秒、电源状态快照。 */
-    uint32_t period_ms = APP_SENSOR_TASK_PERIOD; /* 本轮调度周期，初值40ms。 */
+    uint32_t period_ms = APP_SENSOR_TASK_PERIOD; /* 本轮调度周期，初值25ms。 */
     app_heart_struct heart; /* 心率快照，供本任务做调度判断。 */
     uint8_t sleeping = 0, bus_parked = 0, environment_active = 0; /* 熄屏睡眠、总线已挂起、温湿度窗口激活标志。 */
     uint8_t sleep_requested, imu_active, bus_needed, imu_warming = 0; /* 睡眠请求、本轮是否用IMU、是否需要总线、IMU预热中。 */
@@ -475,14 +475,15 @@ static void app_sensor_task(void *pvParameters)
     uint8_t compass_active = 0, compass_requested, compass_pending = 1;
     uint8_t imu_retry_count = 0, imu_read_result;
     uint8_t heart_bus_used; /* 心率服务本拍是否占用了总线。 */
-    uint8_t imu_continuous, imu_background = 0, imu_mode_changed; /* 连续采样需求、后台5Hz模式、模式是否切换。 */
+    uint8_t imu_continuous, imu_background = 0, imu_mode_changed; /* 连续采样需求、后台40Hz模式、模式是否切换。 */
     uint8_t imu_reference = 0, reference_requested; /* 加速度参考模式当前值/请求值。 */
     uint8_t sporting = 0, sport_requested, sport_ready, sport_changed; /* 运动模式当前值、请求、可用条件、是否变化。 */
     uint8_t baro_active = 1, baro_read, baro_sleep_pending = 0, sleep_changed; /* 气压激活/本拍读气压/待写气压休眠/睡眠切换。 */
     uint32_t aht_period_ms = APP_AHT21_PERIOD_MS, requested_aht_period_ms; /* 温湿度当前周期与请求周期(ms)。 */
     uint32_t environment_ms = 0, window_ms = 0; /* 温湿度节拍起点与本次窗口起点。 */
-    uint32_t imu_cycle_ms = 0, imu_wake_ms = 0; /* 上次IMU采样时刻与预热起点。 */
+    uint32_t imu_wake_ms = 0; /* IMU预热起点。 */
     uint32_t imu_warmup_ms, imu_period_ms; /* 预热时长与本轮IMU采样周期(ms)。 */
+    uint32_t lvgl_notify_ms, wrist_sequence = 0, current_wrist_sequence;
 
     (void)pvParameters; /* 未使用任务参数。 */
     /* 记录sensor任务启动时刻到启动诊断。 */
@@ -520,7 +521,7 @@ static void app_sensor_task(void *pvParameters)
     battery_ms = HAL_GetTick();
     baro_ms = battery_ms;
     baro_window_ms = battery_ms; /* 启动先取得一帧，此后保持5分钟相位，屏幕切换不重排。 */
-    imu_cycle_ms = battery_ms;
+    lvgl_notify_ms = battery_ms;
     app_diag_boot_set(APP_BOOT_SAMPLING_BEGIN_MS, HAL_GetTick());
 
     for (;;)
@@ -559,9 +560,6 @@ static void app_sensor_task(void *pvParameters)
             sleeping = sleep_requested;
             /* 切换时清掉温湿度窗口，下一轮按新状态重新起窗口。 */
             environment_active = 0;
-            /* IMU周期与待取帧一起重置，避免跨状态沿用旧节拍或旧帧。 */
-            imu_cycle_ms = now_ms;
-            imu_sample_pending = 0;
             /* 把熄屏/亮屏状态交给心率模块，决定是否允许后台自动测量。 */
             app_heart_set_sleep_mode(sleeping);
             /* 由睡眠切回非睡眠时，若总线已被挂起则重新初始化。 */
@@ -658,18 +656,15 @@ static void app_sensor_task(void *pvParameters)
         {
             /* 记录新的后台模式值。 */
             imu_background = imu_continuous == 0;
-            /* 模式切换后重排采样起点；后台模式下先标一个待取帧，尽快取到第一帧。 */
-            imu_cycle_ms = now_ms;
+            /* 后台模式下先标一个待取帧，预热后读取。 */
             imu_sample_pending = imu_background;
-            /* 重新开始预热计时(100Hz等待10ms、5Hz等待200ms)。 */
+            /* 重新开始预热计时(100Hz等待10ms、40Hz等待25ms)。 */
             imu_wake_ms = now_ms;
             imu_warming = 1;
         }
-        /* 静止时也按200ms读取最新加速度，保持计步与辅助抬腕的5Hz输入。 */
-        if (imu_background != 0 && imu_sample_pending == 0 &&
-            (uint32_t)(now_ms - imu_cycle_ms) >= APP_SENSOR_BACKGROUND_IMU_PERIOD_MS)
+        /* 后台每轮25ms取新帧，避免墙钟抖动导致24<25而整拍跳读。 */
+        if (imu_background != 0 && imu_warming == 0)
         {
-            imu_cycle_ms = now_ms; /* 超期只取最新一帧，不补跑休眠期间的旧采样。 */
             imu_sample_pending = 1;
         }
         /* 本轮是否真的需要IMU：连续采样或存在待取帧。 */
@@ -731,13 +726,8 @@ static void app_sensor_task(void *pvParameters)
             heart_bus_used = app_heart_service();
             app_heart_get_snapshot(&heart); /* 本拍可能启动/结束自动测量，调度使用服务后的状态。 */
         }
-        /* 先按普通亮屏后台服务取40ms。 */
+        /* 普通亮屏后台服务取25ms。 */
         period_ms = APP_SENSOR_IDLE_PERIOD_MS;
-        /* 心率、指南针页或磁保存在途时保持对应的服务节拍。 */
-        if (heart.enabled != 0 || (power_state & APP_POWER_MOTION) != 0 || mag_saving != 0)
-        {
-            period_ms = APP_SENSOR_TASK_PERIOD;
-        }
         /* 运动模式或心率测量：再收紧到10ms。 */
         if (sporting != 0 || heart.enabled != 0)
         {
@@ -749,7 +739,7 @@ static void app_sensor_task(void *pvParameters)
             /* 默认沿用本拍调度周期，100Hz转换等待10ms。 */
             imu_period_ms = period_ms;
             imu_warmup_ms = 10;
-            /* 后台模式固定200ms采样，预热也取同一周期。 */
+            /* 后台模式固定25ms采样，预热也取同一周期。 */
             if (imu_background != 0)
             {
                 imu_period_ms = APP_SENSOR_BACKGROUND_IMU_PERIOD_MS;
@@ -762,15 +752,14 @@ static void app_sensor_task(void *pvParameters)
             {
                 period_ms = imu_period_ms;
             }
-            /* 后台模式只在200ms档且MPU未在恢复时读取；预热未结束则等满预热时长。 */
-            if ((imu_background == 0 || (imu_period_ms == 200 && mpu_recovery == 0)) &&
+            /* 后台模式在驱动切档及恢复完成后读取；预热未结束则等满预热时长。 */
+            if ((imu_background == 0 || (imu_period_ms == APP_SENSOR_BACKGROUND_IMU_PERIOD_MS && mpu_recovery == 0)) &&
                 (imu_warming == 0 || (uint32_t)(now_ms - imu_wake_ms) >= imu_warmup_ms))
             {
                 /* 预热结束，清标志。 */
                 imu_warming = 0;
                 /* 服务一轮IMU；本拍若心率占过总线则本轮延后磁读取。 */
                 imu_read_result = App_IMU_Service(0);
-                imu_cycle_ms = now_ms;
                 imu_sample_pending = 0;
                 if (imu_background != 0 && imu_read_result == MPU6050_DATA_NOT_READY && imu_retry_count < 2)
                 {
@@ -785,8 +774,7 @@ static void app_sensor_task(void *pvParameters)
         }
         else if (sleeping != 0)
         {
-            /* 不需要IMU且处于熄屏：按熄屏轮询节拍200ms等待。 */
-            period_ms = APP_SENSOR_SLEEP_POLL_MS;
+            period_ms = APP_SENSOR_BACKGROUND_IMU_PERIOD_MS;
         }
         /* 心率开启时统一用10ms，满足心率服务30ms读取下限的整除关系。 */
         if (heart.enabled != 0)
@@ -815,16 +803,16 @@ static void app_sensor_task(void *pvParameters)
         }
         if (sleeping != 0)
         {
-            /* 熄屏且无心率测量：按熄屏轮询节拍调度。 */
+            /* 熄屏且无心率测量：保持40Hz加速度节拍。 */
             if (heart.enabled == 0)
             {
-                period_ms = APP_SENSOR_SLEEP_POLL_MS;
+                period_ms = APP_SENSOR_BACKGROUND_IMU_PERIOD_MS;
             }
             /* 温湿度窗口激活：本拍服务一次温湿度。 */
             if (environment_active != 0)
             {
-                /* 无心率测量时把周期收紧到100ms，保证窗口内能推进转换步骤。 */
-                if (heart.enabled == 0)
+                /* 环境窗口只收紧慢周期，保持计步与心率已有的快速节拍。 */
+                if (period_ms > APP_SENSOR_ENVIRONMENT_POLL_MS)
                 {
                     period_ms = APP_SENSOR_ENVIRONMENT_POLL_MS;
                 }
@@ -835,8 +823,8 @@ static void app_sensor_task(void *pvParameters)
                     environment_active = 0;
                 }
             }
-            /* 气压窗口仍在等1.6s时，无心率测量则用100ms周期推进。 */
-            if (baro_active != 0 && heart.enabled == 0)
+            /* 气压窗口同样保留计步与心率的快速节拍。 */
+            if (baro_active != 0 && period_ms > APP_SENSOR_ENVIRONMENT_POLL_MS)
             {
                 period_ms = APP_SENSOR_ENVIRONMENT_POLL_MS;
             }
@@ -850,7 +838,7 @@ static void app_sensor_task(void *pvParameters)
             if (imu_continuous == 0 && environment_active == 0 && baro_active == 0 && baro_sleep_pending == 0 && imu_sample_pending == 0 && compass_active == 0 && compass_pending == 0 &&
                 app_heart_sleep_pending() == 0 && bus_parked == 0)
             {
-                /* MPU继续自主5Hz采样，磁力计已休眠；仅释放软件I2C引脚。 */
+                /* MPU继续自主40Hz采样，磁力计已休眠；仅释放软件I2C引脚。 */
                 my_i2c_suspend(MY_I2C_BUS_SENSOR);
                 bus_parked = 1;
             }
@@ -888,23 +876,27 @@ static void app_sensor_task(void *pvParameters)
             app_imu_activity_service();
             app_battery_log_service(app_uptime_get_seconds());
         }
-        if (compass_active != 0 && period_ms > 40)
+        if (compass_active != 0 && period_ms > APP_SENSOR_BACKGROUND_IMU_PERIOD_MS)
         {
-            period_ms = 40;
+            period_ms = APP_SENSOR_BACKGROUND_IMU_PERIOD_MS;
         }
-        if (imu_retry_count != 0 && period_ms > 20)
+        if (imu_retry_count != 0 && period_ms > 5)
         {
-            period_ms = 20;
+            period_ms = 5;
         }
         /* 记录本轮诊断结束及实际周期。 */
         app_diag_task_end(APP_DIAG_SENSOR_TASK, period_ms);
         /* 递增看门狗进度计数，表示本轮循环已完成。 */
         ++app_sensor_watchdog_progress;
-        /* 熄屏且本轮按熄屏节拍等待(或蓝牙还有待收字节)：通知LVGL推进一拍。 */
-        if (sleeping != 0 && (period_ms == APP_SENSOR_SLEEP_POLL_MS || kt6368a_rx_pending() != 0) && s_lvgl_task_handle != NULL)
+        /* LVGL每200ms服务；串口数据或新抬腕事件立即通知。 */
+        current_wrist_sequence = app_imu_wrist_sequence();
+        if (sleeping != 0 && ((uint32_t)(now_ms - lvgl_notify_ms) >= APP_SENSOR_SLEEP_POLL_MS ||
+            kt6368a_rx_pending() != 0 || current_wrist_sequence != wrist_sequence) && s_lvgl_task_handle != NULL)
         {
+            lvgl_notify_ms = now_ms;
             xTaskNotifyGive(s_lvgl_task_handle);
         }
+        wrist_sequence = current_wrist_sequence;
         now_tick = xTaskGetTickCount();
         /* 已超过一个周期：只让出1拍，以实际唤醒时刻重排，不补跑旧轮询或再等完整周期。 */
         if ((TickType_t)(now_tick - xLastWakeTime) >= pdMS_TO_TICKS(period_ms))

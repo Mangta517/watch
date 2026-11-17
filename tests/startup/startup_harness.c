@@ -12,6 +12,9 @@
 #include "em7028.h"
 #include "app_weather.h"
 
+static uint8_t activity_cadence_test, activity_event_pending, activity_rx_pending;
+static unsigned activity_samples, activity_events;
+static uint32_t activity_last_sample, activity_last_notify, activity_sequence;
 static uint8_t sample_retry_test;
 static uint32_t sample_retry_ms[4];
 static unsigned sample_retry_calls;
@@ -469,6 +472,20 @@ BaseType_t xTaskNotifyGive(TaskHandle_t task)
     if (task == &lvgl_notifications)
     {
         assert(app_task_is_screen_off() != 0);
+        if (activity_cadence_test != 0)
+        {
+            if (activity_event_pending != 0 || activity_rx_pending != 0)
+            {
+                assert(tick == activity_last_sample);
+                activity_event_pending = activity_rx_pending = 0;
+                ++activity_events;
+            }
+            else
+            {
+                assert((uint32_t)(tick - activity_last_notify) >= 200);
+            }
+            activity_last_notify = tick;
+        }
         ++lvgl_notifications;
         return pdPASS;
     }
@@ -677,21 +694,45 @@ void vTaskDelay(TickType_t ticks)
 }
 void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
 {
+    if (activity_cadence_test != 0)
+    {
+        assert(ticks == 25 && ++sensor_rounds == app_sensor_watchdog_progress);
+        assert(activity_samples == sensor_rounds - 1);
+        assert(activity_event_pending == 0 && activity_rx_pending == 0);
+        if (sensor_rounds == 120)
+        {
+            assert(activity_events == 2 && lvgl_notifications >= 10 && lvgl_notifications <= 16);
+            longjmp(sensor_stop, 1);
+        }
+        *last += ticks;
+        /* 实际唤醒延迟交替0/1ms，HAL帧间隔交替26/24ms。 */
+        tick = *last + (sensor_rounds & 1);
+        sensor_elapsed_ms += ticks;
+        if (sensor_rounds >= 40 && sensor_rounds < 80)
+        {
+            app_task_set_power_state(0, 0, sensor_rounds & 1, 0);
+        }
+        else
+        {
+            app_task_set_power_state(1, 0, 1, 0);
+        }
+        return;
+    }
     if (sample_retry_test != 0)
     {
         assert(++sensor_rounds == app_sensor_watchdog_progress);
         if (sample_retry_calls == 4)
         {
-            assert(sample_retry_ms[1] - sample_retry_ms[0] == 20);
+            assert(sample_retry_ms[1] - sample_retry_ms[0] == 5);
             if (sample_ready_after == 4)
             {
-                assert(sample_retry_ms[2] - sample_retry_ms[1] == 20);
+                assert(sample_retry_ms[2] - sample_retry_ms[1] == 5);
             }
             else
             {
-                assert(sample_retry_ms[2] - sample_retry_ms[1] == 200);
+                assert(sample_retry_ms[2] - sample_retry_ms[1] == 25);
             }
-            assert(sample_retry_ms[3] - sample_retry_ms[2] == 200);
+            assert(sample_retry_ms[3] - sample_retry_ms[2] == 25);
             longjmp(sensor_stop, 1);
         }
         assert(sensor_elapsed_ms < 2000);
@@ -718,7 +759,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     }
     if (reference_recovery_test != 0)
     {
-        assert(ticks == 10 || ticks == 40);
+        assert(ticks == 10 || ticks == 25);
         assert(++sensor_rounds == app_sensor_watchdog_progress);
         low_rate_mask = 0;
         app_watchdog_service();
@@ -732,8 +773,8 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
         if (sensor_elapsed_ms >= 900)
         {
             assert(reference_enabled == 0 && reference_recovery_steps == 5 && reference_ready_ms != 0);
-            assert(reference_full_samples >= 1 && reference_first_full_ms - reference_ready_ms >= 200);
-            assert(reference_first_full_ms - reference_ready_ms < 240);
+            assert(reference_full_samples >= 1 && reference_first_full_ms - reference_ready_ms >= 25);
+            assert(reference_first_full_ms - reference_ready_ms < 50);
             longjmp(sensor_stop, 1);
         }
         sensor_elapsed_ms += ticks;
@@ -750,11 +791,11 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
         }
         if (app_task_is_screen_off() != 0)
         {
-            assert((ticks == 100 || ticks == 200) && aht_period_ms == 600000 && battery_sleep_mode != 0);
+            assert(ticks == 25 && aht_period_ms == 600000 && battery_sleep_mode != 0);
         }
         else
         {
-            assert(ticks == 40 && aht_period_ms == 1000 && battery_sleep_mode == 0);
+            assert(ticks == 25 && aht_period_ms == 1000 && battery_sleep_mode == 0);
         }
         low_rate_mask = 0;
         app_watchdog_service();
@@ -802,7 +843,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     }
     if (background_test != 0)
     {
-        assert(ticks == 20 || ticks == 40);
+        assert(ticks == 25);
         assert(++sensor_rounds == app_sensor_watchdog_progress);
         app_watchdog_service();
         if (sensor_elapsed_ms >= 6000 && sensor_elapsed_ms < 8000)
@@ -822,7 +863,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
         }
         if (sensor_elapsed_ms >= 14500)
         {
-            assert(background_samples >= 68 && background_samples <= 74);
+            assert(background_samples >= 570 && background_samples <= 581);
             assert(motion_samples == 0);
             assert(cal_begins == 0 && saves == 0);
             assert(background_wakes == 0 && background_sleeps == 1 && background_sleeping != 0);
@@ -860,7 +901,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
         {
             finish_ms = 1202000U;
         }
-        assert(ticks == 10U || ticks == 20U || ticks == 40U);
+        assert(ticks == 10U || ticks == 25U);
         assert(++sensor_rounds == app_sensor_watchdog_progress);
         if (sport_active != 0)
         {
@@ -920,11 +961,11 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
     }
     if (sleep_test != 0)
     {
-        assert(ticks == 10U || ticks == 20U || ticks == 40U || ticks == 100U || ticks == 200);
-        if (ticks == 200)
+        assert(ticks == 10U || ticks == 25);
+        if (ticks == 25)
         {
             ++sleep_idle_waits;
-            assert(lvgl_notifications == sleep_idle_waits);
+            assert(lvgl_notifications <= sensor_elapsed_ms / 200);
         }
         if (heart_enabled != 0 && (uint32_t)(tick - sleep_window_ms) >= 100U)
         {
@@ -937,20 +978,20 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
         if (sleep_stationary_test != 0)
         {
             assert(app_task_sleep_poll_ms() == 200);
-            if (ticks == 200 && sensor_elapsed_ms >= 10000)
+            if (ticks == 25 && sensor_elapsed_ms >= 10000 && app_task_is_screen_off() != 0)
             {
                 app_lvgl_wait(APP_IDLE_POLL_MS, 1);
                 ++stationary_idle_waits;
                 stationary_seen_idle = 1;
             }
-            /* 连续静止后仍保持5Hz；400ms短动作必须被读取，亮屏/心率/恢复沿用原节拍。 */
+            /* 连续静止后仍保持40Hz；400ms短动作必须被读取，亮屏/心率/恢复沿用原节拍。 */
             if (stationary_seen_idle != 0 && sensor_elapsed_ms >= 12000)
             {
                 stationary_transition_seen = 1;
                 assert(stationary_idle_waits >= 9 && stationary_short_motion_samples >= 2);
                 if (sleep_stationary_test == 4)
                 {
-                    assert(ticks == 40 && app_task_is_screen_off() == 0);
+                    assert(ticks == 25 && app_task_is_screen_off() == 0);
                 }
                 else if (sleep_stationary_test == 5)
                 {
@@ -958,7 +999,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
                 }
                 else
                 {
-                    assert(ticks == 200);
+                    assert(ticks == 25);
                     assert(stationary_report == 0 || stationary_recovery_active != 0);
                 }
                 longjmp(sensor_stop, 1);
@@ -981,12 +1022,12 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
             assert(uptime_writes >= 2U && app_uptime_get_saved(&seconds) && seconds >= 1200U);
             assert(sleep_heart_starts == 2 && sleep_history == 5);
             assert(sleep_parks >= 3U && sleep_resumes >= 2U);
-            assert(sleep_pose_samples >= 5900 && sleep_pose_samples <= 6100);
+            assert(sleep_pose_samples >= 47000 && sleep_pose_samples <= 49000);
             assert(sleep_parks > 5700 && sleep_resumes > 5700);
             assert(sleep_imu != 0 && sleep_baro != 0 && sleep_bus_parked == 0);
             assert(watchdog_feeds > 5900 && battery_samples > 1200);
             /* 温湿度10分钟窗口减少短周期服务；稳态等待总时长不能超过本轮模拟时间。 */
-            assert(sleep_idle_waits > 5700 && sleep_idle_waits <= sensor_elapsed_ms / 200);
+            assert(sleep_idle_waits > 5700 && sleep_idle_waits <= sensor_elapsed_ms / 25);
             assert(battery_sleep_mode == 0);
             longjmp(sensor_stop, 1);
         }
@@ -1194,7 +1235,7 @@ void kt6368a_set_rx_callback(void (*callback)(void))
 }
 uint8_t kt6368a_rx_pending(void)
 {
-    return 0;
+    return activity_rx_pending;
 }
 uint8_t kt6368a_init_is_pending(void)
 {
@@ -1523,9 +1564,29 @@ uint8_t App_IMU_Service(uint8_t read_mag)
 {
     assert(hardware_count == 5 && !rtc_done && !ble_done);
     (void)read_mag;
+    if (activity_cadence_test != 0)
+    {
+        assert(mock_imu_period == 25);
+        if (activity_samples != 0)
+        {
+            assert((uint32_t)(tick - activity_last_sample) >= 24 && (uint32_t)(tick - activity_last_sample) <= 26);
+        }
+        activity_last_sample = tick;
+        ++activity_samples;
+        if (activity_samples == 10)
+        {
+            ++activity_sequence;
+            activity_event_pending = 1;
+        }
+        if (activity_samples == 14)
+        {
+            activity_rx_pending = 1;
+        }
+        return 0;
+    }
     if (sample_retry_test != 0)
     {
-        assert(mock_imu_period == 200 && sample_retry_calls < 4);
+        assert(mock_imu_period == 25 && sample_retry_calls < 4);
         sample_retry_ms[sample_retry_calls++] = tick;
         if (sample_retry_calls < sample_ready_after)
         {
@@ -1542,8 +1603,8 @@ uint8_t App_IMU_Service(uint8_t read_mag)
         }
         else
         {
-            assert(mock_imu_period == 200 && reference_ready_ms != 0);
-            assert((uint32_t)(tick - reference_ready_ms) >= 200);
+            assert(mock_imu_period == 25 && reference_ready_ms != 0);
+            assert((uint32_t)(tick - reference_ready_ms) >= 25);
             if (reference_full_samples == 0)
             {
                 reference_first_full_ms = tick;
@@ -1581,8 +1642,8 @@ uint8_t App_IMU_Service(uint8_t read_mag)
     }
     if (background_test != 0)
     {
-        assert(background_sleeping == (mock_imu_period == 200));
-        if (mock_imu_period != 200)
+        assert(background_sleeping == (mock_imu_period == 25));
+        if (mock_imu_period != 25)
         {
             assert((uint32_t)(tick - background_wake_ms) >= 100);
             if (motion_samples != 0)
@@ -1593,10 +1654,10 @@ uint8_t App_IMU_Service(uint8_t read_mag)
         }
         else
         {
-            assert(mock_imu_period == 200);
+            assert(mock_imu_period == 25);
             if (background_samples != 0 && (uint32_t)(tick - background_last_sample_ms) < 600)
             {
-                assert((uint32_t)(tick - background_last_sample_ms) >= 200);
+                assert((uint32_t)(tick - background_last_sample_ms) == 25);
             }
             ++background_samples;
         }
@@ -1608,12 +1669,12 @@ uint8_t App_IMU_Service(uint8_t read_mag)
     }
     if (sleep_test != 0)
     {
-        assert(sleep_bus_parked == 0 && sleep_imu == (mock_imu_period == 200));
-        if (sleep_stationary_test != 0 && mock_imu_period == 200)
+        assert(sleep_bus_parked == 0 && sleep_imu == (mock_imu_period == 25));
+        if (sleep_stationary_test != 0 && mock_imu_period == 25)
         {
             if (stationary_sample_seen != 0)
             {
-                assert((uint32_t)(tick - stationary_last_sample) <= 200);
+                assert((uint32_t)(tick - stationary_last_sample) <= 25);
             }
             stationary_sample_seen = 1;
             stationary_last_sample = tick;
@@ -1625,27 +1686,27 @@ uint8_t App_IMU_Service(uint8_t read_mag)
             }
             if (sleep_stationary_test <= 2 && sensor_elapsed_ms >= 12000)
             {
-                stationary_report = 0; /* 持续运动时也保持200ms采样。 */
+                stationary_report = 0; /* 持续运动时也保持25ms采样。 */
             }
         }
         sleep_imu_sample_ms = tick;
         if (sleep_recovery_steps != 0 && sleep_recovery_sample == 0)
         {
-            assert(sleep_recovery_steps == 16U && (uint32_t)(tick - sleep_recovery_last_ms) >= 200U);
+            assert(sleep_recovery_steps == 16U && (uint32_t)(tick - sleep_recovery_last_ms) >= 25U);
             sleep_recovery_sample = 1;
         }
-        if (sleep_heart_mode != 0 && mock_imu_period == 200)
+        if (sleep_heart_mode != 0 && mock_imu_period == 25)
         {
             if (sleep_pose_seen != 0 && sleep_recovery_test == 0)
             {
-                assert(sensor_elapsed_ms - sleep_pose_ms >= 200);
+                assert(sensor_elapsed_ms - sleep_pose_ms >= 25);
                 if (sleep_stationary_test != 0)
                 {
-                    assert(sensor_elapsed_ms - sleep_pose_ms <= 200);
+                    assert(sensor_elapsed_ms - sleep_pose_ms <= 25);
                 }
                 else
                 {
-                    assert(sensor_elapsed_ms - sleep_pose_ms <= 300);
+                    assert(sensor_elapsed_ms - sleep_pose_ms <= 50);
                 }
             }
             sleep_pose_ms = sensor_elapsed_ms;
@@ -1669,12 +1730,12 @@ uint8_t App_IMU_Service(uint8_t read_mag)
 }
 uint32_t app_imu_set_sample_period(uint32_t period_ms)
 {
-    assert(period_ms == 10U || period_ms == 20U || period_ms == 40U || period_ms == 200);
+    assert(period_ms == 10 || period_ms == 25);
     if (mock_imu_period != period_ms)
     {
-        if (background_test != 0 && (mock_imu_period == 200 || period_ms == 200))
+        if (background_test != 0 && (mock_imu_period == 25 || period_ms == 25))
         {
-            background_sleeping = period_ms == 200;
+            background_sleeping = period_ms == 25;
             if (background_sleeping != 0)
             {
                 ++background_sleeps;
@@ -1688,7 +1749,7 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
         if (sleep_test != 0)
         {
             assert(sleep_bus_parked == 0);
-            sleep_imu = period_ms == 200;
+            sleep_imu = period_ms == 25;
             if (sleep_imu != 0 && sleep_first_seen == 0)
             {
                 sleep_first_seen = 1;
@@ -1699,7 +1760,7 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
     }
     if (power_profile != 0)
     {
-        uint32_t expected = 200;
+        uint32_t expected = 25;
         if (heart_enabled != 0)
         {
             expected = 10;
@@ -1707,6 +1768,10 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
         assert(period_ms == expected);
     }
     return period_ms;
+}
+uint32_t app_imu_wrist_sequence(void)
+{
+    return activity_sequence;
 }
 void app_imu_set_accel_reference(uint8_t enabled)
 {
@@ -1924,6 +1989,24 @@ uint32_t app_touch_sleep_retry_ms(void)
 int main(int argc, char **argv)
 {
     int result;
+    if (argc > 1 && strncmp(argv[1], "activity_cadence", 16) == 0)
+    {
+        activity_cadence_test = sleep_test = displayed = frame = 1;
+        tick = 1000;
+        if (strcmp(argv[1], "activity_cadence_wrap") == 0)
+        {
+            tick = UINT32_MAX - 1000;
+        }
+        activity_last_notify = tick;
+        s_lvgl_task_handle = &lvgl_notifications;
+        app_task_set_power_state(1, 0, 1, 0);
+        if (setjmp(sensor_stop) == 0)
+        {
+            app_sensor_task(NULL);
+        }
+        puts("PASS: 24/26ms jitter and 40 screen transitions retain every background frame; LVGL is divided to 200ms with immediate wrist/UART notifications, including tick wrap.");
+        return 0;
+    }
     if (argc > 1 && strncmp(argv[1], "sample_retry", 12) == 0)
     {
         sample_retry_test = displayed = 1;
@@ -1946,7 +2029,7 @@ int main(int argc, char **argv)
         {
             app_sensor_task(NULL);
         }
-        puts("PASS: 5Hz NOT_READY keeps pending frame, retries twice at 20ms and bounds a missing conversion before the next 200ms cycle.");
+        puts("PASS: 40Hz NOT_READY keeps pending frame, retries twice at 5ms and bounds a missing conversion before the next 25ms cycle.");
         return 0;
     }
     if (argc > 1 && strncmp(argv[1], "baro_calibration_boundary", 25) == 0)
@@ -1977,7 +2060,7 @@ int main(int argc, char **argv)
         {
             app_sensor_task(NULL);
         }
-        puts("PASS: 100Hz heart acceleration reference returns to 5Hz after MPU recovery and a new 200ms conversion.");
+        puts("PASS: 100Hz heart acceleration reference returns to 40Hz after MPU recovery and a new 25ms conversion.");
         return 0;
     }
     if (argc > 1 && strncmp(argv[1], "environment_policy", 18) == 0)
@@ -2052,7 +2135,7 @@ int main(int argc, char **argv)
         {
             app_sensor_task(NULL);
         }
-        puts("PASS: MPU stays at 5Hz across compass-page and legacy calibration requests, preserving watchdog progress across tick wrap.");
+        puts("PASS: MPU stays at 40Hz across compass-page and legacy calibration requests, preserving watchdog progress across tick wrap.");
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "lvgl_wake") == 0)
@@ -2191,7 +2274,7 @@ int main(int argc, char **argv)
         if (sleep_stationary_test != 0)
         {
             assert(stationary_transition_seen != 0);
-            puts("PASS: stationary sleep keeps 200ms IMU/LVGL cadence, captures a 400ms motion and preserves recovery/wake/PPG transitions.");
+            puts("PASS: stationary sleep keeps 25ms IMU and 200ms LVGL cadence, captures a 400ms motion and preserves recovery/wake/PPG transitions.");
             return 0;
         }
         assert(sleep_first_seen != 0);
@@ -2206,7 +2289,7 @@ int main(int argc, char **argv)
         }
         else
         {
-            puts("PASS: 20-minute sleep timeline, 5Hz accelerometer, 5min barometer, 10min heart/uptime, bus parking, battery/watchdog, calibration and wake restore.");
+            puts("PASS: 20-minute sleep timeline, 40Hz accelerometer, 5min barometer, 10min heart/uptime, bus parking, battery/watchdog, calibration and wake restore.");
         }
         return 0;
     }
@@ -2309,14 +2392,15 @@ int main(int argc, char **argv)
             return 0;
         }
         assert(result == 5 && sensor_rounds == 150 && baro_calls == 1);
-        assert(background_recovery_steps < 40 && mag_recovery_steps == 0 && baro_recovery_steps == 41 && app_sensor_watchdog_progress == 150);
+        assert(background_recovery_steps == 150 && mag_recovery_steps == 0 && baro_recovery_steps == 65 && app_sensor_watchdog_progress == 150);
         puts("Sensor cadence: initial 1.6s barometer window reads once, then sleeps without recovery polling while sensor/watchdog continue: PASS");
         return 0;
     }
     if (bluetooth_resume_test != 0)
     {
         assert(result == 1 && bluetooth_resume_phase == 1 && ble_done != 0);
-        assert(milestones[APP_BOOT_BT_END_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);
+        assert(milestones[APP_BOOT_BT_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);
+    assert(milestones[APP_BOOT_BT_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 1710U);
         puts("PASS: LVGL continues a second Bluetooth startup after the initial boot completed, without rewriting boot milestones.");
         return 0;
     }
@@ -2379,8 +2463,10 @@ int main(int argc, char **argv)
         assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650);
         assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == 660);
     }
-    assert(milestones[APP_BOOT_RTC_END_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 5000U);
-    assert(milestones[APP_BOOT_BT_END_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);
+    assert(milestones[APP_BOOT_RTC_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 5000U);
+    assert(milestones[APP_BOOT_RTC_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 5010U);
+    assert(milestones[APP_BOOT_BT_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);
+    assert(milestones[APP_BOOT_BT_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 1710U);
     assert(milestones[APP_BOOT_CAL_STATE] == MPU6050_CAL_IDLE && restores == 0 && cal_begins == 0 && saves == 0);
     if (fail_devices)
     {

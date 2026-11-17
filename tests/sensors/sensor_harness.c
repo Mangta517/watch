@@ -1916,113 +1916,300 @@ static void uptime_tests(void)
 static void activity_sample(common_activity_struct *state, float ax, float ay, float az, uint32_t *now)
 {
     common_activity_update(state, ax, ay, az, *now);
-    *now += 200;
+    *now += 25;
+}
+
+static uint32_t activity_gait(float rate, unsigned phase, unsigned kind, uint32_t now, uint8_t cold)
+{
+    common_activity_struct state = {0};
+    unsigned elapsed, duration = (unsigned)(20000.0f / rate), delay_ms = 0;
+    float angle, cycle, magnitude, ax;
+    if (kind >= 2)
+    {
+        /* 20个完整脉冲，改变启动相位并保留前后的静止区。 */
+        delay_ms = (unsigned)(1000.0f / rate * phase / 40.0f);
+        duration += delay_ms;
+    }
+    if (cold == 0)
+    {
+        for (elapsed = 0; elapsed < 1000; elapsed += 25)
+        {
+            activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+        }
+    }
+    for (elapsed = 0; elapsed < duration; elapsed += 25)
+    {
+        cycle = rate * (float)elapsed / 1000.0f + (float)phase / 40.0f;
+        if (kind >= 2)
+        {
+            cycle = rate * ((float)elapsed - (float)delay_ms) / 1000.0f;
+        }
+        angle = cycle * 6.2831853f;
+        magnitude = 1.0f + 0.15f * sinf(angle);
+        ax = 0.0f;
+        if (kind == 1)
+        {
+            ax = 0.30f * sinf(angle);
+            magnitude = 1.0f + 0.08f * cosf(angle);
+        }
+        else if (kind == 2)
+        {
+            magnitude = 1.0f;
+            if (elapsed >= delay_ms && cycle - floorf(cycle) < 0.12f * rate)
+            {
+                magnitude = 1.15f;
+            }
+        }
+        else if (kind == 3)
+        {
+            magnitude = 1.0f;
+            if (elapsed >= delay_ms && sinf(angle) > 0.0f)
+            {
+                magnitude += 2.2f * sinf(angle);
+            }
+        }
+        activity_sample(&state, ax, 0.0f, -magnitude, &now);
+    }
+    /* 步行停止后继续采样，允许末步滤波与回落确认完成。 */
+    for (elapsed = 0; elapsed < 500; elapsed += 25)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    return state.steps;
+}
+
+static void activity_pulses(common_activity_struct *state, uint32_t *now, unsigned count, unsigned period_ms, float amplitude)
+{
+    unsigned elapsed;
+    float magnitude;
+    for (elapsed = 0; elapsed < count * period_ms; elapsed += 25)
+    {
+        magnitude = 1.0f;
+        if (elapsed % period_ms < 125)
+        {
+            magnitude += amplitude;
+        }
+        activity_sample(state, 0.0f, 0.0f, -magnitude, now);
+    }
+}
+
+static void activity_response_tests(void)
+{
+    common_activity_struct state = {0};
+    uint32_t now = UINT32_MAX - 1000;
+    unsigned i, cycle, axis;
+    float angle, magnitude, accel[3];
+    for (i = 0; i < 40; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    activity_pulses(&state, &now, 2, 500, 0.20f);
+    assert(state.steps == 0 && state.walking_run == 2);
+    for (i = 0; i < 20; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    assert(state.still != 0 && state.walking_run == 0 && state.peak_pending == 0);
+    activity_pulses(&state, &now, 1, 500, 0.20f);
+    assert(state.steps == 0);
+    puts("PASS: two pending steps expire after a quiet stop; a later isolated movement cannot release old steps across tick wrap.");
+
+    memset(&state, 0, sizeof(state));
+    for (i = 0; i < 40; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    activity_pulses(&state, &now, 10, 500, 0.20f);
+    assert(state.steps == 10 && state.walking_confirmed != 0);
+    for (i = 0; i < 20; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    assert(state.walking_run == 0 && state.walking_confirmed == 0);
+    for (i = 0; i < 20; ++i)
+    {
+        activity_sample(&state, 0.0f, 1.2f, 0.0f, &now);
+    }
+    for (i = 0; i < 20; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    assert(state.steps == 10);
+    puts("PASS: ten confirmed steps followed by a stop and wrist raise retain exactly ten steps.");
+
+    memset(&state, 0, sizeof(state));
+    for (i = 0; i < 40; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    activity_pulses(&state, &now, 4, 500, 0.13f);
+    assert(state.steps == 0 && state.walking_run == 4);
+    activity_pulses(&state, &now, 1, 500, 0.13f);
+    assert(state.steps == 5 && state.walking_confirmed != 0);
+    puts("PASS: weak periodic pulses require five candidates and backfill once.");
+
+    memset(&state, 0, sizeof(state));
+    for (i = 0; i < 40; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    for (cycle = 0; cycle < 20; ++cycle)
+    {
+        activity_pulses(&state, &now, 1, 400, 0.20f);
+        activity_pulses(&state, &now, 1, 1100, 0.20f);
+    }
+    assert(state.steps == 0);
+    puts("PASS: irregular strong movements cannot form a confirmed walking cadence.");
+
+    memset(&state, 0, sizeof(state));
+    for (i = 0; i < 12000; ++i)
+    {
+        angle = (float)i * 6.2831853f / 17.0f;
+        magnitude = 1.0f + 0.025f * sinf(angle);
+        if (i % 29 < 3)
+        {
+            magnitude += 0.085f;
+        }
+        activity_sample(&state, 0.02f * sinf(angle), 0.02f * cosf(angle), -magnitude, &now);
+    }
+    assert(state.steps == 0);
+    puts("PASS: five minutes of synthetic desk micro-movements and short taps count zero steps.");
+
+    memset(&state, 0, sizeof(state));
+    for (cycle = 0; cycle < 20; ++cycle)
+    {
+        for (i = 0; i < 64; ++i)
+        {
+            angle = 0.0f;
+            if (i >= 20 && i < 32)
+            {
+                angle = (float)(i - 20) * 1.5707963f / 12.0f;
+            }
+            else if (i >= 32 && i < 52)
+            {
+                angle = 1.5707963f;
+            }
+            else if (i >= 52)
+            {
+                angle = (float)(64 - i) * 1.5707963f / 12.0f;
+            }
+            magnitude = 1.0f + 0.20f * sinf(2.0f * angle);
+            activity_sample(&state, 0.0f, magnitude * cosf(angle), -magnitude * sinf(angle), &now);
+        }
+    }
+    assert(state.steps == 0 && state.wrist_sequence != 0);
+    puts("PASS: repeated raise/lower wrist rotations with transient acceleration count zero steps and retain wrist wake events.");
+
+    for (axis = 0; axis < 6; ++axis)
+    {
+        memset(&state, 0, sizeof(state));
+        for (i = 0; i < 40 + 480 + 20; ++i)
+        {
+            magnitude = 1.0f;
+            if (i >= 40 && i < 520)
+            {
+                magnitude += 0.15f * sinf(6.2831853f * (float)(i - 40) / 24.0f);
+            }
+            accel[0] = accel[1] = accel[2] = 0.0f;
+            accel[axis / 2] = magnitude;
+            if (axis % 2 != 0)
+            {
+                accel[axis / 2] = -magnitude;
+            }
+            activity_sample(&state, accel[0], accel[1], accel[2], &now);
+        }
+        assert(state.steps >= 19 && state.steps <= 20);
+    }
+    puts("PASS: identical step impacts remain countable with gravity along all six sensor directions.");
 }
 
 static void activity_tests(void)
 {
-    common_activity_struct state = {0}, wrapped = {0};
-    static const float walking[] = {1.25f, 1.0f, 0.75f, 1.0f};
-    uint32_t now = 0, wrap = UINT32_MAX - 1000;
-    unsigned i, sample, before;
+    static const float rates[] = {1.25f, 1.5f, 1.8f, 2.0f, 2.2f, 2.5f};
+    common_activity_struct state = {0};
+    uint32_t now = UINT32_MAX - 1000, before;
+    unsigned i, phase, kind, rate, cold, steps, lowest, highest;
+    for (kind = 0; kind < 4; ++kind)
+    {
+        for (rate = 0; rate < sizeof(rates) / sizeof(rates[0]); ++rate)
+        {
+            lowest = 100;
+            highest = 0;
+            for (cold = 0; cold < 2; ++cold)
+            {
+                for (phase = 0; phase < 40; ++phase)
+                {
+                    steps = activity_gait(rates[rate], phase, kind, UINT32_MAX - 1000, cold);
+                    if (steps < lowest)
+                    {
+                        lowest = steps;
+                    }
+                    if (steps > highest)
+                    {
+                        highest = steps;
+                    }
+                }
+            }
+            printf("gait kind=%u rate=%.2f, 40 phases warm/cold: %u..%u / 20\n", kind, rates[rate], lowest, highest);
+            assert(lowest >= 19 && highest <= 20);
+        }
+    }
+    for (phase = 0; phase < 40; ++phase)
+    {
+        memset(&state, 0, sizeof(state));
+        for (i = 0; i < 1600; ++i)
+        {
+            activity_sample(&state, 0.0f, 0.0f, -(1.0f + 0.5f * sinf(6.2831853f * (17.0f * i / 40.0f + phase / 40.0f))), &now);
+        }
+        assert(state.steps == 0);
+    }
+    memset(&state, 0, sizeof(state));
+    for (i = 0; i < 100; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    activity_sample(&state, 0.0f, 0.0f, -3.2f, &now);
     for (i = 0; i < 100; ++i)
     {
         activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
     }
     assert(state.steps == 0 && state.wrist_sequence == 0);
-    activity_sample(&state, 0.0f, 0.0f, -1.25f, &now);
-    activity_sample(&state, 0.0f, 0.0f, -0.75f, &now);
-    for (i = 0; i < 15; ++i)
+    for (i = 0; i < 17; ++i)
     {
-        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
-    }
-    assert(state.steps == 0);
-    memset(&state, 0, sizeof(state));
-    activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
-    activity_sample(&wrapped, 0.0f, 0.0f, -1.0f, &wrap);
-    for (i = 0; i < 20; ++i)
-    {
-        for (sample = 0; sample < 4; ++sample)
+        activity_sample(&state, 0.0f, 1.0f, 0.0f, &now);
+        if (i < 16)
         {
-            activity_sample(&state, 0.0f, -walking[sample], 0.0f, &now);
-            activity_sample(&wrapped, 0.0f, -walking[sample], 0.0f, &wrap);
+            assert(state.wrist_armed == 0);
         }
     }
-    assert(state.steps == 20 && wrapped.steps == state.steps);
-    before = state.steps;
-    for (i = 0; i < 100; ++i)
-    {
-        common_activity_update(&state, 0.0f, 0.0f, -1.5f, state.sample_ms);
-    }
-    assert(state.steps == before);
-    for (i = 0; i < 3; ++i)
-    {
-        activity_sample(&state, 0.0f, -1.0f, 0.0f, &now);
-    }
-    for (i = 0; i < 12; ++i)
+    assert(state.wrist_armed != 0);
+    for (i = 0; i < 17; ++i)
     {
         activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
-    }
-    assert(state.wrist_sequence == 1 && state.steps == before);
-    for (i = 0; i < 4; ++i)
-    {
-        activity_sample(&state, 0.0f, 0.0f, 1.0f, &now);
+        if (i < 16)
+        {
+            assert(state.wrist_sequence == 0);
+        }
     }
     assert(state.wrist_sequence == 1);
-    for (i = 0; i < 3; ++i)
+    for (i = 0; i < 100; ++i)
     {
         activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
     }
-    assert(state.wrist_sequence == 2);
-    common_activity_update(&state, 0.0f, 0.0f, -1.0f, now + 10000);
-    assert(state.steps == before && state.wrist_sequence == 2 && state.wrist_armed == 0);
-    /* 600ms边界及跨tick回绕断采，累计计步和抬腕仍保留。 */
-    state.sample_ms = UINT32_MAX - 300;
-    state.peak_pending = 1;
-    state.peak_ms = state.sample_ms;
-    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 600);
-    assert(state.peak_pending == 1);
+    assert(state.wrist_sequence == 1 && state.steps == 0);
+    before = state.sample_ms;
+    common_activity_update(&state, 0.0f, 0.0f, -1.5f, before);
+    common_activity_update(&state, 0.0f, 0.0f, -1.5f, before + 10);
+    assert(state.sample_ms == before);
+    state.steps = 123;
+    common_activity_update(&state, 0.0f, 0.0f, -1.0f, before + 600);
+    state.peak_pending = state.walking_run = state.wrist_armed = 1;
     common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 601);
-    assert(state.peak_pending == 0 && state.wrist_armed == 0);
-    assert(state.steps == before && state.wrist_sequence == 2);
-    puts("PASS: stationary and isolated impacts do not count; 20 walking cycles count 20 across tick wrap; fresh down-to-view poses emit one raise and rearm.");
-
-    state.walking_run = 3;
-    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 199);
-    assert(state.walking_run == 3);
-    before = state.steps;
-    common_activity_update(&state, 0.0f, 0.0f, -2.5f, state.sample_ms + 199);
-    assert(state.have_sample != 0 && state.walking_run == 3 && state.steps == before);
-    common_activity_update(&state, 0.0f, 0.0f, -1.0f, state.sample_ms + 199);
-    assert(state.walking_run == 3);
-    /* 看表慢走小幅值步态、偶发浅谷漏检后新波峰刷新及150ms重试追赶帧。 */
-    memset(&state, 0, sizeof(state));
-    now = 1000;
-    activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
-    for (i = 0; i < 6; ++i)
-    {
-        activity_sample(&state, 0.0f, 0.0f, -1.08f, &now);
-        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
-        activity_sample(&state, 0.0f, 0.0f, -0.96f, &now);
-        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
-    }
-    assert(state.steps == 6 && state.walking_run == 3);
-    /* 中间一步正峰后负谷过浅(-0.99g)，紧跟下一步150ms追赶正峰+负谷：刷新peak_ms且不丢连续步态。 */
-    activity_sample(&state, 0.0f, 0.0f, -1.10f, &now);
-    activity_sample(&state, 0.0f, 0.0f, -0.99f, &now);
-    activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
-    common_activity_update(&state, 0.0f, 0.0f, -1.12f, state.sample_ms + 150);
-    assert(state.peak_pending == 1 && state.walking_run == 3);
-    common_activity_update(&state, 0.0f, 0.0f, -0.95f, state.sample_ms + 200);
-    assert(state.steps == 7 && state.walking_run == 3);
-    puts("PASS: 199ms/150ms cadence, gentle watch-viewing gait, missed-trough peak refresh and isolated 2.5g impact preserve continuous gait.");
+    assert(state.peak_pending == 0 && state.walking_run == 0 && state.wrist_armed == 0);
+    assert(state.steps == 123 && state.wrist_sequence == 1);
+    puts("PASS: 40Hz phase/cold-start gait, horizontal swing, 120ms pulses, 3.2g running, 17Hz rejection, impact, timed wrist, duplicate and gap/wrap checks.");
+    activity_response_tests();
 }
-
-
-
-
-
-
 
 static uint16_t boot_step_day, last_step_day;
 static uint32_t boot_steps, last_steps;
@@ -2098,7 +2285,7 @@ static void independent_tests(void)
     app_imu_struct snapshot;
     unsigned i, frames, transactions;
     independent_setup();
-    assert(regs[MPU6050_ADDR][0x6B] == 0x28 && regs[MPU6050_ADDR][0x6C] == 0x47);
+    assert(regs[MPU6050_ADDR][0x6B] == 0x28 && regs[MPU6050_ADDR][0x6C] == 0xC7);
     assert(App_IMU_Service(0) == 0 && mpu_last_frame_size == 7);
     fail_dev = MPU6050_ADDR;
     for (i = 0; i < 12; ++i)
@@ -2111,7 +2298,7 @@ static void independent_tests(void)
     assert(App_IMU_GetSnapshot(&snapshot) == 0);
     assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 90.0f) < 0.1f);
     assert(regs[LSM303DLHC_ACCEL_ADDR][0x20] == 0x37 && regs[LSM303DLHC_ACCEL_ADDR][0x23] == 0x98);
-    assert(regs[MPU6050_ADDR][0x6B] == 0x28 && regs[MPU6050_ADDR][0x6C] == 0x47);
+    assert(regs[MPU6050_ADDR][0x6B] == 0x28 && regs[MPU6050_ADDR][0x6C] == 0xC7);
     fail_dev = LSM303DLHC_ACCEL_ADDR;
     for (i = 0; i < 3; ++i)
     {
@@ -2153,7 +2340,7 @@ static void independent_tests(void)
     mpu_auto_ready = 0;
     assert(App_IMU_Service(0) == MPU6050_DATA_NOT_READY);
     app_imu_set_accel_reference(0);
-    assert(app_imu_set_sample_period(200) == 200 && regs[MPU6050_ADDR][0x6B] == 0x28);
+    assert(app_imu_set_sample_period(25) == 25 && regs[MPU6050_ADDR][0x6B] == 0x28);
     puts("PASS: MPU offline independent compass, LSM accel recovery/freshness/power-down, two accel-only MPU modes and fresh 100Hz PPG reference.");
 }
 
@@ -2184,6 +2371,54 @@ static void activity_high_rate_tests(void)
     App_IMU_GetSnapshot(&snapshot);
     assert(snapshot.steps >= 34 && snapshot.steps <= 39 && heart_motion_frames == 6000);
     puts("PASS: 100Hz low-pass rejects 17Hz alias steps while retaining 1.25Hz gait and all raw PPG reference frames.");
+    {
+        static const float rates[] = {1.25f, 1.5f, 1.8f, 2.0f, 2.2f, 2.5f};
+        unsigned rate, phase, elapsed, lowest, highest;
+        uint32_t motion_before;
+        for (rate = 0; rate < sizeof(rates) / sizeof(rates[0]); ++rate)
+        {
+            lowest = 100;
+            highest = 0;
+            for (phase = 0; phase < 40; ++phase)
+            {
+                independent_setup();
+                app_imu_set_accel_reference(1);
+                assert(app_imu_set_sample_period(10) == 10);
+                motion_before = heart_motion_frames;
+                for (elapsed = 0; elapsed < 1000; elapsed += 10)
+                {
+                    word(MPU6050_ADDR, 0x3F, 8192);
+                    tick += 10;
+                    assert(App_IMU_Service(0) == 0);
+                }
+                for (elapsed = 0; elapsed < (unsigned)(20000.0f / rates[rate]); elapsed += 10)
+                {
+                    magnitude = 1.0f + 0.15f * sinf(6.2831853f * (rates[rate] * elapsed / 1000.0f + phase / 40.0f));
+                    word(MPU6050_ADDR, 0x3F, (int16_t)(magnitude * 8192.0f));
+                    tick += 10;
+                    assert(App_IMU_Service(0) == 0);
+                }
+                assert(heart_motion_frames - motion_before == 100 + elapsed / 10);
+                for (elapsed = 0; elapsed < 500; elapsed += 10)
+                {
+                    word(MPU6050_ADDR, 0x3F, 8192);
+                    tick += 10;
+                    assert(App_IMU_Service(0) == 0);
+                }
+                App_IMU_GetSnapshot(&snapshot);
+                if (snapshot.steps < lowest)
+                {
+                    lowest = snapshot.steps;
+                }
+                if (snapshot.steps > highest)
+                {
+                    highest = snapshot.steps;
+                }
+            }
+            printf("100Hz service rate=%.2f, 40 phases: %u..%u / 20\n", rates[rate], lowest, highest);
+            assert(lowest >= 19 && highest <= 20);
+        }
+    }
 }
 
 static void day_tests(uint8_t retained)
@@ -2265,7 +2500,7 @@ static void mag_calibration_tests(uint8_t fail_save, uint8_t reference)
     }
     else
     {
-        assert(regs[MPU6050_ADDR][0x6B] == 0x28 && regs[MPU6050_ADDR][0x6C] == 0x47);
+        assert(regs[MPU6050_ADDR][0x6B] == 0x28 && regs[MPU6050_ADDR][0x6C] == 0xC7);
     }
     puts("PASS: standalone magnetic calibration span/sample gate, fresh-frame requirement and EEPROM save result without MPU high-rate mode.");
 }
