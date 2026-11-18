@@ -294,6 +294,7 @@ static void app_lvgl_wait(uint32_t period_ms, uint8_t rtc_finished)
 static void app_lvgl_task(void *pvParameters)
 {
     HAL_StatusTypeDef status; /* 保存本拍RTC/蓝牙初始化服务的返回状态。 */
+    HAL_StatusTypeDef rtc_result = HAL_BUSY;
     uint8_t rtc_finished = 0; /* RTC初始化是否已结束的标志。 */
     uint8_t bt_finished = 0; /* 蓝牙初始化是否已结束的标志。 */
     uint32_t period_ms; /* 本拍LVGL主循环的等待周期(ms)。 */
@@ -340,18 +341,15 @@ static void app_lvgl_task(void *pvParameters)
     {
         /* 标记LVGL任务本轮诊断开始。 */
         app_diag_task_begin(APP_DIAG_LVGL);
-        /* RTC尚未完成时，本拍推进一步初始化。 */
-        if (rtc_finished == 0)
+        /* 首次等待超时后继续检查LSE，起振后恢复RTC及日历。 */
+        status = watch_rtc_init_service();
+        if (watch_rtc_init_is_pending() == 0 && (rtc_finished == 0 || rtc_result != status))
         {
-            status = watch_rtc_init_service();
-            /* 驱动报告不再有待处理步骤：置完成标志并记录结束时刻与结果。 */
-            if (watch_rtc_init_is_pending() == 0)
-            {
-                rtc_finished = 1;
-                calendar_restored = watch_rtc_is_synced();
-                app_diag_boot_set(APP_BOOT_RTC_END_MS, HAL_GetTick());
-                app_diag_boot_set(APP_BOOT_RTC_RESULT, (uint32_t)status);
-            }
+            rtc_finished = 1;
+            rtc_result = status;
+            calendar_restored = watch_rtc_is_synced();
+            app_diag_boot_set(APP_BOOT_RTC_END_MS, HAL_GetTick());
+            app_diag_boot_set(APP_BOOT_RTC_RESULT, (uint32_t)status);
         }
         if (rtc_finished != 0 && (uint32_t)(HAL_GetTick() - calendar_ms) >= 1000)
         {

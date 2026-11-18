@@ -78,6 +78,7 @@ static uint32_t background_baro_ms, background_battery_ms;
 static unsigned background_recovery_steps, mag_recovery_steps, baro_recovery_steps;
 static unsigned int task_count, fail_task;
 static uint8_t fail_devices, displayed, frame, rtc_done, ble_done, sensor_ran;
+static uint8_t late_lse, calendar_recovered;
 static unsigned int hardware_count, service_count, battery_samples;
 static unsigned int cal_begins, restores, saves, sensor_rounds, recovery_steps;
 static unsigned int baro_calls;
@@ -668,6 +669,11 @@ void vTaskDelay(TickType_t ticks)
     }
     if (rtc_done && ble_done)
     {
+        if (late_lse != 0 && (uint32_t)(tick - rtc_begin_tick) < 6010)
+        {
+            assert(milestones[APP_BOOT_RTC_RESULT] == HAL_TIMEOUT);
+            return;
+        }
         if (lvgl_wait_test != 0)
         {
             assert(wake_key_active != 0 && ticks == 20);
@@ -1218,7 +1224,7 @@ HAL_StatusTypeDef watch_rtc_init_service(void)
         return HAL_BUSY;
     }
     rtc_done = 1;
-    if (fail_devices)
+    if (fail_devices || (late_lse != 0 && (uint32_t)(tick - rtc_begin_tick) < 6000))
     {
         return HAL_TIMEOUT;
     }
@@ -1302,16 +1308,25 @@ em7028_result em7028_init(void)
 }
 uint8_t watch_rtc_is_synced(void)
 {
+    if (late_lse != 0)
+    {
+        return (uint32_t)(tick - rtc_begin_tick) >= 6000;
+    }
     return rtc_done;
 }
 uint8_t watch_rtc_get_day_key(uint16_t *day)
 {
+    if (late_lse != 0 && watch_rtc_is_synced() == 0)
+    {
+        return 1;
+    }
     *day = 1;
     return 0;
 }
 void app_imu_set_day(uint16_t day, uint8_t restored)
 {
     assert(day == 1 && restored <= 1);
+    calendar_recovered = restored;
 }
 void app_imu_activity_service(void)
 {
@@ -2350,6 +2365,7 @@ int main(int argc, char **argv)
         }
         first_frame_deadline = strcmp(argv[1], "first_frame_deadline") == 0;
         fail_devices = strcmp(argv[1], "devices_failed") == 0;
+        late_lse = strcmp(argv[1], "late_lse") == 0;
         power_profile = strncmp(argv[1], "power_", 6) == 0;
         heart_enabled = strcmp(argv[1], "power_heart") == 0 || strcmp(argv[1], "power_heart_calibration") == 0;
         restored_mode = strcmp(argv[1], "restored") == 0 || strcmp(argv[1], "manual_cal") == 0 ||
@@ -2463,8 +2479,18 @@ int main(int argc, char **argv)
         assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650);
         assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == 660);
     }
-    assert(milestones[APP_BOOT_RTC_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 5000U);
-    assert(milestones[APP_BOOT_RTC_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 5010U);
+    if (late_lse != 0)
+    {
+        assert(milestones[APP_BOOT_RTC_RESULT] == HAL_OK && calendar_recovered != 0);
+        assert(milestones[APP_BOOT_RTC_END_MS] >= rtc_begin_tick + 6000);
+        assert(milestones[APP_BOOT_RTC_END_MS] < rtc_begin_tick + 6010);
+        puts("PASS: LVGL continues RTC service after startup timeout and restores the calendar when LSE starts.");
+    }
+    else
+    {
+        assert(milestones[APP_BOOT_RTC_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 5000U);
+        assert(milestones[APP_BOOT_RTC_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 5010U);
+    }
     assert(milestones[APP_BOOT_BT_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);
     assert(milestones[APP_BOOT_BT_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 1710U);
     assert(milestones[APP_BOOT_CAL_STATE] == MPU6050_CAL_IDLE && restores == 0 && cal_begins == 0 && saves == 0);

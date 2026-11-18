@@ -640,18 +640,21 @@ int main(int argc, char **argv)
     assert(watch_rtc_init_service() == HAL_BUSY && watch_rtc_init_is_pending());
     ++tick;
     assert(watch_rtc_init_service() == HAL_TIMEOUT && !watch_rtc_init_is_pending());
-    assert(set_calls == calls);
+    tick += 60000;
+    assert(watch_rtc_init_service() == HAL_TIMEOUT && !watch_rtc_init_is_pending());
+    assert(set_calls == calls && watch_rtc_get_time(&time) == HAL_ERROR);
     lse_ready = 1;
-    watch_rtc_init_begin();
     assert(watch_rtc_init_service() == HAL_OK && !watch_rtc_init_is_pending());
+    assert(watch_rtc_get_time(&time) == HAL_OK && time.hours == 1 && time.minutes == 2 && time.seconds == 3);
     assert(watch_rtc_is_synced() && rtc_seconds == 3723 && set_calls == calls);
+    assert(watch_rtc_set_time(3, 2, 1) == 0 && rtc_seconds == 10921);
     oscillator_status = HAL_ERROR;
     watch_rtc_init_begin();
     assert(watch_rtc_init_service() == HAL_ERROR && !watch_rtc_init_is_pending());
     oscillator_status = HAL_OK;
     watch_rtc_init_begin();
     assert(watch_rtc_init_service() == HAL_OK);
-    puts("PASS: staged LSE wait, timeout/tick wrap, retained time and final initialization failures.");
+    puts("PASS: staged LSE wait, late startup after timeout/tick wrap, retained time, runtime sync and final initialization failures.");
     bounded_set_time_tests();
     if (argc > 1)
     {

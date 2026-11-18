@@ -414,7 +414,7 @@ uint8_t app_diag_take_imu_calibration(void)
 }
 
 /* LVGL把串口字节按行喂进来，支持 DIAG,0 / DIAG,1 / IMU,CAL，行尾 CR 或 LF 都算结束：
- * DIAG,1 会重置轮内行号(s_row)并强制重新采样；IMU,CAL 只置请求标志，校准由sensor任务消费后执行。 */
+ * DIAG,1 会重置轮内行号(s_row)并强制重新采样；旧版IMU,CAL由sensor任务消费后报告失败。 */
 void app_diag_receive(const uint8_t *data, uint16_t size)
 {
     /* 逐个字节处理本次收到的数据。 */

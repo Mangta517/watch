@@ -166,6 +166,11 @@ uint8_t app_battery_log_ble_service(uint8_t ready, uint32_t now_ms)
         {
             return 1;
         }
+        /* 保留导出请求，等扫描发布实际槽数后再生成BEGIN。 */
+        if (s_ble.command == BATLOG_READ && status.state == APP_BATTERY_LOG_STARTING)
+        {
+            return 0;
+        }
         s_ble.streaming = 0; /* 新命令默认不是流式导出，READ分支再单独置位。 */
         /* STATUS：输出有效样本数、已占槽数、容量和日志状态枚举值。 */
         if (s_ble.command == BATLOG_STATUS)

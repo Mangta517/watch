@@ -986,6 +986,21 @@ int main(int argc, char **argv)
     {
         ble_tests();
     }
+    else if (strcmp(argv[1], "ble_starting") == 0)
+    {
+        /* 已保存的开机标记1和第60秒3900mV电压槽。 */
+        const uint8_t saved[] = {0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x75, 0x12,
+                                 0x3C, 0x00, 0x00, 0x00, 0x3C, 0x0F, 0xF3, 0x75};
+        memcpy((void *)(uintptr_t)BATTERY_LOG_START_ADDR, saved, sizeof(saved));
+        assert(status().state == APP_BATTERY_LOG_STARTING);
+        command("BATLOG,READ\n");
+        pump(4);
+        assert(tx_count == 0);
+        app_battery_log_init();
+        pump(12);
+        assert(strcmp(output, "BATLOG,BEGIN,1,2\r\nBATLOG,DATA,1,1,60,3900\r\nBATLOG,END,1\r\n") == 0);
+        puts("PASS: READ issued before the Flash scan exports the stored sample once the scan completes.");
+    }
     else
     {
         if (strcmp(argv[1], "erase_error") == 0)

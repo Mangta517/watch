@@ -14,6 +14,7 @@
 #include <string.h>
 
 #define APP_HEART_POLL_MS          30 /* 测量时sensor每10ms服务，普通/运动模式均约30ms读取。 */
+#define APP_HEART_STOP_RETRY_MS    1000
 #define APP_HEART_WARMUP_MS        1000
 #define APP_HEART_MAX_GAP_MS       120 /* 长时间缺采样后重新建立滤波与周期 */
 #define APP_HEART_STALE_MS         250
@@ -98,7 +99,8 @@ static app_heart_struct heart_data;
 static heart_detector_struct detector;
 static uint8_t requested; /* UI最近一次手动启动/停止请求，1为要求测量。 */
 static uint8_t running; /* 器件当前是否处于已启动测量状态。 */
-static volatile uint8_t s_stop_pending; /* 上一拍停测写失败，1表示下轮service需重试待机。 */
+static volatile uint8_t s_stop_pending; /* 停测写失败，等待重试待机。 */
+static uint32_t s_stop_retry_ms; /* 上次失败的停测时刻(ms)。 */
 #define APP_HEART_SLEEP_TIMEOUT_MS 10000
 #define APP_HEART_STORE_BASE       0xF0
 #define APP_HEART_STORE_BYTES      8
@@ -158,14 +160,24 @@ static void heart_publish(const app_heart_struct *data)
     xSemaphoreGive(heart_mutex);
 }
 
+static em7028_result heart_stop(void)
+{
+    em7028_result result = em7028_stop(); /* 当拍关闭照明并尝试让EM7028进入待机。 */
+    if (result != EM7028_OK)
+    {
+        s_stop_retry_ms = HAL_GetTick();
+    }
+    s_stop_pending = result != EM7028_OK;
+    return result;
+}
+
 static void heart_fail(app_heart_struct *data)
 {
     /* 先把当前读/启动失败的故障快照拷入结果结构。 */
     em7028_get_fault(&data->fault); /* 先保留读/启动失败，不能被 stop 的结果覆盖 */
     /* 把故障种类、寄存器、值上报诊断模块。 */
     app_diag_heart_fault((uint8_t)data->fault.kind, data->fault.reg, data->fault.value);
-    /* 尝试让器件进待机；失败则留下标志，下轮service重试关闭。 */
-    s_stop_pending = em7028_stop() != EM7028_OK; /* 先关外部照明，待机写失败保留关闭请求。 */
+    (void)heart_stop();
     /* 标记测量已停止。 */
     running = 0;
     /* 清空对外BPM，并把状态置为错误。 */
@@ -768,7 +780,8 @@ uint8_t app_heart_store_service(uint8_t allow_start)
         dirty = s_store_dirty;
         interval = s_auto_interval;
         xSemaphoreGive(heart_mutex);
-        if (dirty == 0 || (s_store.retry_pending != 0 && (uint32_t)(HAL_GetTick() - s_store.retry_ms) < APP_HEART_STORE_RETRY_MS))
+        if ((dirty == 0 && s_store.loaded != 0) ||
+            (s_store.retry_pending != 0 && (uint32_t)(HAL_GetTick() - s_store.retry_ms) < APP_HEART_STORE_RETRY_MS))
         {
             return 0;
         }
@@ -809,7 +822,9 @@ uint8_t app_heart_store_service(uint8_t allow_start)
     if (result != 0 || (s_store.phase == HEART_STORE_VERIFY && memcmp(s_store.record, s_store.verify, APP_HEART_STORE_BYTES) != 0))
     {
         /* 写完成但读回失败时，落盘值可能已改变；重新扫描后才能消除待存请求。 */
+        xSemaphoreTake(heart_mutex, portMAX_DELAY);
         s_store.loaded = 0;
+        xSemaphoreGive(heart_mutex);
         s_store.retry_pending = 1;
         s_store.retry_ms = HAL_GetTick();
         s_store.phase = HEART_STORE_IDLE;
@@ -818,7 +833,14 @@ uint8_t app_heart_store_service(uint8_t allow_start)
     if (s_store.phase == HEART_STORE_LOAD)
     {
         heart_store_restore(s_store.verify);
+        xSemaphoreTake(heart_mutex, portMAX_DELAY);
+        /* 启动读失败时恢复已存周期；用户在等待期间明确选择时，以用户选择为准。 */
+        if (s_store_dirty == 0 && s_store.valid != 0)
+        {
+            s_auto_interval = s_store.saved_interval;
+        }
         s_store.loaded = 1;
+        xSemaphoreGive(heart_mutex);
         s_store.phase = HEART_STORE_IDLE;
         return 0;
     }
@@ -868,6 +890,11 @@ void app_heart_init(void)
             s_auto_interval = s_store.saved_interval;
         }
     }
+    else
+    {
+        s_store.retry_pending = 1;
+        s_store.retry_ms = HAL_GetTick();
+    }
     /* 恢复周期后再发布快照互斥锁，供后续跨任务读写heart_data。 */
     heart_mutex = xSemaphoreCreateMutex();
 }
@@ -893,7 +920,7 @@ void app_heart_set_sleep_mode(uint8_t sleeping)
     xSemaphoreGive(heart_mutex);
 }
 
-/* 周期变化立即生效并重新计时；重复选择同一周期不写EEPROM，也不推迟截止时间。 */
+/* 周期变化立即生效并重新计时；EEPROM未读通时也登记用户对默认值的选择。 */
 void app_heart_set_auto_interval(app_heart_auto_interval interval)
 {
     if (heart_mutex == NULL || (interval != APP_HEART_AUTO_INTERVAL_10MIN && interval != APP_HEART_AUTO_INTERVAL_1MIN))
@@ -905,6 +932,10 @@ void app_heart_set_auto_interval(app_heart_auto_interval interval)
     {
         s_auto_interval = interval;
         s_sleep_cycle_ms = HAL_GetTick();
+        s_store_dirty = 1;
+    }
+    else if (s_store.loaded == 0)
+    {
         s_store_dirty = 1;
     }
     xSemaphoreGive(heart_mutex);
@@ -946,7 +977,12 @@ uint8_t app_heart_sleep_pending(void)
     cycle_ms = s_sleep_cycle_ms;
     /* 释放快照锁，后续判断不再持锁。 */
     xSemaphoreGive(heart_mutex);
-    if (running != 0 || s_stop_pending != 0 || sleep_active != 0)
+    if (s_stop_pending != 0)
+    {
+        /* 只在重试到期时唤醒总线，冷却期间允许其他设备采样或休眠。 */
+        return (uint32_t)(HAL_GetTick() - s_stop_retry_ms) >= APP_HEART_STOP_RETRY_MS;
+    }
+    if (running != 0 || sleep_active != 0)
     {
         /* 在途测量、待停或后台窗口进行中：sensor本轮需继续处理。 */
         return 1;
@@ -983,7 +1019,7 @@ void app_heart_set_sport_mode(uint8_t enabled)
     xSemaphoreGive(heart_mutex);
 }
 
-/* 后台自动窗口收尾：有效结果转成last_bpm，照明/HRS当拍就停；停测写失败留标志由下轮重试。 */
+/* 后台自动窗口收尾：有效结果转成last_bpm，当拍尝试关闭照明/HRS。 */
 static void heart_finish_sleep(app_heart_struct *data)
 {
     em7028_result result;
@@ -992,9 +1028,7 @@ static void heart_finish_sleep(app_heart_struct *data)
         /* 窗口结束前有有效结果：转存为最近有效BPM，供熄屏桌面沿用。 */
         data->last_bpm = data->bpm;
     }
-    result = em7028_stop(); /* 同一拍关闭照明和HRS，不等下次采样。 */
-    /* 待机写失败则保留标志，下轮service重试。 */
-    s_stop_pending = result != EM7028_OK;
+    result = heart_stop();
     /* 标记测量已结束。 */
     running = 0;
     /* 锁内清除后台窗口进行标记。 */
@@ -1136,8 +1170,12 @@ uint8_t app_heart_service(void)
     }
     if (s_stop_pending != 0)
     {
+        if ((uint32_t)(HAL_GetTick() - s_stop_retry_ms) < APP_HEART_STOP_RETRY_MS)
+        {
+            return 0;
+        }
         /* 旧测量先完成待机，再处理新START或自动窗口；保留最初的故障快照。 */
-        s_stop_pending = em7028_stop() != EM7028_OK;
+        (void)heart_stop();
         return 1;
     }
     /* 锁内推导本轮是否应测量，并取一份共享快照副本。 */
@@ -1177,8 +1215,7 @@ uint8_t app_heart_service(void)
         if (running != 0)
         {
             /* 由启用转为停用且仍在运行：本拍停测并关闭照明/HRS。 */
-            result = em7028_stop();
-            s_stop_pending = result != EM7028_OK;
+            result = heart_stop();
             running = 0;
             data.bpm = 0;
             if (result == EM7028_OK)

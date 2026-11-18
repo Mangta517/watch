@@ -135,6 +135,8 @@ __asm void boot_jump(uint32_t stack, uint32_t reset)
  * 向量有效并自行反初始化它额外启用的 UART/DMA。 */
 void boot_platform_jump(uint32_t address)
 {
+    RCC_ClkInitTypeDef clock = {0};
+    RCC_OscInitTypeDef oscillator = {0};
     /* 取目标向量表第 0 个字，作为目标镜像的初始主栈指针 MSP。 */
     uint32_t stack = *(volatile uint32_t *)address;
     /* 取目标向量表第 1 个字，作为目标镜像的复位处理函数入口。 */
@@ -142,9 +144,23 @@ void boot_platform_jump(uint32_t address)
     /* NVIC 使能/挂起寄存器的循环下标，共 8 组，覆盖全部中断线。 */
     uint32_t i;
 
-    /* 保留PA3供电，不调用会复位GPIO的HAL_DeInit。 */
-    /* 复位 HAL 维护的 RCC 状态，但不反初始化 GPIO，PA3 供电保持。 */
-    (void)HAL_RCC_DeInit();
+    /* 先切回16MHz HSI，再关闭PLL，目标镜像启动时可重新配置PLL。 */
+    clock.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clock.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+    clock.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    clock.APB1CLKDivider = RCC_HCLK_DIV1;
+    clock.APB2CLKDivider = RCC_HCLK_DIV1;
+    if (HAL_RCC_ClockConfig(&clock, FLASH_LATENCY_0) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    /* 仅关闭主PLL，保留PA3供电、RTC备份域和RCC复位标志，供APP读取。 */
+    oscillator.OscillatorType = RCC_OSCILLATORTYPE_NONE;
+    oscillator.PLL.PLLState = RCC_PLL_OFF;
+    if (HAL_RCC_OscConfig(&oscillator) != HAL_OK)
+    {
+        Error_Handler();
+    }
     /* 屏蔽可屏蔽中断，停止 SysTick 并清除 NVIC 使能/挂起及 PendSV 挂起，
      * 减少旧中断状态被带入目标镜像。 */
     /* 先关全局可屏蔽中断，避免清理过程中被中断打断。 */

@@ -835,18 +835,29 @@ static void store_tests(void)
         assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
     }
     eeprom_write_limit = 8;
-    /* 启动读失败时先保留默认值，存储恢复后先扫描旧记录再写另一槽。 */
+    /* 启动读失败时暂用默认值，总线恢复后自动读回旧周期。 */
     eeprom_read_fail = 1;
     app_heart_init();
     assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN);
-    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    tick += 1000;
     store_drain();
-    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN);
     eeprom_read_fail = 0;
     tick += 1000;
     before = eeprom_writes;
     store_drain();
-    assert(eeprom_writes == before);
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_1MIN && eeprom_writes == before);
+    /* EEPROM尚未读通时明确选择屏幕上的默认值，也应保存。 */
+    eeprom_read_fail = 1;
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_10MIN);
+    eeprom_read_fail = 0;
+    tick += 1000;
+    store_drain();
+    app_heart_init();
+    assert(app_heart_get_auto_interval() == APP_HEART_AUTO_INTERVAL_10MIN && eeprom_writes == before + 1);
+    app_heart_set_auto_interval(APP_HEART_AUTO_INTERVAL_1MIN);
+    store_drain();
     /* 验证独立CRC夹具以及8位序号回绕后的最新选择。 */
     for (byte = 0; byte < 8; ++byte)
     {
@@ -1137,10 +1148,11 @@ int main(int argc, char **argv)
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_ERROR && heart.enabled == 0 && heart.bpm == 0 && running == 0);
     assert(heart.fault.kind == EM7028_FAULT_READ && heart.fault.reg == 0x29);
-    assert(chip_sampling != 0 && app_heart_sleep_pending() != 0);
+    assert(chip_sampling != 0 && app_heart_sleep_pending() == 0);
     assert((host_heart_fault_diag & 0x00FFFFFF) == 0x00290102); /* stop失败不能覆盖原始READ。 */
     stop_result = EM7028_OK;
     read_result = EM7028_OK;
+    tick += 1000;
     begin();
     read_result = EM7028_NOT_READY;
     for (i = 0; i < 10; ++i)
@@ -1199,12 +1211,14 @@ int main(int argc, char **argv)
     assert(heart.last_bpm == retained_bpm);
     start_result = EM7028_ERROR;
     app_heart_set_enabled(1);
-    assert(app_heart_service() == 1);
+    assert(app_heart_service() == 0);
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_ERROR && heart.last_bpm == retained_bpm);
+    tick += 1000;
     assert(app_heart_sleep_pending() != 0);
     assert(app_heart_service() == 1);
     stop_result = EM7028_OK;
+    tick += 1000;
     assert(app_heart_service() == 1);
     assert(app_heart_service() == 1); /* 清完待机请求后再处理失败的START。 */
     assert(app_heart_service() == 0);
@@ -1212,18 +1226,31 @@ int main(int argc, char **argv)
     puts("PASS: last valid BPM survives STOP, stop/start failure and idle service without presenting a current valid measurement.");
     assert(reads > 0);
     puts("PASS: heart service start/stop, stale/gap/flat/noise rejection, I2C failure, snapshot locks and tick wrap.");
-    /* 手动停测NACK后持续重试，成功一次后停止写；原始错误不能被覆盖。 */
+    /* 连续100轮停测NACK只占到期的总线轮次，其他轮次留给指南针。 */
     begin();
     app_heart_set_enabled(0);
     stop_result = EM7028_ERROR;
-    for (i = 0; i < 3; ++i)
+    tick = UINT32_MAX - 500;
     {
         unsigned before = stops;
+        unsigned compass_slots = 0;
         assert(app_heart_service() == 1 && stops == before + 1);
-        assert(app_heart_sleep_pending() != 0);
-        assert(chip_sampling != 0);
+        for (i = 0; i < 100; ++i)
+        {
+            tick += 25;
+            if (app_heart_service() == 0)
+            {
+                ++compass_slots;
+            }
+        }
+        assert(compass_slots == 98 && stops == before + 3);
     }
+    assert(chip_sampling != 0 && app_heart_sleep_pending() == 0);
     stop_result = EM7028_OK;
+    tick += 499;
+    assert(app_heart_sleep_pending() == 0 && app_heart_service() == 0);
+    ++tick;
+    assert(app_heart_sleep_pending() != 0);
     assert(app_heart_service() == 1 && app_heart_sleep_pending() == 0);
     assert(chip_sampling == 0);
     assert(app_heart_service() == 0);
@@ -1234,8 +1261,8 @@ int main(int argc, char **argv)
     stop_result = EM7028_ERROR;
     tick += 10000;
     app_heart_service();
-    assert(app_heart_sleep_pending() != 0);
-    app_heart_service();
+    assert(app_heart_sleep_pending() == 0 && app_heart_service() == 0);
+    tick += 1000;
     assert(app_heart_sleep_pending() != 0);
     stop_result = EM7028_OK;
     app_heart_service();
@@ -1258,14 +1285,14 @@ int main(int argc, char **argv)
             break;
         }
     }
-    assert(i < 10000 && chip_sampling != 0 && app_heart_sleep_pending() != 0);
+    assert(i < 10000 && chip_sampling != 0 && app_heart_sleep_pending() == 0);
     {
         unsigned before = starts;
         app_heart_set_sleep_mode(0);
         app_heart_set_enabled(1);
-        app_heart_service();
-        assert(starts == before && app_heart_sleep_pending() != 0);
+        assert(app_heart_service() == 0 && starts == before);
         stop_result = EM7028_OK;
+        tick += 1000;
         app_heart_service();
         assert(starts == before && chip_sampling == 0);
         app_heart_service();

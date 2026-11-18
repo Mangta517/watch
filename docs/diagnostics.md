@@ -96,14 +96,13 @@ FreeRTOS 开启 configUSE_TRACE_FACILITY 和 configGENERATE_RUN_TIME_STATS，保
 ## 启动阶段
 
 新版在首帧提交后立即创建sensor任务，RTC的LSE等待与蓝牙启动通过LVGL循环分步推进。
-MPU有有效EEPROM记录时恢复六轴零偏并跳过静止校准；没有有效记录时使用正常采集帧校准，保留100帧静止和100帧平均。
-校准成功才保存到EEPROM 0x60..0x9F，不覆盖原磁力计记录。手机可点击「MPU重新校准并保存」，发送IMU,CAL加换行。
-手机诊断顶部显示首帧提交、传感器初始化/正常采集开始、RTC/蓝牙结束与HAL结果、校准状态/帧数/结束时间。
+LSE等待满5秒时报告超时，其他功能继续运行。LSE后来起振时，任务会完成RTC初始化并更新诊断中的结束时间和结果。
+MPU6050上电后进入加速度采样。六轴零偏校准已停用，旧手机发来的 `IMU,CAL` 会报告空闲状态和失败结果。
+指南针使用LSM303DLHC的加速度与磁场。磁校准在手表的 `COMPASS` 页进行，点击 `CALIBRATE MAG`，绕三个轴缓慢转动，再点击 `FINISH CALIBRATION`。显示 `CAL SAVED` 时，磁校准系数已写入EEPROM并通过读回检查。覆盖要求见[指南针与磁校准](magnetometer.md)。
+手机诊断顶部显示首帧提交、传感器初始化与正常采集起点、RTC和蓝牙的结束时间及HAL结果。
 各时间为HAL毫秒计数从0开始后的时刻，不是手机收到消息的时刻；首帧提交不等于屏幕DMA完成。
-校准成功前IMU已发布未完成本次零偏修正的数据；静止平放直到完成后再判断姿态和漂移。
-未发生的阶段用0xFFFFFFFF表示；校准结果0成功、1校准失败、2校准成功但保存失败；校准状态5表示EEPROM恢复且跳过本次校准。HAL结果0成功、1错误、2忙、3超时。
-校准稳定等待3秒、平均阶段2秒按实际经过时间判断超时，失败不提交部分偏移并继续正常采集。
-启动测量见startup-optimization.md；当前EEPROM流程和操作步骤见imu-eeprom.md。
+未发生的阶段用 `0xFFFFFFFF` 表示。HAL结果中，0表示成功，1表示错误，2表示忙，3表示超时。
+历史启动测量见[startup-optimization.md](startup-optimization.md)，旧六轴校准字段及EEPROM布局见[imu-eeprom.md](imu-eeprom.md)。
 
 ## 指标含义
 
