@@ -16,10 +16,11 @@ static float s_error_i[3];
 static uint8_t s_gravity_pending = 1;
 static uint8_t s_yaw_pending = 1;
 
-common_compass_result common_imu_compass_heading(const Accel_struct *accel, const float mag_uT[3], float *heading_deg)
+common_compass_result common_imu_compass_heading_with_limit(const Accel_struct *accel, const float mag_uT[3],
+                                                            float max_field_uT, float *heading_deg)
 {
     /* 先转float再平方，避免原始int16满量程相乘/求和溢出。 */
-    float ax, ay, az, accel_squared, field_squared;
+    float ax, ay, az, accel_squared, field_squared, max_squared;
     float pitch, roll, hx, hy, degrees;
 
     if (accel == NULL || mag_uT == NULL || heading_deg == NULL)
@@ -38,7 +39,12 @@ common_compass_result common_imu_compass_heading(const Accel_struct *accel, cons
     {
         return COMMON_COMPASS_ACCEL_INVALID;
     }
-    if (!(field_squared >= 25.0f && field_squared <= 10000.0f))
+    if (!isfinite(max_field_uT) || max_field_uT < 5.0f)
+    {
+        return COMMON_COMPASS_FIELD_RANGE;
+    }
+    max_squared = max_field_uT * max_field_uT;
+    if (!(field_squared >= 25.0f && field_squared <= max_squared))
     {
         return COMMON_COMPASS_FIELD_RANGE;
     }
@@ -59,6 +65,11 @@ common_compass_result common_imu_compass_heading(const Accel_struct *accel, cons
     }
     *heading_deg = fmodf(degrees, 360.0f);
     return COMMON_COMPASS_OK;
+}
+
+common_compass_result common_imu_compass_heading(const Accel_struct *accel, const float mag_uT[3], float *heading_deg)
+{
+    return common_imu_compass_heading_with_limit(accel, mag_uT, 100.0f, heading_deg);
 }
 
 void Common_IMU_Reset(void)

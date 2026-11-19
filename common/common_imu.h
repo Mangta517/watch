@@ -65,6 +65,9 @@ extern "C"
         COMMON_COMPASS_HORIZONTAL_WEAK
     } common_compass_result;
     common_compass_result common_imu_compass_heading(const Accel_struct *accel, const float mag_uT[3], float *heading_deg);
+    /* 允许调用方指定合磁场上限（如未校准阶段放宽硬铁偏置上限），下限仍固定为5μT。 */
+    common_compass_result common_imu_compass_heading_with_limit(const Accel_struct *accel, const float mag_uT[3],
+                                                                float max_field_uT, float *heading_deg);
 
 #ifdef __cplusplus
 }

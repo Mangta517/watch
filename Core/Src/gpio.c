@@ -156,6 +156,13 @@ void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
   GPIO_InitStruct.Pin = GPIO_PIN_13;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  __HAL_RCC_GPIOC_CLK_DISABLE(); /* PC14/PC15的LSE由备份域驱动。 */
+
+  /* PH0/PH1无外部HSE，关闭悬空引脚的数字输入缓冲。 */
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+  HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+  __HAL_RCC_GPIOH_CLK_DISABLE();
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI4_IRQn, 13, 0);

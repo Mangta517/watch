@@ -20,6 +20,17 @@ typedef struct
     uint8_t percent; /* 启动均值后以约256s慢滤波查表估算0～100%；本次开机只降不升，仅valid时可用。 */
 } app_battery_struct;
 
+typedef struct
+{
+    uint16_t voltage_mv;
+    uint8_t percent;
+} app_battery_curve_point_struct;
+
+/* 返回Flash中的标定节点，按电压升序排列；count接收节点数。 */
+const app_battery_curve_point_struct *app_battery_get_curve(uint8_t *count);
+/* 按标定节点插值并四舍五入，电压超出标定范围时取对应端点。 */
+uint8_t app_battery_voltage_to_percent(uint32_t voltage_mv);
+
 /* ADC1 已由 MX_ADC1_Init 配置；以下初始化和采样只在 sensor 任务调用。 */
 void app_battery_init(void);
 /* sensor任务设置屏幕状态；启动8次有效采样仍保持1s，完成后熄屏改为10s。 */

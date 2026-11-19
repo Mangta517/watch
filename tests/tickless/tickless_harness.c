@@ -15,6 +15,7 @@ static uint8_t fault_expected;
 SysTick_Type host_systick;
 SCB_Type host_scb;
 Host_Cycle_Type host_cycles;
+Host_Debug_Type host_debug;
 Host_Peripheral_Type host_tim2, host_tim3, host_rcc, host_spi, host_dma, host_adc, host_gpio, host_exti;
 Host_Peripheral_Type host_pwr;
 static uint8_t stop_low_voltage;
@@ -163,6 +164,16 @@ void HAL_PWR_EnterSTOPMode(uint32_t regulator, uint8_t entry)
     }
     assert(irq_masked && wakeup_armed && screen_off);
     assert(regulator == PWR_LOWPOWERREGULATOR_ON && entry == PWR_STOPENTRY_WFI);
+    if ((CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) == 0)
+    {
+        assert((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0 && (CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0);
+        assert((DBGMCU->CR & (DBGMCU_CR_DBG_SLEEP | DBGMCU_CR_DBG_STOP | DBGMCU_CR_DBG_STANDBY)) == 0);
+    }
+    else
+    {
+        assert((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0 && (CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) != 0);
+        assert((DBGMCU->CR & DBGMCU_CR_DBG_STOP) != 0);
+    }
     assert((SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) == 0);
     assert((BLE_EN_GPIO_Port->ODR & BLE_EN_Pin) == 0 && (RCC->APB2ENR & RCC_APB2ENR_USART1EN) == 0);
     assert(TIM3->CCR3 == 0 && (SPI1->SR & SPI_SR_BSY) == 0 && (DMA2_Stream2->CR & DMA_SxCR_EN) == 0);
@@ -324,6 +335,8 @@ static void reset(uint32_t phase_cycles)
     stop_exti_early = 0;
     stop_mpu_event = 0;
     host_tim2 = host_tim3 = host_rcc = host_spi = host_dma = host_adc = host_gpio = host_exti = (Host_Peripheral_Type){0};
+    CoreDebug->DHCSR = 0;
+    DBGMCU->CR = DBGMCU_CR_DBG_SLEEP | DBGMCU_CR_DBG_STOP | DBGMCU_CR_DBG_STANDBY;
     RCC->CFGR = RCC_CFGR_SWS_PLL | RCC_CFGR_SW_PLL;
     RCC->CR = RCC_CR_PLLRDY | RCC_CR_PLLON;
     abort_sleep = rtc_fail_read = normal_tick = deadline_tick = pending_on_read = 0;
@@ -640,6 +653,7 @@ int main(void)
                 SPI1->SR = SPI_SR_BSY;
                 break;
             case 5:
+                RCC->APB2ENR = RCC_APB2ENR_ADC1EN;
                 ADC1->CR2 = ADC_CR2_ADON;
                 break;
             default:
@@ -779,6 +793,14 @@ int main(void)
     step_limit = 401;
     app_tickless_sleep(400);
     assert(stops == 1 && stop_exti_imr == (1U << 4) && host_exti.IMR == (1U << 4));
+
+    assert((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0 && (CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) != 0);
+    reset(0);
+    screen_off = 1;
+    CoreDebug->DHCSR = CoreDebug_DHCSR_C_DEBUGEN_Msk;
+    sleep_rtc_counts = 100;
+    app_tickless_sleep(20);
+    assert(stops == 1 && (DBGMCU->CR & DBGMCU_CR_DBG_STOP) != 0);
 
     /* 大请求始终截到400ms，RTC秒/分钟/午夜模数回绕仍正确补时。 */
     for (i = 0; i < 3; ++i)

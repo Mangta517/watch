@@ -126,6 +126,11 @@ typedef struct
     uint32_t CR2, CCR;
 } Host_ADC_TypeDef;
 extern Host_ADC_TypeDef host_adc1;
+extern uint8_t host_adc_clock_enabled;
+void host_adc_clock_set(uint8_t enabled);
+#define __HAL_RCC_ADC1_CLK_ENABLE() host_adc_clock_set(1)
+#define __HAL_RCC_ADC1_CLK_DISABLE() host_adc_clock_set(0)
+#define __HAL_RCC_ADC1_IS_CLK_DISABLED() (host_adc_clock_enabled == 0)
 #define ADC1 (&host_adc1)
 #define ADC (&host_adc1)
 #define ADC_CCR_TSVREFE (1U << 23)

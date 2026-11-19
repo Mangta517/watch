@@ -102,10 +102,12 @@ static uint8_t running; /* 器件当前是否处于已启动测量状态。 */
 static volatile uint8_t s_stop_pending; /* 停测写失败，等待重试待机。 */
 static uint32_t s_stop_retry_ms; /* 上次失败的停测时刻(ms)。 */
 #define APP_HEART_SLEEP_TIMEOUT_MS 10000
+#define APP_HEART_SLEEP_NO_SIGNAL_MS 3000
 #define APP_HEART_STORE_BASE       0xF0
 #define APP_HEART_STORE_BYTES      8
 #define APP_HEART_STORE_RETRY_MS   1000
 static const uint32_t heart_auto_periods_ms[2] = {600000, 60000};
+static uint32_t s_sleep_no_signal_ms; /* 仅由sensor任务更新，累计后台有效读数中的无信号时间。 */
 static uint8_t s_sleep_mode, s_sleep_active; /* 熄屏模式；后台自动测量窗口是否进行中。 */
 static uint8_t s_sport_mode, s_sport_failed; /* 运动模式；运动模式下启动失败锁存。 */
 static app_heart_auto_interval s_auto_interval = APP_HEART_AUTO_INTERVAL_10MIN;
@@ -1266,8 +1268,9 @@ uint8_t app_heart_service(void)
             heart_fail(&data);
             return 1;
         }
-        /* 启动成功：清空检测器全部滤波/峰状态。 */
+        /* 新一轮测量清空滤波、峰值和无信号累计。 */
         memset(&detector, 0, sizeof(detector));
+        s_sleep_no_signal_ms = 0;
         /* 清空对外结果，状态置测量中。 */
         memset(&data, 0, sizeof(data));
         data.state = APP_HEART_MEASURING;
@@ -1322,8 +1325,20 @@ uint8_t app_heart_service(void)
         }
         /* 更新最近有效读数时刻。 */
         good_tick = now;
-        /* 把原始值送入检测流程，结果写回data。 */
+        /* 无信号需连续确认，采样断档、预热或有脉搏候选时从头累计。 */
+        if (data.state != APP_HEART_NO_SIGNAL)
+        {
+            s_sleep_no_signal_ms = 0;
+        }
         heart_process(raw, now, elapsed, &data);
+        if (sleep_active != 0 && data.state == APP_HEART_NO_SIGNAL && elapsed <= APP_HEART_MAX_GAP_MS)
+        {
+            s_sleep_no_signal_ms += elapsed;
+        }
+        else
+        {
+            s_sleep_no_signal_ms = 0;
+        }
         /* 组装一条原始波形样本：时间戳、原始值、滤波值、背景基线。 */
         sample.elapsed_ms = (uint32_t)(now - sample_start_tick);
         sample.raw = raw;
@@ -1357,9 +1372,9 @@ uint8_t app_heart_service(void)
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
     sleep_active = s_sleep_active != 0 && s_sleep_mode != 0 && s_sport_mode == 0;
     xSemaphoreGive(heart_mutex);
-    if (sleep_active != 0 && data.state == APP_HEART_VALID)
+    if (sleep_active != 0 && (data.state == APP_HEART_VALID || s_sleep_no_signal_ms >= APP_HEART_SLEEP_NO_SIGNAL_MS))
     {
-        /* 后台窗口已得到有效结果：提前收尾停测。 */
+        /* 后台窗口已有结果，或持续无信号，关灯并沿用原待机重试。 */
         heart_finish_sleep(&data);
         return 1;
     }

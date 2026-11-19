@@ -8,10 +8,14 @@
 
 #define __HAL_RCC_GPIOA_CLK_ENABLE() ((void)0)
 #define __HAL_RCC_GPIOB_CLK_ENABLE() ((void)0)
-#define __HAL_RCC_GPIOC_CLK_ENABLE() ((void)0)
-#define __HAL_RCC_GPIOH_CLK_ENABLE() ((void)0)
-static GPIO_TypeDef host_gpio_c;
+static unsigned gpio_c_clock, gpio_h_clock;
+#define __HAL_RCC_GPIOC_CLK_ENABLE() (gpio_c_clock = 1)
+#define __HAL_RCC_GPIOC_CLK_DISABLE() (gpio_c_clock = 0)
+#define __HAL_RCC_GPIOH_CLK_ENABLE() (gpio_h_clock = 1)
+#define __HAL_RCC_GPIOH_CLK_DISABLE() (gpio_h_clock = 0)
+static GPIO_TypeDef host_gpio_c, host_gpio_h;
 #define GPIOC (&host_gpio_c)
+#define GPIOH (&host_gpio_h)
 #define GPIO_MODE_IT_RISING 0x00110000U
 #define GPIO_MODE_IT_FALLING 0x00210000U
 #define GPIO_PULLDOWN 2U
@@ -40,7 +44,7 @@ static void HAL_PWR_EnablePVD(void)
 #include "../../Core/Src/stm32f4xx_hal_msp.c"
 
 GPIO_TypeDef host_gpio_a, host_gpio_b;
-static uint16_t analog_a, analog_b, analog_c;
+static uint16_t analog_a, analog_b, analog_c, analog_h;
 static uint32_t primask;
 static uint8_t charge_input, sensor_idle, mpu_exti_configured;
 uint32_t __get_PRIMASK(void)
@@ -119,10 +123,15 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *gpio)
         {
             analog_b |= gpio->Pin;
         }
+        else if (port == GPIOC)
+        {
+            assert(gpio_c_clock != 0);
+            analog_c |= gpio->Pin;
+        }
         else
         {
-            assert(port == GPIOC);
-            analog_c |= gpio->Pin;
+            assert(port == GPIOH && gpio_h_clock != 0);
+            analog_h |= gpio->Pin;
         }
         return;
     }
@@ -223,6 +232,7 @@ int main(int argc, char **argv)
     MX_GPIO_Init();
     assert(analog_a == (GPIO_PIN_0 | GPIO_PIN_6 | GPIO_PIN_7) && charge_input != 0);
     assert(analog_b == GPIO_PIN_10 && analog_c == GPIO_PIN_13);
+    assert(analog_h == (GPIO_PIN_0 | GPIO_PIN_1) && gpio_c_clock == 0 && gpio_h_clock == 0);
     assert(mpu_exti_configured != 0);
     assert(gate == GPIO_PIN_SET && wdi_mode == GPIO_MODE_INPUT && falling_edges == 0);
     tps3823_init();

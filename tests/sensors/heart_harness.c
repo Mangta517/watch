@@ -614,15 +614,12 @@ static void sleep_tests(void)
     assert(running != 0);
     cycle_ms = tick;
     raw = 2000;
-    for (elapsed = 20; elapsed <= 10000; elapsed += 20)
+    for (elapsed = 20; elapsed <= 10000 && running != 0; elapsed += 20)
     {
         tick += 20;
         app_heart_service();
-        if (elapsed < 10000)
-        {
-            assert(running != 0);
-        }
     }
+    assert(elapsed >= 5500 && elapsed <= 5700);
     app_heart_get_snapshot(&heart);
     assert(running == 0 && heart.enabled == 0 && heart.state == APP_HEART_NO_SIGNAL);
     assert(app_heart_sleep_pending() == 0 && app_heart_read_samples(samples, 2) == 0);
@@ -658,7 +655,7 @@ static void sleep_tests(void)
     app_heart_set_sleep_mode(0);
     app_heart_set_enabled(0);
     app_heart_service();
-    puts("PASS: sleep heart first/next 10min deadlines, 10s timeout, early valid stop, retained result, no raw queue, failed start, manual restore and tick wrap.");
+    puts("PASS: sleep heart first/next 10min deadlines, early flat-signal and valid stop, retained result, no raw queue, failed start, manual restore and tick wrap.");
 }
 
 /* 两种周期切换重新计时，重复点击保持截止时间；窗口、手动测量和SPORT沿用原流程。 */

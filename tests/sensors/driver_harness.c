@@ -33,7 +33,8 @@ static uint32_t lcd_clock_mask = 7;
 static int scheduler_state;
 static uint32_t primask, elapsed_ms, hal_waits, task_waits;
 static uint32_t tp_reset_start, tp_ready_at, lcd_reset_start;
-static unsigned tp_resets, scl_edges, released_edges, edges_at_reset, released_at_reset;
+static unsigned tp_resets, scl_edges, edges_at_reset;
+static uint16_t release_history, release_at_reset;
 static GPIO_PinState scl_state = GPIO_PIN_SET;
 static uint32_t sda_mode;
 static GPIO_PinState sda_latch;
@@ -118,6 +119,8 @@ void Error_Handler(void)
     }
     abort();
 }
+static GPIO_PinState lcd_cs_state = GPIO_PIN_RESET;
+
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
     if (port == GPIOB && config->Pin == (LCD_CLK_Pin | LCD_SDA_Pin))
@@ -127,6 +130,10 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
         if (config->Mode == GPIO_MODE_AF_PP)
         {
             assert(config->Alternate == GPIO_AF5_SPI1 && config->Speed == GPIO_SPEED_FREQ_VERY_HIGH);
+        }
+        else
+        {
+            assert(lcd_cs_state == GPIO_PIN_SET);
         }
         lcd_bus_mode = config->Mode;
         return;
@@ -159,9 +166,10 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
                 ++handoff_clocks;
             }
             ++scl_edges;
-            if (sda_mode == GPIO_MODE_INPUT)
+            release_history <<= 1;
+            if (sda_mode == GPIO_MODE_INPUT || (sda_mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_SET))
             {
-                ++released_edges;
+                release_history |= 1;
             }
         }
         scl_state = state;
@@ -186,7 +194,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
             ++tp_resets;
             tp_reset_start = elapsed_ms;
             edges_at_reset = scl_edges;
-            released_at_reset = released_edges;
+            release_at_reset = release_history;
         }
         else
         {
@@ -204,6 +212,10 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
         {
             assert(elapsed_ms - lcd_reset_start >= 100);
         }
+    }
+    else if (port == LCD_CS_GPIO_Port && pin == LCD_CS_Pin)
+    {
+        lcd_cs_state = state;
     }
     else if (port == LCD_DC_GPIO_Port && pin == LCD_DC_Pin)
     {
@@ -251,7 +263,7 @@ uint32_t HAL_GetTick(void)
 }
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *spi, uint8_t *data, uint16_t size, uint32_t timeout)
 {
-    assert(spi == &hspi1 && data && size && timeout == 50);
+    assert(spi == &hspi1 && data && size && timeout == 50 && lcd_cs_state == GPIO_PIN_RESET);
     assert((lcd_clock_mask & HOST_LCD_CLOCK_SPI) != 0);
     ++spi_calls;
     if (lcd_dc_state == GPIO_PIN_RESET)
@@ -392,8 +404,8 @@ static void reset_observations(int state)
     scheduler_state = state;
     hal_waits = task_waits = 0;
     reply_count = reply_pos = 0;
-    scl_edges = released_edges = tp_resets = 0;
-    edges_at_reset = released_at_reset = 0;
+    scl_edges = tp_resets = edges_at_reset = 0;
+    release_history = release_at_reset = 0;
 }
 static void init_delay_tests(int state)
 {
@@ -457,7 +469,7 @@ static void touch_recovery_tests(void)
 {
     uint16_t x = 123, y = 456;
     uint32_t start;
-    unsigned i, before_edges, before_released;
+    unsigned i, before_edges;
     reset_observations(taskSCHEDULER_RUNNING);
     queue_bit(GPIO_PIN_SET); /* First candidate absent; second candidate responds. */
     queue_read(0xB7);
@@ -467,7 +479,7 @@ static void touch_recovery_tests(void)
     assert(tp_resets == 1 && g_tp_chip_id == 0xB7 && elapsed_ms - start >= 310 && elapsed_ms - start < 410);
     assert(reply_pos == reply_count && hal_waits == 0 && task_waits == 2);
     /* Nine real rising edges before reset, with SDA released throughout. */
-    assert(edges_at_reset == 10 && released_at_reset == 9);
+    assert(edges_at_reset == 10 && (release_at_reset & 0x3FF) == 0x3FE);
 
     reset_observations(taskSCHEDULER_RUNNING);
     queue_read(0); /* A successful no-finger sample clears the failure streak. */
@@ -478,7 +490,6 @@ static void touch_recovery_tests(void)
     }
     assert(tp_resets == 0 && task_waits == 0);
     before_edges = scl_edges;
-    before_released = released_edges;
     reply_count = reply_pos = 0;
     queue_bit(GPIO_PIN_SET); /* 200th read fails, then recovery succeeds. */
     queue_read(0xB5);
@@ -498,7 +509,7 @@ static void touch_recovery_tests(void)
     assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && g_tp_chip_id == 0xB5);
     assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
     assert(task_waits == 0 && hal_waits == 0 && elapsed_ms - start == 310);
-    assert(edges_at_reset - before_edges == 20 && released_at_reset - before_released == 10);
+    assert(edges_at_reset - before_edges == 20 && (release_at_reset & 0x3FF) == 0x3FE);
     assert(reply_pos == reply_count);
     reply_count = reply_pos = 0;
     queue_read(1);

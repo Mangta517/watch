@@ -560,6 +560,7 @@ static void lcd_suspend_bus(void)
     /* 移植层已等DMA收尾；CCR=0保持PB0低电平，停计数并关闭显示外设时钟。 */
     htim3.Instance->CR1 &= ~TIM_CR1_CEN;
     __HAL_SPI_DISABLE(&hspi1);
+    LCD_CS_Set(); /* 释放面板片选后再切换 SCK/MOSI 引脚。 */
     /* CLK/MOSI有4.7k外部上拉；释放复用输出，避免MOSI末位为0时持续耗电。 */
     gpio.Pin = LCD_CLK_Pin | LCD_SDA_Pin;
     gpio.Mode = GPIO_MODE_ANALOG;
@@ -591,6 +592,7 @@ static void lcd_resume_bus(void)
     __HAL_RCC_SPI1_CLK_ENABLE();
     __HAL_RCC_TIM3_CLK_ENABLE();
     HAL_GPIO_Init(GPIOB, &gpio);
+    LCD_CS_Clr();
     __set_PRIMASK(mask);
 }
 

@@ -33,18 +33,21 @@
  * 不宜立即翻 OFFLINE (设备端表现为数据闪断一下又恢复, 易误判为 bug) */
 #define APP_IMU_OFFLINE_STREAK 3
 
-#define APP_MAG_POLL_MS 40
-#define APP_MAG_MAX_AGE_MS 250
-#define APP_MAG_CAL_SAMPLES     100
-#define APP_MAG_CAL_MIN_SPAN_UT 20.0f
-#define APP_MAG_OFFLINE_STREAK  3
+#define APP_MAG_POLL_MS            40
+#define APP_MAG_MAX_AGE_MS         250
+#define APP_MAG_CAL_SAMPLES        100
+#define APP_MAG_CAL_MIN_SPAN_UT    20.0f
+#define APP_MAG_OFFLINE_STREAK     3
+#define APP_MAG_CAL_MAX_FIELD_UT   100.0f /* 已校准：强磁干扰上限 */
+#define APP_MAG_UNCAL_MAX_FIELD_UT 350.0f /* 未校准：覆盖±1.3gauss非溢出合场强上限，避免硬铁偏置隐藏指针 */
 
 #define APP_MAG_CMD_START  1 /* 开始旋转采集 */
 #define APP_MAG_CMD_FINISH 2 /* 检查覆盖范围并应用校准 */
 
-/* 沿用当前表盘磁场轴映射；LSM303内部加速度轴与表盘方向须由实板核对。 */
+/* 实板核对：Back板LSM303DLHC芯片朝下(Z向手腕)，+X指向表盘6点，需绕Z转180°(-X,-Y,+Z)对齐12点。
+ * 磁场与LSM303加速度共用同一套芯片轴向，映射保持同步以确保倾斜补偿一致。 */
 static const uint8_t s_mag_axis[3] = {0, 1, 2};
-static const float s_mag_sign[3] = {1.0f, 1.0f, 1.0f};
+static const float s_mag_sign[3] = {-1.0f, -1.0f, 1.0f};
 
 /**********************
  *  STATIC VARIABLES
@@ -406,11 +409,39 @@ uint32_t app_imu_wrist_sequence(void)
     return s_activity.wrist_sequence;
 }
 
+/* LSM303加速度与磁场共用芯片坐标，同步做同一组刚体轴映射到表盘坐标。 */
+static void compass_map_accel(const Accel_struct *raw, Accel_struct *body)
+{
+    int32_t source[3] = {raw->Accel_x, raw->Accel_y, raw->Accel_z};
+    int32_t mapped[3];
+    uint8_t i;
+    for (i = 0; i < 3; ++i)
+    {
+        mapped[i] = source[s_mag_axis[i]];
+        if (s_mag_sign[i] < 0.0f)
+        {
+            mapped[i] = -mapped[i];
+        }
+        if (mapped[i] > INT16_MAX)
+        {
+            mapped[i] = INT16_MAX;
+        }
+        else if (mapped[i] < INT16_MIN)
+        {
+            mapped[i] = INT16_MIN;
+        }
+    }
+    body->Accel_x = (int16_t)mapped[0];
+    body->Accel_y = (int16_t)mapped[1];
+    body->Accel_z = (int16_t)mapped[2];
+}
+
 /* 指南针的总线、恢复和采样单独调度，MPU故障不影响此链路。 */
 uint8_t app_imu_compass_service(uint8_t active, uint8_t read_sensors)
 {
     TickType_t now = xTaskGetTickCount();
-    float body[3], heading = 0.0f, field_squared;
+    Accel_struct body_accel;
+    float body[3], heading = 0.0f, field_squared, max_field_uT;
     uint8_t axis, mag_ready, accel_ready, pending = 0, online, valid = 0;
     uint8_t due = read_sensors != 0 && (TickType_t)(now - s_accel_poll_tick) >= pdMS_TO_TICKS(s_mag_poll_ms);
     lsm303dlhc_mag_result result;
@@ -467,6 +498,11 @@ uint8_t app_imu_compass_service(uint8_t active, uint8_t read_sensors)
         s_compass_accel_valid = 0;
     }
     field_squared = body[0] * body[0] + body[1] * body[1] + body[2] * body[2];
+    max_field_uT = APP_MAG_UNCAL_MAX_FIELD_UT;
+    if (s_mag_calibrated != 0)
+    {
+        max_field_uT = APP_MAG_CAL_MAX_FIELD_UT;
+    }
     if (s_mag_cal_state == APP_MAG_CAL_RUNNING)
     {
         state = APP_COMPASS_CALIBRATING;
@@ -474,17 +510,22 @@ uint8_t app_imu_compass_service(uint8_t active, uint8_t read_sensors)
     else if (online != 0)
     {
         state = APP_COMPASS_ACCEL_INVALID;
-        if (!(field_squared >= 25.0f && field_squared <= 10000.0f))
+        if (!(field_squared >= 25.0f && field_squared <= max_field_uT * max_field_uT))
         {
             state = APP_COMPASS_FIELD_RANGE;
         }
         else if (s_compass_accel_valid != 0)
         {
-            heading_result = common_imu_compass_heading(&s_compass_accel, body, &heading);
+            compass_map_accel(&s_compass_accel, &body_accel);
+            heading_result = common_imu_compass_heading_with_limit(&body_accel, body, max_field_uT, &heading);
             valid = heading_result == COMMON_COMPASS_OK;
             if (valid != 0)
             {
                 state = APP_COMPASS_READY;
+            }
+            else if (heading_result == COMMON_COMPASS_FIELD_RANGE)
+            {
+                state = APP_COMPASS_FIELD_RANGE;
             }
             else if (heading_result == COMMON_COMPASS_HORIZONTAL_WEAK)
             {

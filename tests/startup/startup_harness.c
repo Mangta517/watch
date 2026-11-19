@@ -98,7 +98,7 @@ static uint8_t baro_boundary_test;
 static uint8_t power_profile, heart_enabled;
 static uint8_t battery_sleep_mode;
 static uint32_t aht_period_ms;
-static uint8_t environment_test, environment_stage, environment_bus_parked;
+static uint8_t environment_test, environment_stage;
 static uint32_t environment_mode_ms, environment_last_aht_ms = UINT32_MAX;
 static uint32_t environment_aht_window_ms, environment_baro_window_ms;
 static unsigned environment_reads, environment_history, environment_aht_windows, environment_mode_windows;
@@ -117,11 +117,11 @@ static uint8_t bluetooth_resume_test, bluetooth_resume_phase;
 static uint8_t sport_test, sport_active, sport_baro_sleeping;
 static unsigned sport_samples, sport_save_calls, sport_save_steps;
 static uint32_t sport_first_ms = UINT32_MAX;
-static uint8_t sleep_test, sleep_bus_parked, sleep_imu, sleep_baro, sleep_heart_mode;
+static uint8_t sleep_test, sleep_imu, sleep_baro, sleep_heart_mode;
 static uint32_t sleep_cycle_ms, sleep_window_ms, sleep_environment_ms, sleep_first_ms;
 static uint32_t sleep_imu_sample_ms, sleep_heart_advance_ms;
 static uint32_t sleep_heart_duration_ms = 10000U;
-static unsigned int sleep_parks, sleep_resumes, sleep_heart_starts, sleep_history;
+static unsigned int sleep_heart_starts, sleep_history;
 static unsigned sleep_idle_waits;
 static uint8_t sleep_first_seen;
 static uint8_t sleep_pose_seen;
@@ -844,7 +844,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
         assert(++sensor_rounds == app_sensor_watchdog_progress);
         if (environment_sleep_retry_test != 0 && environment_retry_writes != 0 && environment_retry_writes < 3)
         {
-            assert(environment_bus_parked == 0 && sport_baro_sleeping == 0);
+            assert(sport_baro_sleeping == 0);
         }
         if (app_task_is_screen_off() != 0)
         {
@@ -1065,7 +1065,7 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
         if (sleep_recovery_test != 0 && sensor_elapsed_ms >= 14500U)
         {
             assert(sleep_recovery_steps == 16U && sleep_recovery_sample != 0);
-            assert(sleep_imu != 0 && sleep_bus_parked != 0 && sleep_pose_samples >= 50);
+            assert(sleep_imu != 0 && sleep_pose_samples >= 50);
             assert(watchdog_feeds > 60 && battery_samples >= 14);
             longjmp(sensor_stop, 1);
         }
@@ -1078,10 +1078,8 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
             uint32_t seconds;
             assert(uptime_writes >= 2U && app_uptime_get_saved(&seconds) && seconds >= 1200U);
             assert(sleep_heart_starts == 2 && sleep_history == 5);
-            assert(sleep_parks >= 3U && sleep_resumes >= 2U);
             assert(sleep_pose_samples >= 47000 && sleep_pose_samples <= 49000);
-            assert(sleep_parks > 5700 && sleep_resumes > 5700);
-            assert(sleep_imu != 0 && sleep_baro != 0 && sleep_bus_parked == 0);
+            assert(sleep_imu != 0 && sleep_baro != 0);
             assert(watchdog_feeds > 5900 && battery_samples > 1200);
             /* 温湿度10分钟窗口减少短周期服务；稳态等待总时长不能超过本轮模拟时间。 */
             assert(sleep_idle_waits > 5700 && sleep_idle_waits <= sensor_elapsed_ms / 25);
@@ -1317,19 +1315,6 @@ HAL_StatusTypeDef kt6368a_init_service(void)
 }
 void my_i2c_init(my_i2c_bus_t bus)
 {
-    if (environment_test != 0 && hardware_count == 5)
-    {
-        assert(bus == MY_I2C_BUS_SENSOR && environment_bus_parked != 0);
-        environment_bus_parked = 0;
-        return;
-    }
-    if (sleep_test != 0 && hardware_count == 5U)
-    {
-        assert(bus == MY_I2C_BUS_SENSOR && sleep_bus_parked != 0);
-        sleep_bus_parked = 0;
-        ++sleep_resumes;
-        return;
-    }
     assert(bus == MY_I2C_BUS_SENSOR && frame && !ble_done && !rtc_done);
     assert(hardware_count++ == 0);
 }
@@ -1476,7 +1461,6 @@ uint8_t spl006_set_sleep(uint8_t sleeping)
     assert(sleeping <= 1U);
     if (environment_test != 0)
     {
-        assert(environment_bus_parked == 0);
         if (sleeping != 0)
         {
             ++environment_standby_writes;
@@ -1494,12 +1478,10 @@ uint8_t spl006_set_sleep(uint8_t sleeping)
     sport_baro_sleeping = sleeping;
     if (environment_test != 0 && sleeping == 0)
     {
-        assert(environment_bus_parked == 0);
         environment_baro_window_ms = sensor_elapsed_ms;
     }
     if (sleep_test != 0)
     {
-        assert(sleep_bus_parked == 0);
         sleep_baro = sleeping;
         if (sleeping == 0 && sleep_heart_mode != 0)
         {
@@ -1507,21 +1489,6 @@ uint8_t spl006_set_sleep(uint8_t sleeping)
         }
     }
     return 0;
-}
-void my_i2c_suspend(my_i2c_bus_t bus)
-{
-    assert(bus == MY_I2C_BUS_SENSOR);
-    if (environment_test != 0)
-    {
-        assert(environment_bus_parked == 0 && sport_baro_sleeping != 0);
-        environment_bus_parked = 1;
-    }
-    if (sleep_test != 0)
-    {
-        assert(sleep_imu != 0 && sleep_baro != 0 && heart_enabled == 0 && sleep_bus_parked == 0);
-        sleep_bus_parked = 1;
-        ++sleep_parks;
-    }
 }
 void app_aht21_set_period(uint32_t period_ms)
 {
@@ -1542,7 +1509,7 @@ void app_baro_record_history(void)
     }
     if (sleep_test != 0 && sleep_heart_mode != 0)
     {
-        assert(sleep_bus_parked == 0 && sleep_baro == 0);
+        assert(sleep_baro == 0);
         ++sleep_history;
     }
 }
@@ -1748,7 +1715,7 @@ uint8_t App_IMU_Service(uint8_t read_mag)
     }
     if (sleep_test != 0)
     {
-        assert(sleep_bus_parked == 0 && sleep_imu == (mock_imu_period == 25));
+        assert(sleep_imu == (mock_imu_period == 25));
         if (sleep_stationary_test != 0 && mock_imu_period == 25)
         {
             if (stationary_sample_seen != 0)
@@ -1827,7 +1794,6 @@ uint32_t app_imu_set_sample_period(uint32_t period_ms)
         }
         if (sleep_test != 0)
         {
-            assert(sleep_bus_parked == 0);
             sleep_imu = period_ms == 25;
             if (sleep_imu != 0 && sleep_first_seen == 0)
             {
@@ -1876,7 +1842,6 @@ void App_Baro_Service(void)
     }
     if (environment_test != 0)
     {
-        assert(environment_bus_parked == 0);
         assert(sensor_elapsed_ms - environment_baro_window_ms >= 1600);
         assert(sensor_elapsed_ms - environment_baro_window_ms < 1700);
         assert(sensor_elapsed_ms >= environment_reads * 300000 + 1600);
@@ -1920,7 +1885,7 @@ void App_Baro_Service(void)
     }
     if (sleep_test != 0)
     {
-        assert(sleep_bus_parked == 0 && sleep_baro == 0);
+        assert(sleep_baro == 0);
         if (sleep_heart_mode != 0)
         {
             assert(sensor_elapsed_ms - sleep_environment_ms >= 1600U);
@@ -1966,7 +1931,6 @@ uint8_t app_heart_service(void)
     }
     if (sleep_test != 0)
     {
-        assert(sleep_bus_parked == 0);
         if (heart_enabled != 0 && (uint32_t)(tick - sleep_window_ms) > 100U)
         {
             /* 100ms预热边界先读PPG，紧接着产生首个MPU参考；后续各拍保持新鲜。 */
@@ -1990,7 +1954,6 @@ void app_aht21_service(void)
     assert(hardware_count == 5 && !rtc_done && !ble_done);
     if (environment_test != 0)
     {
-        assert(environment_bus_parked == 0);
         if (app_task_is_screen_off() != 0)
         {
             assert(aht_period_ms == 600000);
@@ -2023,7 +1986,6 @@ void app_aht21_service(void)
     }
     if (sleep_test != 0)
     {
-        assert(sleep_bus_parked == 0);
         return;
     }
     assert(low_rate_mask == 0);
@@ -2386,11 +2348,11 @@ int main(int argc, char **argv)
         }
         if (sleep_recovery_test != 0)
         {
-            puts("PASS: sleep defers IMU/bus parking through recovery and warmup; sampling, battery and watchdog continue across tick wrap.");
+            puts("PASS: sleep resumes IMU sampling after recovery and warmup; sampling, battery and watchdog continue across tick wrap.");
         }
         else
         {
-            puts("PASS: 20-minute sleep timeline, 40Hz accelerometer, 5min barometer, 10min heart/uptime, bus parking, battery/watchdog, calibration and wake restore.");
+            puts("PASS: 20-minute sleep timeline, 40Hz accelerometer, 5min barometer, 10min heart/uptime, one-time sensor bus setup, battery/watchdog, calibration and wake restore.");
         }
         return 0;
     }
@@ -2628,7 +2590,6 @@ uint8_t my_mpu6050_recover_step(uint32_t now_ms)
     }
     if (sleep_recovery_test != 0 && sensor_elapsed_ms >= 5000U && sleep_recovery_steps < 16U)
     {
-        assert(sleep_bus_parked == 0);
         ++sleep_recovery_steps;
         sleep_recovery_last_ms = now_ms;
         ++tick; /* I2C事务可能跨过tick，任务不能用较早的now_ms减去事务后的时间戳。 */
@@ -2645,7 +2606,7 @@ uint8_t spl006_recover_step(uint32_t now_ms)
     assert(sport_active == 0);
     if (sleep_test != 0)
     {
-        assert(sleep_bus_parked == 0 && sleep_baro == 0);
+        assert(sleep_baro == 0);
     }
     assert(now_ms == tick);
     ++baro_recovery_steps;

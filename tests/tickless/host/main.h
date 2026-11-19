@@ -14,11 +14,23 @@ extern SysTick_Type host_systick;
 extern SCB_Type host_scb;
 typedef struct
 {
-    uint32_t CTRL, CYCCNT, DEMCR;
+    uint32_t CTRL, CYCCNT, DEMCR, DHCSR;
 } Host_Cycle_Type;
 extern Host_Cycle_Type host_cycles;
 #define DWT (&host_cycles)
 #define CoreDebug (&host_cycles)
+#define CoreDebug_DHCSR_C_DEBUGEN_Msk 1
+typedef struct
+{
+    uint32_t CR;
+} Host_Debug_Type;
+extern Host_Debug_Type host_debug;
+#define DBGMCU (&host_debug)
+#define DBGMCU_CR_DBG_SLEEP (1U << 0)
+#define DBGMCU_CR_DBG_STOP (1U << 1)
+#define DBGMCU_CR_DBG_STANDBY (1U << 2)
+#define RCC_APB2ENR_ADC1EN (1U << 8)
+#define __HAL_RCC_ADC1_IS_CLK_DISABLED() ((RCC->APB2ENR & RCC_APB2ENR_ADC1EN) == 0)
 #define CoreDebug_DEMCR_TRCENA_Msk (1UL << 24)
 #define DWT_CTRL_CYCCNTENA_Msk 1U
 #define SysTick (&host_systick)

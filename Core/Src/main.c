@@ -157,6 +157,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
     /* 以上 MX_* 依次完成 GPIO、DMA、SPI1(LCD)、TIM3(背光 PWM)、
      * USART1(蓝牙) 和 ADC1(电池采样) 的片上外设初始化。 */
+    __HAL_RCC_ADC1_CLK_DISABLE(); /* ADC1配置保留，仅在电池采样时打开时钟。 */
     /* STOP进一步降低Flash和低功耗稳压器功耗；唤醒时间由RTC补齐。 */
     HAL_PWREx_EnableFlashPowerDown();        /* 允许进入 STOP 时 Flash 进入掉电模式。 */
     HAL_PWREx_EnableLowRegulatorLowVoltage(); /* 允许低功耗稳压器工作在低电压档。 */

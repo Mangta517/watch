@@ -49,10 +49,16 @@ touch_sources = ["application/app_touch.c", "application/app_reset_ble.c",
                  "Middlewares/LVGL/lvgl/examples/porting/lv_port_indev_template.c"]
 ui_sources = ["interface/watch_key.c", "tests/ui/ui_harness.c", "application/ui_widgets.c", "application/ui_sydney_font.c",
               "application/app_clock.c", "application/app_weather.c", "application/app_ble_service.c"]
-ui_args = [gcc, "tests/diagnostics/diag_stub.c"] + args + touch_sources + ["-Wall", "-Wextra", "-Werror"]
+battery = OUT / "app_battery.o"
+# Keep the firmware lookup and table while the UI harness supplies its own sensor snapshot.
+subprocess.run([gcc, "-std=c99", "-O1", "-Wall", "-Wextra", "-Werror",
+                "-Itests/sensors/host", "-ICore/Inc", "-Iapplication", "-Iinterface",
+                "-c", "application/app_battery.c", "-o", str(battery)], cwd=ROOT, check=True)
+ui_args = [gcc, "tests/diagnostics/diag_stub.c", str(battery)] + args + touch_sources + ["-Wall", "-Wextra", "-Werror"]
 subprocess.run(ui_args + ["-DAPP_DEBUG_TELEMETRY=1"] + ui_sources + [str(library), "-lm", "-o", str(exe)],
                cwd=ROOT, check=True)
 subprocess.run([str(exe), "page_auto_sleep"], cwd=ROOT, check=True)
+subprocess.run([str(exe), "battery_page"], cwd=ROOT, check=True)
 subprocess.run([str(exe), "step_refresh"], cwd=ROOT, check=True)
 subprocess.run([str(exe)], cwd=ROOT, check=True)
 subprocess.run([str(exe), "cached_weather"], cwd=ROOT, check=True)
@@ -63,6 +69,7 @@ quiet_exe = OUT / "ui_quiet.exe"
 subprocess.run(ui_args + ["-DAPP_DEBUG_TELEMETRY=0"] + ui_sources + [str(library), "-lm", "-o", str(quiet_exe)],
                cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe), "page_auto_sleep"], cwd=ROOT, check=True)
+subprocess.run([str(quiet_exe), "battery_page"], cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe), "step_refresh"], cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe)], cwd=ROOT, check=True)
 subprocess.run([str(quiet_exe), "page_lifecycle"], cwd=ROOT, check=True)
@@ -98,6 +105,11 @@ make_preview(["heart", "motion", "environment", "aht21", "phone_weather", "bluet
 make_preview(["altitude_history", "heart_history", "compass"],
              ["ALTITUDE HISTORY", "HEART RATE HISTORY", "OV-WATCH COMPASS / +X AXIS"],
              3, "sensor-visualization-preview.png")
+make_preview(["battery_page_live", "battery_page_low", "battery_page_full", "battery_page_telemetry",
+              "battery_page_waiting", "battery_page_hold", "battery_page_error"],
+             ["LIVE / CURVE AND WATCH", "LOW BATTERY", "FULL / OUTSIDE CALIBRATION", "CALIBRATION / TELEMETRY",
+              "STARTUP", "ADC HOLD", "ADC ERROR"],
+             4, "battery-page-preview.png")
 make_preview([f"weather_icon_{index}" for index in range(9)],
              ["CLEAR", "MAINLY CLEAR", "PARTLY CLOUDY", "FOG", "DRIZZLE", "RAIN", "SNOW", "THUNDERSTORM", "UNKNOWN"],
              3, "weather-icons-preview.png")

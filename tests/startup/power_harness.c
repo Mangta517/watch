@@ -11,7 +11,13 @@ GPIO_TypeDef host_gpio_a, host_gpio_b;
 static unsigned int step;
 static uint8_t button_pressed = 1;
 static uint8_t output_high, output_enabled;
-static unsigned int flash_powerdown_calls, regulator_calls;
+static unsigned int flash_powerdown_calls, regulator_calls, adc_clock_disables;
+
+void host_adc_clock_set(uint8_t enabled)
+{
+    assert(enabled == 0);
+    ++adc_clock_disables;
+}
 static struct
 {
     uint32_t IMR;
@@ -88,7 +94,7 @@ int main(void)
     original_imr = EXTI->IMR;
     boot_power_config();
     assert(EXTI->IMR == original_imr);
-    assert(flash_powerdown_calls == 2 && regulator_calls == 2);
+    assert(flash_powerdown_calls == 2 && regulator_calls == 2 && adc_clock_disables == 2);
     puts("PASS: startup keeps MPU PB12 masked and preserves PA4, all other EXTI lines and an already-masked PB12.");
     return 0;
 }

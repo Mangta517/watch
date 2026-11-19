@@ -29,7 +29,7 @@
 #error Tickless HAL compensation requires a 1ms RTOS tick.
 #endif
 
-/* 保持TPS3823连续计时；400ms上限给最短900ms超时留出运行裕量，正常熄屏任务每200ms到期。 */
+/* 保持TPS3823连续计时；400ms上限给最短900ms超时留出运行裕量，普通熄屏还受25ms传感器期限限制。 */
 #define APP_TICKLESS_MAX_TICKS 400
 #define APP_TICKLESS_STOP_MIN_TICKS 5
 /* MPU DATA_RDY接PB12；sensor按任务期限读数据，STOP临时屏蔽PB12无效唤醒。 */
@@ -210,10 +210,22 @@ void app_tickless_sleep(uint32_t expected_ticks)
         exti_imr_saved = EXTI->IMR;
         /* 只清 PB12 对应的屏蔽位，其余中断线保持原状。 */
         EXTI->IMR = exti_imr_saved & ~(1U << APP_TICKLESS_MPU_EXTI_LINE);
-        /* 屏障保证EXTI屏蔽设置在进入STOP前生效，WDI继续保持输出。 */
+        uint8_t debug_enabled = (CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0;
+        if (debug_enabled == 0)
+        {
+            /* RTC覆盖整个STOP区间，期间无需DWT；清除可能残留的低功耗调试位。 */
+            DBGMCU->CR &= ~(DBGMCU_CR_DBG_SLEEP | DBGMCU_CR_DBG_STOP | DBGMCU_CR_DBG_STANDBY);
+            DWT->CTRL &= ~DWT_CTRL_CYCCNTENA_Msk;
+            CoreDebug->DEMCR &= ~CoreDebug_DEMCR_TRCENA_Msk;
+        }
         __DSB();
-        /* 进入 STOP 模式（低功耗稳压器、WFI 进入），由 RTC 唤醒定时器等中断唤醒。 */
         HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+        if (debug_enabled == 0)
+        {
+            /* 恢复周期计数，供RTC同步超时和唤醒后的补时使用。 */
+            CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+            DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+        }
         /* 仍处于HSI时查询供电；欠压不再切回84MHz，走已有故障记录/复位路径。 */
         if ((PWR->CSR & PWR_CSR_PVDO) != 0)
         {

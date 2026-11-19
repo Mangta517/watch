@@ -12,7 +12,7 @@ static uint8_t input_bits[11];
 static unsigned input_pos, read_edges, response_edges;
 static uint8_t read_data, slave_low, check_stop, nack_pending;
 static uint8_t expected_ack;
-static unsigned sda_init_calls, redundant_sda_inits;
+static unsigned sda_init_calls;
 static unsigned analog_pins;
 static uint32_t scl_release_after;
 
@@ -58,14 +58,8 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
     }
     if (config->Pin == SENSOR_SDA_Pin)
     {
-        assert(config->Mode == GPIO_MODE_INPUT || config->Mode == GPIO_MODE_OUTPUT_OD);
-        if (sda_init_calls != 0 && sda_mode == config->Mode)
-        {
-            ++redundant_sda_inits;
-        }
+        assert(config->Mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_SET);
         ++sda_init_calls;
-        /* 读地址 ACK 后，从机已在 SCL 低期间准备第一位，主机必须释放 SDA。 */
-        assert(!(config->Mode == GPIO_MODE_OUTPUT_PP && slave_low != 0 && sda_latch == GPIO_PIN_SET));
         sda_mode = config->Mode;
     }
     else
@@ -89,18 +83,18 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
             scl_high_tick = nop_count;
             if (read_data != 0)
             {
-                assert(sda_mode == GPIO_MODE_INPUT);
+                assert(sda_mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_SET);
                 ++read_edges;
             }
             else if (nack_pending != 0)
             {
                 if (expected_ack != 0)
                 {
-                    assert(sda_mode == GPIO_MODE_INPUT); /* NACK必须释放，不推挽驱动高电平。 */
+                    assert(sda_mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_SET); /* NACK必须释放，不推挽驱动高电平。 */
                 }
                 else
                 {
-                    assert(sda_mode != GPIO_MODE_INPUT && sda_latch == GPIO_PIN_RESET);
+                    assert(sda_mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_RESET);
                 }
                 ++response_edges;
                 nack_pending = 0;
@@ -149,7 +143,7 @@ GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
         }
         return scl;
     }
-    assert(port == GPIOB && pin == SENSOR_SDA_Pin && sda_mode == GPIO_MODE_INPUT && scl == GPIO_PIN_SET);
+    assert(port == GPIOB && pin == SENSOR_SDA_Pin && sda_mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_SET && scl == GPIO_PIN_SET);
     assert(input_pos < sizeof(input_bits));
     ++input_pos;
     if (input_pos == sizeof(input_bits))
@@ -187,7 +181,7 @@ static void read_pid(uint8_t pid, uint8_t ack)
     my_i2c_start(MY_I2C_BUS_SENSOR);
     my_i2c_write_byte(MY_I2C_BUS_SENSOR, 0x49);
     assert(my_i2c_wait_ack(MY_I2C_BUS_SENSOR) == 0);
-    assert(sda_mode == GPIO_MODE_INPUT);
+    assert(sda_mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_SET);
     assert(my_i2c_read_byte(MY_I2C_BUS_SENSOR, ack) == pid);
     assert(input_pos == sizeof(input_bits) && read_edges == 8 && response_edges == 1);
     my_i2c_stop(MY_I2C_BUS_SENSOR);
@@ -201,7 +195,7 @@ int main(int argc, char **argv)
 #if defined(F411_BOOTLOADER)
     assert(nop_count == 3 * 160);
 #else
-    assert(nop_count == 3 * 134);
+    assert(nop_count == 3 * 100);
 #endif
     if (argc > 1 && strcmp(argv[1], "suspend") == 0)
     {
@@ -210,7 +204,7 @@ int main(int argc, char **argv)
         my_i2c_init(MY_I2C_BUS_SENSOR);
         assert(sda_mode == GPIO_MODE_OUTPUT_OD);
         read_pid(0x36, 1);
-        puts("PASS: only SENSOR SCL/SDA enter analog/no-pull, direction cache restores and real transaction resumes.");
+        puts("PASS: only SENSOR SCL/SDA enter analog/no-pull, open-drain restores and real transaction resumes.");
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "stop") == 0)
@@ -235,7 +229,7 @@ int main(int argc, char **argv)
         read_pid(0x00, 1);
         read_pid(0xFF, 1);
         read_pid(0x36, 0);
-        assert(redundant_sda_inits == 0);
+        assert(sda_init_calls == 1);
         puts("PASS: software I2C releases NACK, presets ACK low without contention, preserves PID bits and read clocks.");
     }
     return 0;

@@ -9,6 +9,29 @@
 
 ADC_HandleTypeDef hadc1;
 Host_ADC_TypeDef host_adc1;
+uint8_t host_adc_clock_enabled;
+static uint32_t primask;
+
+uint32_t __get_PRIMASK(void)
+{
+    return primask;
+}
+
+void __disable_irq(void)
+{
+    primask = 1;
+}
+
+void __set_PRIMASK(uint32_t value)
+{
+    primask = value;
+}
+
+void host_adc_clock_set(uint8_t enabled)
+{
+    assert(primask == 1 && enabled != host_adc_clock_enabled);
+    host_adc_clock_enabled = enabled;
+}
 static uint32_t now_ms;
 static uint32_t adc_value;
 uint32_t SystemCoreClock = 84000000;
@@ -62,6 +85,7 @@ int xSemaphoreGive(SemaphoreHandle_t mutex)
 
 HAL_StatusTypeDef HAL_ADC_ConfigChannel(ADC_HandleTypeDef *adc, ADC_ChannelConfTypeDef *config)
 {
+    assert(host_adc_clock_enabled != 0 && primask == 0);
     assert(adc == &hadc1 && config->Rank == 1 && config->SamplingTime == ADC_SAMPLETIME_480CYCLES);
     selected_channel = config->Channel;
     if (fail_battery_channel != 0 && selected_channel == ADC_CHANNEL_1)
@@ -77,21 +101,21 @@ HAL_StatusTypeDef HAL_ADC_ConfigChannel(ADC_HandleTypeDef *adc, ADC_ChannelConfT
 
 HAL_StatusTypeDef HAL_ADC_Start(ADC_HandleTypeDef *adc)
 {
-    assert(adc == &hadc1 && !locked);
+    assert(host_adc_clock_enabled != 0 && primask == 0 && adc == &hadc1 && !locked);
     ++starts;
     return start_result;
 }
 
 HAL_StatusTypeDef HAL_ADC_PollForConversion(ADC_HandleTypeDef *adc, uint32_t timeout_ms)
 {
-    assert(adc == &hadc1 && !locked && timeout_ms > 0 && timeout_ms <= 2U);
+    assert(host_adc_clock_enabled != 0 && primask == 0 && adc == &hadc1 && !locked && timeout_ms > 0 && timeout_ms <= 2U);
     ++polls;
     return poll_result;
 }
 
 uint32_t HAL_ADC_GetValue(ADC_HandleTypeDef *adc)
 {
-    assert(adc == &hadc1 && !locked && poll_result == HAL_OK);
+    assert(host_adc_clock_enabled != 0 && primask == 0 && adc == &hadc1 && !locked && poll_result == HAL_OK);
     ++reads;
     if (selected_channel == ADC_CHANNEL_VREFINT)
     {
@@ -102,7 +126,7 @@ uint32_t HAL_ADC_GetValue(ADC_HandleTypeDef *adc)
 
 HAL_StatusTypeDef HAL_ADC_Stop(ADC_HandleTypeDef *adc)
 {
-    assert(adc == &hadc1 && !locked);
+    assert(host_adc_clock_enabled != 0 && primask == 0 && adc == &hadc1 && !locked);
     ++stops;
     return stop_result;
 }
@@ -144,7 +168,7 @@ static void check_percent(void)
     }
     next_sample();
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.valid && snapshot.voltage_mv == 3900 && snapshot.percent == 24);
+    assert(snapshot.valid && snapshot.voltage_mv == 3900 && snapshot.percent == 34);
     /* 复现日志里的短时压降：电压快速跟随，电量慢滤波避免直接锁到接近0%。 */
     adc_value = (3710 * 4095 + 3300) / 6600;
     for (i = 0; i < 60; ++i)
@@ -152,7 +176,7 @@ static void check_percent(void)
         next_sample();
     }
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.voltage_mv < 3720 && snapshot.percent >= 18 && snapshot.percent < 24);
+    assert(snapshot.voltage_mv < 3720 && snapshot.percent == 20);
     previous_percent = snapshot.percent;
     adc_value = (3900 * 4095 + 3300) / 6600;
     for (i = 0; i < 2048; ++i)
@@ -210,22 +234,32 @@ static void check_full_voltage(void)
     static const uint16_t voltages_mv[] =
     {
         0, 3400, 3499, 3500, 3502, 3512, 3513, 3525, 3550, 3575, 3600, 3625, 3650,
-        3675, 3700, 3725, 3750, 3782, 3800, 3825, 3850, 3874, 3875, 3900,
-        3925, 3950, 4000, 4050, 4100, 4150, 4190, 4200, 4300
+        3675, 3700, 3725, 3750, 3782, 3800, 3825, 3850, 3860, 3861, 3900,
+        3925, 3950, 3975, 4000, 4025, 4048, 4050, 4051, 4300
     };
-    /* 通过真实ADC换算与启动均值核对A2节点、插值、两端限幅和低电预警边界。 */
+    /* 通过真实ADC换算与启动均值核对标定节点、插值、两端限幅和低电预警边界。 */
     static const uint8_t percentages[] =
     {
         0, 0, 0, 0, 0, 0, 1, 1, 2, 4, 5, 6, 7,
-        9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 24,
-        30, 36, 42, 54, 77, 91, 98, 100, 100
+        9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 34,
+        41, 48, 66, 83, 92, 99, 100, 100, 100
     };
     app_battery_struct snapshot;
+    uint8_t count;
+    const app_battery_curve_point_struct *points = app_battery_get_curve(&count);
     unsigned i, sample;
-    const uint32_t supply_mv = 3309; /* VREFINT读数1496时反算为3309mV，可恰好量化出3874和3875mV。 */
-    reference_value = 1496;
+    const uint32_t supply_mv = 3315; /* VREFINT读数1493时反算为3315mV，可恰好量化出3860和3861mV。 */
+    assert(count == 12 && points[0].voltage_mv == 3500 && points[count - 1].voltage_mv == 4050);
+    assert(app_battery_voltage_to_percent(4049) == 100);
+    for (i = 0; i < count; ++i)
+    {
+        assert(points[i].voltage_mv == 3500 + i * 50);
+        assert(app_battery_voltage_to_percent(points[i].voltage_mv) == points[i].percent);
+    }
+    reference_value = 1493;
     for (i = 0; i < sizeof(voltages_mv) / sizeof(voltages_mv[0]); ++i)
     {
+        assert(app_battery_voltage_to_percent(voltages_mv[i]) == percentages[i]);
         app_battery_init();
         adc_value = ((uint32_t)voltages_mv[i] * 4095 + supply_mv) / (supply_mv * 2);
         for (sample = 0; sample < 8; ++sample)
@@ -238,7 +272,7 @@ static void check_full_voltage(void)
         assert(snapshot.percent == percentages[i]);
     }
     reference_value = host_vrefint_cal;
-    puts("PASS: A2 nodes, rounded interpolation, 3874mV/20% and 3875mV/21%, zero and full clamps.");
+    puts("PASS: 12 curve nodes, rounded interpolation, 3860mV/20% and 3861mV/21%, zero and 4050mV full clamp.");
 }
 
 static void check_sleep_sampling(void)
@@ -299,7 +333,7 @@ static void check_sleep_sampling(void)
             app_battery_service();
         }
         app_battery_get_snapshot(&snapshot);
-        assert(snapshot.valid && snapshot.percent < 24);
+        assert(snapshot.valid && snapshot.percent == 32);
         if (profile == 0)
         {
             awake_voltage_mv = snapshot.voltage_mv;
@@ -356,6 +390,7 @@ static void check_reference_calibration(void)
     host_vrefint_cal = 1500;
     ADC->CCR |= ADC_CCR_TSVREFE;
     assert(battery_adc_read_raw(2, &raw, &vdda_mv) == HAL_OK && vdda_mv == 3300);
+    assert(host_adc_clock_enabled == 0 && primask == 0);
     assert((ADC->CCR & ADC_CCR_TSVREFE) != 0 && polls == stops);
     puts("PASS: VREFINT keeps 3.85V battery readings stable at VDDA 3.000/3.278/3.300/3.600V; invalid calibration/reference and second-channel failures publish nothing and restore reference power.");
 }
@@ -394,9 +429,12 @@ int main(int argc, char **argv)
     host_adc1.CR2 = 0x100;
     assert(battery_adc_is_stop_idle() != 0);
     host_adc1.CR2 |= ADC_CR2_ADON;
+    assert(battery_adc_is_stop_idle() != 0); /* 时钟关闭时不读ADC寄存器。 */
+    host_adc_clock_enabled = 1;
     assert(battery_adc_is_stop_idle() == 0 && host_adc1.CR2 == 0x101);
     host_adc1.CR2 &= ~ADC_CR2_ADON;
     assert(battery_adc_is_stop_idle() != 0);
+    host_adc_clock_enabled = 0;
     assert(battery_adc_read_raw(2, NULL, NULL) == HAL_ERROR);
     assert(starts == 0 && polls == 0 && reads == 0 && stops == 0);
     puts("PASS: NULL ADC output returns HAL_ERROR without starting a conversion.");

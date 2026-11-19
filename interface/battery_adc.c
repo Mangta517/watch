@@ -47,7 +47,7 @@ HAL_StatusTypeDef battery_adc_read_raw(uint32_t timeout_ms, uint16_t *raw, uint3
 {
     uint16_t reference, battery;
     uint16_t calibration = *VREFINT_CAL_ADDR;
-    uint32_t reference_enabled = ADC->CCR & ADC_CCR_TSVREFE;
+    uint32_t reference_enabled, primask;
     uint32_t supply_mv = 0;
     HAL_StatusTypeDef result;
 
@@ -55,6 +55,12 @@ HAL_StatusTypeDef battery_adc_read_raw(uint32_t timeout_ms, uint16_t *raw, uint3
     {
         return HAL_ERROR;
     }
+    /* APB2 门控与显示及蓝牙共用寄存器，保护读改写。 */
+    primask = __get_PRIMASK();
+    __disable_irq();
+    __HAL_RCC_ADC1_CLK_ENABLE();
+    __set_PRIMASK(primask);
+    reference_enabled = ADC->CCR & ADC_CCR_TSVREFE;
     result = battery_adc_read_channel(ADC_CHANNEL_VREFINT, timeout_ms, &reference);
     if (result == HAL_OK)
     {
@@ -80,6 +86,10 @@ HAL_StatusTypeDef battery_adc_read_raw(uint32_t timeout_ms, uint16_t *raw, uint3
     {
         ADC->CCR &= ~ADC_CCR_TSVREFE;
     }
+    primask = __get_PRIMASK();
+    __disable_irq();
+    __HAL_RCC_ADC1_CLK_DISABLE();
+    __set_PRIMASK(primask);
     if (result == HAL_OK)
     {
         *raw = battery;
@@ -90,5 +100,5 @@ HAL_StatusTypeDef battery_adc_read_raw(uint32_t timeout_ms, uint16_t *raw, uint3
 
 uint8_t battery_adc_is_stop_idle(void)
 {
-    return (ADC1->CR2 & ADC_CR2_ADON) == 0;
+    return __HAL_RCC_ADC1_IS_CLK_DISABLED() || (ADC1->CR2 & ADC_CR2_ADON) == 0;
 }

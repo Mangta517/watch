@@ -467,7 +467,7 @@ static void app_sensor_task(void *pvParameters)
     uint32_t baro_ms, baro_window_ms, battery_ms, now_ms, power_state; /* 气压周期起点、气压窗口起点、电池节拍、当前毫秒、电源状态快照。 */
     uint32_t period_ms = APP_SENSOR_TASK_PERIOD; /* 本轮调度周期，初值25ms。 */
     app_heart_struct heart; /* 心率快照，供本任务做调度判断。 */
-    uint8_t sleeping = 0, bus_parked = 0, environment_active = 0; /* 熄屏睡眠、总线已挂起、温湿度窗口激活标志。 */
+    uint8_t sleeping = 0, environment_active = 0; /* 熄屏睡眠、温湿度窗口激活标志。 */
     uint8_t sleep_requested, imu_active, bus_needed, imu_warming = 0; /* 睡眠请求、本轮是否用IMU、是否需要总线、IMU预热中。 */
     uint8_t imu_sample_pending = 0, heart_pending, mpu_recovery = 0, mpu_recovering = 0; /* 待取IMU帧、心率待处理、MPU恢复步骤结果、恢复进行中。 */
     uint8_t compass_active = 0, compass_requested, compass_pending = 1;
@@ -487,7 +487,7 @@ static void app_sensor_task(void *pvParameters)
     /* 记录sensor任务启动时刻到启动诊断。 */
     app_diag_boot_set(APP_BOOT_SENSOR_BEGIN_MS, HAL_GetTick());
 
-    /* SENSOR总线从初始化到采样均由本任务独占；失败仍进入原有故障处理。 */
+    /* SENSOR 由本任务独占，空闲时开漏释放，避免每个 25ms 周期重新配置 GPIO。 */
     my_i2c_init(MY_I2C_BUS_SENSOR);
     /* 依次初始化MPU6050、气压计、磁力计、心率传感器，并把各自结果记入诊断。 */
     app_imu_init_hw();
@@ -560,15 +560,6 @@ static void app_sensor_task(void *pvParameters)
             environment_active = 0;
             /* 把熄屏/亮屏状态交给心率模块，决定是否允许后台自动测量。 */
             app_heart_set_sleep_mode(sleeping);
-            /* 由睡眠切回非睡眠时，若总线已被挂起则重新初始化。 */
-            if (sleeping == 0)
-            {
-                if (bus_parked != 0)
-                {
-                    my_i2c_init(MY_I2C_BUS_SENSOR);
-                    bus_parked = 0;
-                }
-            }
         }
         /* 把熄屏与否交给电池模块：启动均值阶段仍按1s，完成后熄屏改为10s。 */
         app_battery_set_sleep_mode((power_state & APP_POWER_SCREEN_OFF) != 0);
@@ -604,12 +595,6 @@ static void app_sensor_task(void *pvParameters)
             baro_window_ms = now_ms;
             baro_active = 1;
             baro_sleep_pending = 0;
-            /* 总线若被挂起，先重新初始化再访问器件。 */
-            if (bus_parked != 0)
-            {
-                my_i2c_init(MY_I2C_BUS_SENSOR);
-                bus_parked = 0;
-            }
             /* 唤醒气压计，开始本轮转换。 */
             app_baro_set_sleep(0);
         }
@@ -620,12 +605,6 @@ static void app_sensor_task(void *pvParameters)
             environment_ms += (uint32_t)(now_ms - environment_ms) / APP_AHT21_SLEEP_PERIOD_MS * APP_AHT21_SLEEP_PERIOD_MS;
             window_ms = now_ms;
             environment_active = 1;
-            /* 总线若被挂起，先恢复再让温湿度服务访问。 */
-            if (bus_parked != 0)
-            {
-                my_i2c_init(MY_I2C_BUS_SENSOR);
-                bus_parked = 0;
-            }
         }
         /* 取一份心率快照，并查询是否有待处理的熄屏自动测量。 */
         app_heart_get_snapshot(&heart);
@@ -670,12 +649,6 @@ static void app_sensor_task(void *pvParameters)
         /* 总线需求：未睡眠，或温湿度/气压窗口激活，或气压休眠待写，或本轮要用IMU。 */
         bus_needed = sleeping == 0 || environment_active != 0 || baro_active != 0 || baro_sleep_pending != 0 ||
                      imu_active != 0 || compass_active != 0 || compass_pending != 0;
-        /* 需要总线但当前处于挂起状态：重新初始化软件I2C并清除挂起标志。 */
-        if (bus_needed != 0 && bus_parked != 0)
-        {
-            my_i2c_init(MY_I2C_BUS_SENSOR);
-            bus_parked = 0;
-        }
         if (bus_needed != 0)
         {
             /* 有气压休眠待写时，尝试写一次；失败则保留标志，下一拍继续重试。 */
@@ -837,14 +810,6 @@ static void app_sensor_task(void *pvParameters)
             {
                 battery_ms = now_ms;
                 app_battery_service();
-            }
-            /* 所有硬件活动都已收尾且总线未挂起：释放软件I2C引脚并记挂起。 */
-            if (imu_continuous == 0 && environment_active == 0 && baro_active == 0 && baro_sleep_pending == 0 && imu_sample_pending == 0 && compass_active == 0 && compass_pending == 0 &&
-                app_heart_sleep_pending() == 0 && bus_parked == 0)
-            {
-                /* MPU继续自主40Hz采样，磁力计已休眠；仅释放软件I2C引脚。 */
-                my_i2c_suspend(MY_I2C_BUS_SENSOR);
-                bus_parked = 1;
             }
         }
         /* 亮屏且本拍没读气压、距上次电池服务满1000ms：服务电池。 */

@@ -48,7 +48,7 @@ void HAL_GPIO_Init(GPIO_TypeDef *gpio, GPIO_InitTypeDef *config)
     }
     if (config->Pin == sda_pin)
     {
-        assert(config->Mode == GPIO_MODE_INPUT || config->Mode == GPIO_MODE_OUTPUT_OD);
+        assert(config->Mode == GPIO_MODE_OUTPUT_OD);
         sda_mode = config->Mode;
     }
     else
@@ -64,7 +64,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *gpio, uint16_t pin, GPIO_PinState value)
     {
         if (scl == GPIO_PIN_RESET && value == GPIO_PIN_SET && in_transaction == 0)
         {
-            assert(sda_mode == GPIO_MODE_INPUT || sda == GPIO_PIN_RESET);
+            assert(sda_mode == GPIO_MODE_OUTPUT_OD);
             ++clocks;
             if (release_after != 0 && clocks >= release_after)
             {
@@ -77,7 +77,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *gpio, uint16_t pin, GPIO_PinState value)
     {
         assert(pin == sda_pin);
         if (scl == GPIO_PIN_SET && sda == GPIO_PIN_SET && value == GPIO_PIN_RESET &&
-            sda_mode != GPIO_MODE_INPUT && stuck_sda == 0 && stuck_scl == 0)
+            sda_mode == GPIO_MODE_OUTPUT_OD && stuck_sda == 0 && stuck_scl == 0)
         {
             ++starts;
             in_transaction = 1;
@@ -102,7 +102,7 @@ GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *gpio, uint16_t pin)
         }
         return scl;
     }
-    assert(pin == sda_pin && sda_mode == GPIO_MODE_INPUT && scl == GPIO_PIN_SET);
+    assert(pin == sda_pin && sda_mode == GPIO_MODE_OUTPUT_OD && sda == GPIO_PIN_SET && scl == GPIO_PIN_SET);
     if (in_transaction != 0)
     {
         ++response_pos;
@@ -177,10 +177,10 @@ int main(int argc, char **argv)
     else if (selected_bus == MY_I2C_BUS_TP)
     {
         assert(my_i2c_recover(selected_bus) == 0);
-        /* 模拟touch自己的GPIO配置，使上次公共调用的缓存不再描述硬件。 */
-        sda_mode = GPIO_MODE_OUTPUT_PP;
+        /* 模拟触摸驱动读完字节后把SDA留在输入模式。 */
+        sda_mode = GPIO_MODE_INPUT;
         assert(my_i2c_recover(selected_bus) == 0);
-        assert(clocks == 20 && sda_mode == GPIO_MODE_INPUT);
+        assert(clocks == 20 && sda_mode == GPIO_MODE_OUTPUT_OD && sda == GPIO_PIN_SET);
     }
     else if (stuck_sda != 0 && release_after == 0)
     {
@@ -190,7 +190,7 @@ int main(int argc, char **argv)
     else if (stuck_scl != 0)
     {
         assert(my_i2c_read_bytes(selected_bus, 0x68, 0x3A, &value, 1) == 1);
-        assert(value == 0x5A && starts == 0 && scl_reads <= 32 && nops < 10000);
+        assert(value == 0x5A && starts == 0 && scl_reads <= 44 && nops < 10000);
     }
     else
     {

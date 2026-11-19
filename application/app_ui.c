@@ -35,6 +35,7 @@
 #include "app_heart.h"
 #include "app_aht21.h"
 #include "app_battery.h"
+#include "app_battery_log.h"
 #include "app_touch.h"
 #include "app_task.h"
 #include "watch_rtc.h"
@@ -51,6 +52,7 @@
 #define UI_ANIM_MS           160
 #define UI_KEY_MS            30
 #define UI_TOUCH_IDLE_MS     10000
+#define UI_WATCH_IDLE_POLL_MS 500
 #define UI_ENTRY_DRAG_LIMIT  10
 #define UI_MIN_BRIGHTNESS    2
 #define UI_HISTORY           16
@@ -58,6 +60,11 @@
 #define UI_BARO_REFRESH_MS   5000
 #define UI_COMPASS_FILTER_MS 100
 #define UI_COMPASS_MAX_DPS   360.0f
+#define UI_BATTERY_LOW_PERCENT 20
+#define BATTERY_PLOT_LEFT       8
+#define BATTERY_PLOT_RIGHT    171
+#define BATTERY_PLOT_TOP        7
+#define BATTERY_PLOT_BOTTOM    84
 #define WATCH_DIAL_WIDTH     240
 #define WATCH_DIAL_HEIGHT    280
 #define WATCH_DIAL_CENTER_X  (WATCH_DIAL_WIDTH / 2)
@@ -85,6 +92,7 @@ typedef enum
     PAGE_AHT21,
     PAGE_WEATHER,
     PAGE_SPORT,
+    PAGE_BATTERY,
     PAGE_COUNT
 } ui_page_t;
 
@@ -112,6 +120,17 @@ typedef struct
         lv_obj_t *label;
         lv_obj_t *bar;
     } battery;
+    struct
+    {
+        lv_obj_t *voltage, *unit, *millivolts, *percent, *status, *curve_value;
+        lv_obj_t *plot, *keys, *raw, *log;
+        uint32_t log_tick;
+        uint8_t sample_loaded;
+        uint8_t keys_dirty;
+        uint8_t key_child;
+        uint8_t raw_dirty;
+        uint8_t log_visible;
+    } battery_detail;
     struct
     {
         lv_obj_t *label;
@@ -590,7 +609,8 @@ typedef enum
     UI_ICON_BAROMETER,
     UI_ICON_WEATHER,
     UI_ICON_STEPS,
-    UI_ICON_DROP
+    UI_ICON_DROP,
+    UI_ICON_BATTERY
 } ui_vector_icon_t;
 
 /* 同一套20px几何用于网格徽章和表盘细环，不增加位图或字形。 */
@@ -633,6 +653,11 @@ static void vector_icon_draw_cb(lv_event_t *event)
         weather_icon_shape(context, &area, 7, 7, 10, 10, UI_TEXT);
         weather_icon_shape(context, &area, 2, 11, 18, 7, UI_TEXT);
         break;
+    case UI_ICON_BATTERY:
+        weather_icon_shape(context, &area, 1, 5, 16, 10, UI_BATTERY_GREEN);
+        weather_icon_shape(context, &area, 16, 8, 3, 4, UI_BATTERY_GREEN);
+        weather_icon_shape(context, &area, 9, 7, 6, 6, 0x14332C);
+        break;
     case UI_ICON_STEPS:
         weather_icon_shape(context, &area, 1, 4, 6, 9, UI_BATTERY_GREEN);
         weather_icon_shape(context, &area, 2, 0, 4, 3, UI_BATTERY_GREEN);
@@ -661,7 +686,7 @@ static void vector_icon(lv_obj_t *parent, int x, int y, ui_vector_icon_t icon)
 static void card(const char *icon, const char *title, int index, uint32_t accent, const ui_page_t *destination)
 {
     static const uint32_t badge_colors[] = {0x302035, 0x142D43, 0x123536, 0x14332C,
-                                           0x362D1D, 0x142D43, 0x35271F, 0x14332C};
+                                           0x362D1D, 0x142D43, 0x35271F, 0x14332C, 0x14332C};
     lv_obj_t *obj = ui_card(s_body, (index % 2) * 110, 2 + (index / 2) * 70, 102, 64, UI_CARD_SOFT, 0, 14);
     lv_obj_t *badge = ui_card(obj, 35, 7, 32, 32, badge_colors[index], 0, 11);
     lv_obj_t *caption = ui_label(obj, title, 0, 44, &lv_font_montserrat_10, UI_TEXT);
@@ -682,6 +707,9 @@ static void card(const char *icon, const char *title, int index, uint32_t accent
         break;
     case PAGE_AHT21:
         vector_icon(badge, 6, 6, UI_ICON_DROP);
+        break;
+    case PAGE_BATTERY:
+        vector_icon(badge, 6, 6, UI_ICON_BATTERY);
         break;
     default:
     {
@@ -915,6 +943,7 @@ static void watch_page(void)
 {
     static const ui_page_t climate = PAGE_AHT21;
     static const ui_page_t heart = PAGE_HEART;
+    static const ui_page_t battery = PAGE_BATTERY;
     lv_obj_t *dial, *number, *hub, *entry, *label;
     char text[3];
     uint8_t hour;
@@ -943,11 +972,12 @@ static void watch_page(void)
     make_entry(entry, &heart);
 
     entry = ui_card(dial, 148, 39, 64, 24, UI_CARD_SOFT, 0, LV_RADIUS_CIRCLE);
-    lv_obj_clear_flag(entry, LV_OBJ_FLAG_CLICKABLE);
     create_battery_ring(entry, 2, 3, 18, 3);
     s_view.battery.label = ui_label(entry, "--%", 2, 8, &lv_font_montserrat_10, UI_MUTED);
     lv_obj_set_width(s_view.battery.label, 60);
     lv_obj_set_style_text_align(s_view.battery.label, LV_TEXT_ALIGN_RIGHT, 0);
+    make_entry(entry, &battery);
+    lv_obj_set_ext_click_area(entry, 6);
 
     s_view.watch.time = ui_label(dial, "--:--", WATCH_DIAL_CENTER_X - 38, 66, &lv_font_montserrat_20, UI_TEXT);
     lv_obj_set_width(s_view.watch.time, 76);
@@ -1332,8 +1362,8 @@ static void compass_draw_cb(lv_event_t *event)
     {
         return;
     }
-    /* 用当前航向角求指针方向的正弦/余弦。 */
-    sine = lv_trigo_sin(s_view.motion.compass_heading);
+    /* 航向是12点相对磁北的顺时针角，磁北在表盘上的方位取负角。 */
+    sine = -lv_trigo_sin(s_view.motion.compass_heading);
     cosine = lv_trigo_cos(s_view.motion.compass_heading);
     /* 左右两个侧点位于与指针垂直的方向，距圆心8像素。 */
     left.x = center.x - cosine * 8 / LV_TRIGO_SIN_MAX;
@@ -1347,7 +1377,7 @@ static void compass_draw_cb(lv_event_t *event)
     /* 四个三角面组成双色菱形指针，不增加位图或常驻控件。 */
     for (angle = 0; angle < 2; ++angle)
     {
-        /* 第0轮画指向航向的北半段，用s_compass_color。 */
+        /* 第0轮画指向磁北的半段，用s_compass_color。 */
         if (angle == 0)
         {
             tip.x = center.x + sine * 30 / LV_TRIGO_SIN_MAX;
@@ -1492,8 +1522,8 @@ static void compass_invalidate_needle(int16_t previous_heading, int16_t heading)
         {
             continue;
         }
-        /* 求该航向的三角函数值。 */
-        sine = lv_trigo_sin(headings[i]);
+        /* 与绘制一致，按航向的负角计算磁北端点。 */
+        sine = -lv_trigo_sin(headings[i]);
         cosine = lv_trigo_cos(headings[i]);
         /* 北向尖端，长30像素。 */
         points[0].x = center.x + sine * 30 / LV_TRIGO_SIN_MAX;
@@ -2100,6 +2130,7 @@ static void heart_details_cb(lv_event_t *event)
         ui_set_label_text(s_view.heart.details_title, "DETAILS  -");
         /* 无动画滚动到展开后的详情卡。 */
         lv_obj_scroll_to_view(s_view.heart.details, LV_ANIM_OFF);
+        refresh_data();
     }
     else
     {
@@ -2168,6 +2199,64 @@ static void heart_window(void)
     lv_obj_set_width(s_view.heart.status, 184);
     /* 初始收起，等用户点DETAILS展开。 */
     lv_obj_add_flag(s_view.heart.details, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void refresh_heart_details(const app_heart_struct *heart, const char *status)
+{
+    /* 故障时保留实际失败步骤；读取失败不能只显示算法的 NO SIGNAL。 */
+    if (heart->state == APP_HEART_ERROR)
+    {
+        /* 把驱动故障类型翻译成具体步骤名。 */
+        const char *reason;
+        switch (heart->fault.kind)
+        {
+        case EM7028_FAULT_READ:
+            reason = "I2C READ";
+            break;
+        case EM7028_FAULT_WRITE:
+            reason = "I2C WRITE";
+            break;
+        case EM7028_FAULT_PID:
+            reason = "PID CHECK";
+            break;
+        case EM7028_FAULT_CONFIG:
+            reason = "CONFIG CHECK";
+            break;
+        case EM7028_FAULT_DATA_CHANGED:
+            reason = "DATA CHANGED";
+            break;
+        default:
+            reason = "SAMPLE WAIT";
+            break;
+        }
+        /* PID/配置校验失败时显示相关寄存器地址及实际读到的值。 */
+        if (heart->fault.kind == EM7028_FAULT_PID || heart->fault.kind == EM7028_FAULT_CONFIG)
+        {
+            ui_set_label_text_fmt(s_view.heart.status, "%s\n%s REG %02X\nVALUE %02X", status, reason, (unsigned)heart->fault.reg,
+                               (unsigned)heart->fault.value);
+        }
+        else
+        {
+            /* 其他故障只显示相关寄存器号，并提示重新START。 */
+            ui_set_label_text_fmt(s_view.heart.status, "%s\n%s REG %02X\nRetry START", status, reason, (unsigned)heart->fault.reg);
+        }
+    }
+    else
+    {
+        /* 正常状态显示原始光强、交流幅度(0.1计数为单位拆成整数/小数)和波峰间隔毫秒。 */
+        ui_set_label_text_fmt(s_view.heart.status, "%s\nHRS1 %u  AC %lu.%lu\nPERIOD %u ms", status, (unsigned)heart->raw,
+                           (unsigned long)(heart->signal_x10 / 10), (unsigned long)(heart->signal_x10 % 10),
+                           (unsigned)heart->interval_ms);
+    }
+    /* 故障详情红色，其余灰色。 */
+    if (heart->state == APP_HEART_ERROR)
+    {
+        ui_set_text_color(s_view.heart.status, UI_RED);
+    }
+    else
+    {
+        ui_set_text_color(s_view.heart.status, UI_MUTED);
+    }
 }
 
 static void refresh_heart(void)
@@ -2247,59 +2336,9 @@ static void refresh_heart(void)
     {
         ui_set_text_color(s_view.heart.summary, UI_MUTED);
     }
-    /* 故障时保留实际失败步骤；读取失败不能只显示算法的 NO SIGNAL。 */
-    if (heart.state == APP_HEART_ERROR)
+    if (lv_obj_is_visible(s_view.heart.details))
     {
-        /* 把驱动故障类型翻译成具体步骤名。 */
-        const char *reason;
-        switch (heart.fault.kind)
-        {
-        case EM7028_FAULT_READ:
-            reason = "I2C READ";
-            break;
-        case EM7028_FAULT_WRITE:
-            reason = "I2C WRITE";
-            break;
-        case EM7028_FAULT_PID:
-            reason = "PID CHECK";
-            break;
-        case EM7028_FAULT_CONFIG:
-            reason = "CONFIG CHECK";
-            break;
-        case EM7028_FAULT_DATA_CHANGED:
-            reason = "DATA CHANGED";
-            break;
-        default:
-            reason = "SAMPLE WAIT";
-            break;
-        }
-        /* PID/配置校验失败时显示相关寄存器地址及实际读到的值。 */
-        if (heart.fault.kind == EM7028_FAULT_PID || heart.fault.kind == EM7028_FAULT_CONFIG)
-        {
-            ui_set_label_text_fmt(s_view.heart.status, "%s\n%s REG %02X\nVALUE %02X", status, reason, (unsigned)heart.fault.reg,
-                               (unsigned)heart.fault.value);
-        }
-        else
-        {
-            /* 其他故障只显示相关寄存器号，并提示重新START。 */
-            ui_set_label_text_fmt(s_view.heart.status, "%s\n%s REG %02X\nRetry START", status, reason, (unsigned)heart.fault.reg);
-        }
-    }
-    else
-    {
-        /* 正常状态显示原始光强、交流幅度(0.1计数为单位拆成整数/小数)和波峰间隔毫秒。 */
-        ui_set_label_text_fmt(s_view.heart.status, "%s\nHRS1 %u  AC %lu.%lu\nPERIOD %u ms", status, (unsigned)heart.raw,
-                           (unsigned long)(heart.signal_x10 / 10), (unsigned long)(heart.signal_x10 % 10),
-                           (unsigned)heart.interval_ms);
-    }
-    /* 故障详情红色，其余灰色。 */
-    if (heart.state == APP_HEART_ERROR)
-    {
-        ui_set_text_color(s_view.heart.status, UI_RED);
-    }
-    else
-    {
-        ui_set_text_color(s_view.heart.status, UI_MUTED);
+        refresh_heart_details(&heart, status);
     }
     /* 运动模式下手动按钮禁用并显示SPORT。 */
     if (s_sport_mode != 0)
@@ -2460,20 +2499,246 @@ static void climate_page(void)
     lv_obj_set_width(s_view.climate.samples, 184);
 }
 
+/* 切出电池页时旧屏仍参与动画，绘图快照保留至下次创建电池页。 */
+static struct
+{
+    app_battery_struct sample;
+    uint32_t low_mv;
+    uint8_t curve_percent;
+} s_battery_plot;
+
+static lv_coord_t battery_plot_y(uint8_t percent)
+{
+    return BATTERY_PLOT_BOTTOM - (percent * (BATTERY_PLOT_BOTTOM - BATTERY_PLOT_TOP) + 50) / 100;
+}
+
+static lv_coord_t battery_plot_x(uint32_t mv, uint32_t min_mv, uint32_t max_mv)
+{
+    uint32_t span_mv = max_mv - min_mv;
+    if (mv <= min_mv)
+    {
+        return BATTERY_PLOT_LEFT;
+    }
+    if (mv >= max_mv)
+    {
+        return BATTERY_PLOT_RIGHT;
+    }
+    return BATTERY_PLOT_LEFT + ((mv - min_mv) * (BATTERY_PLOT_RIGHT - BATTERY_PLOT_LEFT) + span_mv / 2) / span_mv;
+}
+
+static void battery_plot_draw_cb(lv_event_t *event)
+{
+    lv_draw_ctx_t *context = lv_event_get_draw_ctx(event);
+    lv_draw_line_dsc_t line;
+    lv_area_t area;
+    lv_point_t start, end, split;
+    uint8_t count, i;
+    const app_battery_curve_point_struct *points = app_battery_get_curve(&count);
+    uint32_t min_mv = points[0].voltage_mv;
+    uint32_t max_mv = points[count - 1].voltage_mv;
+    lv_coord_t x, y, watch_y;
+    const lv_coord_t left = BATTERY_PLOT_LEFT;
+    const lv_coord_t right = BATTERY_PLOT_RIGHT;
+    uint32_t halo = UI_TEXT;
+    uint32_t dot = UI_BATTERY_GREEN;
+    lv_obj_get_coords(lv_event_get_target(event), &area);
+    lv_draw_line_dsc_init(&line);
+    line.width = 1;
+    line.color = lv_color_hex(UI_BORDER_STRONG);
+    for (i = 0; i <= 2; ++i)
+    {
+        x = area.x1 + battery_plot_x(min_mv + (max_mv - min_mv) * i / 2, min_mv, max_mv);
+        start = (lv_point_t){x, area.y1 + BATTERY_PLOT_TOP};
+        end = (lv_point_t){x, area.y1 + BATTERY_PLOT_BOTTOM};
+        lv_draw_line(context, &line, &start, &end);
+        y = area.y1 + battery_plot_y(50 * i);
+        start = (lv_point_t){area.x1 + left, y};
+        end = (lv_point_t){area.x1 + right, y};
+        lv_draw_line(context, &line, &start, &end);
+    }
+    y = area.y1 + battery_plot_y(UI_BATTERY_LOW_PERCENT);
+    start = (lv_point_t){area.x1 + left, y};
+    end = (lv_point_t){area.x1 + right, y};
+    line.color = lv_color_hex(UI_RED);
+    line.opa = LV_OPA_60;
+    line.dash_width = 6;
+    line.dash_gap = 4;
+    lv_draw_line(context, &line, &start, &end);
+
+    line.opa = LV_OPA_COVER;
+    line.dash_width = 0;
+    line.dash_gap = 0;
+    line.width = 2;
+    line.round_start = 1;
+    line.round_end = 1;
+    for (i = 1; i < count; ++i)
+    {
+        start = (lv_point_t){area.x1 + battery_plot_x(points[i - 1].voltage_mv, min_mv, max_mv),
+                             area.y1 + battery_plot_y(points[i - 1].percent)};
+        end = (lv_point_t){area.x1 + battery_plot_x(points[i].voltage_mv, min_mv, max_mv),
+                           area.y1 + battery_plot_y(points[i].percent)};
+        line.color = lv_color_hex(UI_BATTERY_GREEN);
+        if (points[i].voltage_mv <= s_battery_plot.low_mv)
+        {
+            line.color = lv_color_hex(UI_RED);
+        }
+        else if (points[i - 1].voltage_mv < s_battery_plot.low_mv)
+        {
+            split = (lv_point_t){area.x1 + battery_plot_x(s_battery_plot.low_mv, min_mv, max_mv),
+                                 area.y1 + battery_plot_y(UI_BATTERY_LOW_PERCENT)};
+            line.color = lv_color_hex(UI_RED);
+            lv_draw_line(context, &line, &start, &split);
+            start = split;
+            line.color = lv_color_hex(UI_BATTERY_GREEN);
+        }
+        lv_draw_line(context, &line, &start, &end);
+    }
+
+    if (s_battery_plot.sample.valid == 0)
+    {
+        return;
+    }
+    x = battery_plot_x(s_battery_plot.sample.voltage_mv, min_mv, max_mv);
+    y = battery_plot_y(s_battery_plot.curve_percent);
+    line.width = 1;
+    line.opa = LV_OPA_50;
+    line.color = lv_color_hex(UI_BLUE);
+    start = (lv_point_t){area.x1 + x, area.y1 + y};
+    end = (lv_point_t){start.x, area.y1 + BATTERY_PLOT_BOTTOM};
+    lv_draw_line(context, &line, &start, &end);
+    end = (lv_point_t){area.x1 + left, start.y};
+    lv_draw_line(context, &line, &start, &end);
+
+    watch_y = battery_plot_y(s_battery_plot.sample.percent);
+    if (LV_ABS((int)s_battery_plot.curve_percent - s_battery_plot.sample.percent) >= 2)
+    {
+        line.color = lv_color_hex(UI_AMBER);
+        end = (lv_point_t){start.x, area.y1 + watch_y};
+        lv_draw_line(context, &line, &start, &end);
+    }
+    if (s_battery_plot.sample.voltage_mv < min_mv || s_battery_plot.sample.voltage_mv > max_mv)
+    {
+        halo = UI_AMBER;
+    }
+    if (s_battery_plot.curve_percent <= UI_BATTERY_LOW_PERCENT)
+    {
+        dot = UI_RED;
+    }
+    weather_icon_shape(context, &area, x - 4, y - 4, 9, 9, halo);
+    weather_icon_shape(context, &area, x - 2, y - 2, 5, 5, dot);
+    /* 两点距离过近时保留主点轮廓，在边缘叠加表显标记。 */
+    if (LV_ABS((int)s_battery_plot.curve_percent - s_battery_plot.sample.percent) >= 2)
+    {
+        weather_icon_shape(context, &area, x - 2, watch_y - 2, 5, 5, UI_AMBER);
+    }
+}
+
+static void battery_page(void)
+{
+    static const uint8_t ticks[] = {100, 50, UI_BATTERY_LOW_PERCENT, 0};
+    lv_obj_t *card, *pill, *label;
+    uint8_t count, i;
+    const app_battery_curve_point_struct *points = app_battery_get_curve(&count);
+    uint32_t min_mv = points[0].voltage_mv;
+    uint32_t max_mv = points[count - 1].voltage_mv;
+    uint32_t low = min_mv, high = max_mv;
+    uint8_t rows = (count + 1) / 2;
+    int keys_height = 30 + rows * 14;
+
+    s_battery_plot.sample = (app_battery_struct){0};
+    /* 找出整数查表最后一个低电mV，跟随标定表及四舍五入规则。 */
+    while (high - low > 1)
+    {
+        uint32_t mid = low + (high - low) / 2;
+        if (app_battery_voltage_to_percent(mid) <= UI_BATTERY_LOW_PERCENT)
+        {
+            low = mid;
+        }
+        else
+        {
+            high = mid;
+        }
+    }
+    s_battery_plot.low_mv = low;
+
+    card = ui_panel(s_body, 0, 0, 212, 74, UI_CARD_SOFT);
+    ui_label(card, "VOLTAGE", 12, 10, &lv_font_montserrat_10, UI_MUTED);
+    pill = ui_card(card, 127, 7, 73, 17, UI_CARD_ALT, 0, LV_RADIUS_CIRCLE);
+    s_view.battery_detail.status = ui_label(pill, "WARMING", 0, 2, &lv_font_montserrat_10, UI_AMBER);
+    lv_obj_set_width(s_view.battery_detail.status, 73);
+    lv_obj_set_style_text_align(s_view.battery_detail.status, LV_TEXT_ALIGN_CENTER, 0);
+    s_view.battery_detail.voltage = ui_label(card, "--", 12, 23, &lv_font_montserrat_30, UI_TEXT);
+    s_view.battery_detail.unit = ui_label(card, "V", 0, 0, &lv_font_montserrat_14, UI_MUTED);
+    s_view.battery_detail.millivolts = ui_label(card, "-- mV", 12, 58, &lv_font_montserrat_10, UI_MUTED);
+    s_view.battery_detail.percent = ui_label(card, "--%", 111, 27, &lv_font_montserrat_20, UI_MUTED);
+    s_view.battery_detail.curve_value = ui_label(card, "CURVE --%", 111, 58, &lv_font_montserrat_10, UI_MUTED);
+    lv_obj_set_width(s_view.battery_detail.percent, 89);
+    lv_obj_set_width(s_view.battery_detail.curve_value, 89);
+    lv_obj_set_style_text_align(s_view.battery_detail.percent, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_align(s_view.battery_detail.curve_value, LV_TEXT_ALIGN_RIGHT, 0);
+
+    card = ui_panel(s_body, 0, 82, 212, 132, UI_CARD_SOFT);
+    ui_label(card, "CURVE", 12, 8, &lv_font_montserrat_10, UI_TEXT);
+    label = ui_label(card, "WATCH %", 122, 8, &lv_font_montserrat_10, UI_AMBER);
+    lv_obj_set_width(label, 78);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, 0);
+    s_view.battery_detail.plot = ui_panel(card, 26, 20, 180, 91, UI_CARD_SOFT);
+    lv_obj_set_style_bg_opa(s_view.battery_detail.plot, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(s_view.battery_detail.plot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_view.battery_detail.plot, battery_plot_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+    for (i = 0; i < sizeof(ticks) / sizeof(ticks[0]); ++i)
+    {
+        label = ui_label(card, "", 2, 14 + battery_plot_y(ticks[i]), &lv_font_montserrat_10, UI_MUTED);
+        lv_obj_set_width(label, 28);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, 0);
+        ui_set_label_text_fmt(label, "%u%%", (unsigned)ticks[i]);
+        if (ticks[i] == UI_BATTERY_LOW_PERCENT)
+        {
+            ui_set_text_color(label, UI_RED);
+        }
+    }
+    for (i = 0; i <= 2; ++i)
+    {
+        uint32_t mv = min_mv + (max_mv - min_mv) * i / 2;
+        lv_coord_t x = 26 + battery_plot_x(mv, min_mv, max_mv);
+        label = ui_label(card, "", LV_MIN(x - 20, 172), 115, &lv_font_montserrat_10, UI_MUTED);
+        lv_obj_set_width(label, 40);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        ui_set_label_text_fmt(label, "%lu.%02luV", (unsigned long)(mv / 1000), (unsigned long)(mv % 1000 / 10));
+    }
+
+    s_view.battery_detail.keys = ui_panel(s_body, 0, 222, 212, keys_height, UI_CARD_SOFT);
+    ui_label(s_view.battery_detail.keys, "CALIBRATION", 12, 9, &lv_font_montserrat_10, UI_TEXT);
+    for (i = 0; i < count; ++i)
+    {
+        uint8_t item = count - 1 - i;
+        uint32_t mv = points[item].voltage_mv;
+        label = ui_label(s_view.battery_detail.keys, "", 12 + (i / rows) * 99, 25 + (i % rows) * 14,
+                         &lv_font_montserrat_10, UI_MUTED);
+        ui_set_label_text_fmt(label, "%lu.%02luV  %u%%", (unsigned long)(mv / 1000), (unsigned long)(mv % 1000 / 10),
+                              (unsigned)points[item].percent);
+    }
+
+    card = ui_panel(s_body, 0, 230 + keys_height, 212, 60, UI_CARD_ALT);
+    ui_label(card, "TELEMETRY", 12, 8, &lv_font_montserrat_10, UI_TEXT);
+    s_view.battery_detail.raw = ui_label(card, "RAW --", 12, 25, &lv_font_montserrat_10, UI_MUTED);
+    s_view.battery_detail.log = ui_label(card, "LOG --", 12, 41, &lv_font_montserrat_10, UI_MUTED);
+}
+
 /* 设置网格页：按表驱动逐项创建入口卡片，点击跳到对应功能页。 */
 static void settings_page(void)
 {
-    /* 8个入口卡片的目标页，下标与下面titles/icons一一对应。 */
+    /* 入口卡片的目标页，下标与下面titles/icons一一对应。 */
     static const ui_page_t destinations[] = {PAGE_HEART, PAGE_MOTION, PAGE_ENVIRONMENT, PAGE_AHT21,
-                                             PAGE_WEATHER, PAGE_BLUETOOTH, PAGE_DISPLAY, PAGE_SPORT};
+                                             PAGE_WEATHER, PAGE_BLUETOOTH, PAGE_DISPLAY, PAGE_SPORT, PAGE_BATTERY};
     /* 卡片显示名称，顺序与destinations一致。 */
-    static const char *const titles[] = {"Heart rate", "Motion", "Barometer", "Climate", "Weather", "Bluetooth", "Display", "Sport mode"};
+    static const char *const titles[] = {"Heart rate", "Motion", "Barometer", "Climate", "Weather", "Bluetooth", "Display", "Sport mode", "Battery"};
     /* 卡片图标，使用LVGL内置符号字体。 */
     static const char *const icons[] = {"", "", "", "",
-                                        "", LV_SYMBOL_BLUETOOTH, LV_SYMBOL_SETTINGS, LV_SYMBOL_PLAY};
+                                        "", LV_SYMBOL_BLUETOOTH, LV_SYMBOL_SETTINGS, LV_SYMBOL_PLAY, ""};
     /* 每个功能磁贴使用与语义匹配的强调色。 */
     static const uint32_t accents[] = {UI_ROSE, UI_BLUE, UI_CYAN, UI_BATTERY_GREEN,
-                                       UI_AMBER, UI_BLUE, UI_ORANGE, UI_GREEN};
+                                       UI_AMBER, UI_BLUE, UI_ORANGE, UI_GREEN, UI_BATTERY_GREEN};
     /* 入口卡片下标。 */
     uint8_t i;
     /* 遍历全部入口，i同时作为卡片在网格中的位置序号。 */
@@ -2555,7 +2820,8 @@ static const ui_page_descriptor_struct s_pages[PAGE_COUNT] =
     [PAGE_ENVIRONMENT] = {"BAROMETER", baro_page, refresh_baro},
     [PAGE_AHT21] = {"CLIMATE", climate_page, refresh_aht21},
     [PAGE_WEATHER] = {"WEATHER", weather_page, refresh_weather},
-    [PAGE_SPORT] = {"SPORT MODE", sport_page, NULL}
+    [PAGE_SPORT] = {"SPORT MODE", sport_page, NULL},
+    [PAGE_BATTERY] = {"BATTERY", battery_page, NULL}
 };
 
 /* 切页只复位当前页面引用；LVGL对象由旧屏幕在动画结束后递归删除。 */
@@ -3124,8 +3390,166 @@ static void refresh_steps(void)
     }
 }
 
-/* valid才显示电量百分比，否则按result区分"--%"与"ADC ERR"。
- * 低电量阈值20%改红色，电压仍通过电池快照和日志提供。 */
+static void refresh_battery_keys(const app_battery_struct *battery)
+{
+    uint8_t child = 0;
+    if (battery->valid != 0)
+    {
+        uint8_t count, active = 0;
+        const app_battery_curve_point_struct *points = app_battery_get_curve(&count);
+        /* 当前区间取低端节点，标签按电压从高到低排列，第0项为标题。 */
+        while (active + 1 < count && battery->voltage_mv >= points[active + 1].voltage_mv)
+        {
+            ++active;
+        }
+        child = count - active;
+    }
+    if (child != s_view.battery_detail.key_child)
+    {
+        if (s_view.battery_detail.key_child != 0)
+        {
+            ui_set_text_color(lv_obj_get_child(s_view.battery_detail.keys, s_view.battery_detail.key_child), UI_MUTED);
+        }
+        if (child != 0)
+        {
+            ui_set_text_color(lv_obj_get_child(s_view.battery_detail.keys, child), UI_BLUE);
+        }
+        s_view.battery_detail.key_child = child;
+    }
+}
+
+static void refresh_battery_detail(const app_battery_struct *battery)
+{
+    static const char *const log_states[] =
+    {
+        [APP_BATTERY_LOG_STARTING] = "STARTING",
+        [APP_BATTERY_LOG_READY] = "READY",
+        [APP_BATTERY_LOG_FULL] = "FULL",
+        [APP_BATTERY_LOG_NEED_CLEAR] = "NEEDS CLEAR",
+        [APP_BATTERY_LOG_ERROR] = "ERROR"
+    };
+    static const char *const adc_states[] = {"OK", "ERROR", "BUSY", "TIMEOUT"};
+    const app_battery_struct *previous = &s_battery_plot.sample;
+    uint8_t first = s_view.battery_detail.sample_loaded == 0;
+    uint8_t voltage_changed = first || battery->valid != previous->valid || battery->voltage_mv != previous->voltage_mv;
+    uint8_t percent_changed = first || battery->valid != previous->valid || battery->percent != previous->percent;
+    uint8_t result_changed = first || battery->result != previous->result || battery->valid != previous->valid;
+    uint32_t now = lv_tick_get();
+
+    if (voltage_changed != 0)
+    {
+        if (battery->valid != 0)
+        {
+            uint32_t centivolts = (battery->voltage_mv + 5) / 10;
+            ui_set_label_text_fmt(s_view.battery_detail.voltage, "%lu.%02lu",
+                                  (unsigned long)(centivolts / 100), (unsigned long)(centivolts % 100));
+            ui_set_label_text_fmt(s_view.battery_detail.millivolts, "%lu mV", (unsigned long)battery->voltage_mv);
+            s_battery_plot.curve_percent = app_battery_voltage_to_percent(battery->voltage_mv);
+            ui_set_label_text_fmt(s_view.battery_detail.curve_value, "CURVE %u%%", (unsigned)s_battery_plot.curve_percent);
+        }
+        else
+        {
+            ui_set_label_text(s_view.battery_detail.voltage, "--");
+            ui_set_label_text(s_view.battery_detail.millivolts, "-- mV");
+            ui_set_label_text(s_view.battery_detail.curve_value, "CURVE --%");
+        }
+        lv_obj_align_to(s_view.battery_detail.unit, s_view.battery_detail.voltage, LV_ALIGN_OUT_RIGHT_BOTTOM, 4, -3);
+    }
+    if (percent_changed != 0)
+    {
+        uint32_t color = UI_MUTED;
+        if (battery->valid != 0)
+        {
+            color = UI_BATTERY_GREEN;
+            if (battery->percent <= UI_BATTERY_LOW_PERCENT)
+            {
+                color = UI_RED;
+            }
+            ui_set_label_text_fmt(s_view.battery_detail.percent, "~%u%%", (unsigned)battery->percent);
+        }
+        else
+        {
+            ui_set_label_text(s_view.battery_detail.percent, "--%");
+        }
+        ui_set_text_color(s_view.battery_detail.percent, color);
+    }
+    if (percent_changed != 0 || result_changed != 0)
+    {
+        const char *status = "WARMING";
+        uint32_t color = UI_AMBER;
+        if (battery->result != HAL_OK)
+        {
+            status = "ADC ERR";
+            color = UI_RED;
+            if (battery->valid != 0)
+            {
+                status = "ADC HOLD";
+                color = UI_AMBER;
+            }
+        }
+        else if (battery->valid != 0)
+        {
+            status = "NORMAL";
+            color = UI_BATTERY_GREEN;
+            if (battery->percent <= UI_BATTERY_LOW_PERCENT)
+            {
+                status = "LOW BATT";
+                color = UI_RED;
+            }
+        }
+        ui_set_label_text(s_view.battery_detail.status, status);
+        ui_set_text_color(s_view.battery_detail.status, color);
+    }
+    /* 下方控件离屏时只记录待更新状态，重新可见时使用最新快照。 */
+    s_view.battery_detail.keys_dirty |= voltage_changed;
+    if (s_view.battery_detail.keys_dirty != 0 && lv_obj_is_visible(s_view.battery_detail.keys))
+    {
+        refresh_battery_keys(battery);
+        s_view.battery_detail.keys_dirty = 0;
+    }
+    s_view.battery_detail.raw_dirty |= result_changed || battery->adc_raw != previous->adc_raw;
+    if (s_view.battery_detail.raw_dirty != 0 && lv_obj_is_visible(s_view.battery_detail.raw))
+    {
+        s_view.battery_detail.raw_dirty = 0;
+        const char *adc_state = adc_states[battery->result];
+        if (battery->valid != 0 && battery->result != HAL_OK)
+        {
+            ui_set_label_text_fmt(s_view.battery_detail.raw, "LAST RAW %u / ADC %s", (unsigned)battery->adc_raw, adc_state);
+        }
+        else if (battery->valid != 0 || battery->adc_raw != 0)
+        {
+            ui_set_label_text_fmt(s_view.battery_detail.raw, "RAW %u / ADC %s", (unsigned)battery->adc_raw, adc_state);
+        }
+        else
+        {
+            ui_set_label_text_fmt(s_view.battery_detail.raw, "RAW -- / ADC %s", adc_state);
+        }
+    }
+    s_battery_plot.sample = *battery;
+    s_view.battery_detail.sample_loaded = 1;
+    if (voltage_changed != 0 || percent_changed != 0)
+    {
+        lv_obj_invalidate(s_view.battery_detail.plot);
+    }
+
+    if (!lv_obj_is_visible(s_view.battery_detail.log))
+    {
+        s_view.battery_detail.log_visible = 0;
+    }
+    else if (s_view.battery_detail.log_visible == 0 || now - s_view.battery_detail.log_tick >= APP_BATTERY_PERIOD_MS)
+    {
+        app_battery_log_status_struct log;
+        s_view.battery_detail.log_visible = 1;
+        s_view.battery_detail.log_tick = now;
+        if (app_battery_log_get_status(&log) == 0)
+        {
+            ui_set_label_text_fmt(s_view.battery_detail.log, "LOG %lu/%lu %s", (unsigned long)log.slots,
+                                  (unsigned long)log.capacity, log_states[log.state]);
+        }
+    }
+}
+
+/* 顶栏与详情页复用同一份电池快照；表盘按秒刷新自己的电量胶囊。 */
 static void refresh_battery(void)
 {
     app_battery_struct battery;
@@ -3136,6 +3560,10 @@ static void refresh_battery(void)
     }
     /* 取一次电量快照。 */
     app_battery_get_snapshot(&battery);
+    if (s_view.battery_detail.plot != NULL)
+    {
+        refresh_battery_detail(&battery);
+    }
     /* 快照有效时更新电量圆环和文字。 */
     if (battery.valid)
     {
@@ -3144,9 +3572,13 @@ static void refresh_battery(void)
         {
             lv_obj_clear_flag(s_view.battery.bar, LV_OBJ_FLAG_HIDDEN);
         }
+        else if (lv_bar_get_value(s_view.battery.bar) == battery.percent)
+        {
+            return;
+        }
         ui_set_label_text_fmt(s_view.battery.label, "~%u%%", (unsigned int)battery.percent);
         /* 电量不高于20%时文字和电量圆环都改为红色。 */
-        if (battery.percent <= 20)
+        if (battery.percent <= UI_BATTERY_LOW_PERCENT)
         {
             color = UI_RED;
             ui_set_text_color(s_view.battery.label, UI_RED);
@@ -3186,9 +3618,10 @@ static void refresh_battery(void)
 static void refresh_motion(void)
 {
     app_imu_struct imu;
+    uint8_t i;
     App_IMU_GetSnapshot(&imu);
     compass_update(&imu);
-    if (s_view.motion.mag_values[0] != NULL)
+    if (lv_obj_is_visible(s_view.motion.mag_status))
     {
         /* 磁力计状态标签按校准进度分支显示。 */
         if (imu.mag_cal_state == APP_MAG_CAL_RUNNING)
@@ -3254,6 +3687,9 @@ static void refresh_motion(void)
         {
             ui_set_text_color(s_view.motion.mag_status, UI_RED);
         }
+    }
+    if (lv_obj_is_visible(lv_obj_get_parent(s_view.motion.cal_label)))
+    {
         /* 校准按钮文字随状态变化：采集中文案改为结束校准。 */
         if (imu.mag_cal_state == APP_MAG_CAL_RUNNING)
         {
@@ -3263,25 +3699,26 @@ static void refresh_motion(void)
         {
             ui_set_label_text(s_view.motion.cal_label, "CALIBRATE MAG");
         }
-        /* 校准状态标签显示结果、样本数和三轴跨度。 */
+    }
+    if (lv_obj_is_visible(s_view.motion.cal_status))
+    {
         mag_calibration_status(&imu);
+    }
+    /* 三轴共用一张高卡片，卡片部分可见时只格式化露出的数值。 */
+    for (i = 0; i < 3; ++i)
+    {
+        lv_obj_t *value = s_view.motion.mag_values[i];
+        if (!lv_obj_is_visible(value))
         {
-            /* 三轴磁力计数值的下标。 */
-            uint8_t i;
-            /* 逐轴刷新磁力计数值。 */
-            for (i = 0; i < 3; ++i)
-            {
-                /* 磁力计在线时显示各轴磁场，单位uT。 */
-                if (imu.mag_online)
-                {
-                    ui_set_decimal(s_view.motion.mag_values[i], imu.mag_body_uT[i], 0);
-                }
-                /* 离线时显示占位符。 */
-                else
-                {
-                    ui_set_label_text(s_view.motion.mag_values[i], "--");
-                }
-            }
+            continue;
+        }
+        if (imu.mag_online)
+        {
+            ui_set_decimal(value, imu.mag_body_uT[i], 0);
+        }
+        else
+        {
+            ui_set_label_text(value, "--");
         }
     }
 }
@@ -3605,14 +4042,17 @@ static void poll_touch_idle(void)
     }
 }
 
-/* 把UI状态打包成电源标志：熄屏即idle，姿态页且亮屏才算motion，运动模式独立。
- * 只发布，不在此处操作硬件。 */
+/* 静态表盘可放宽LVGL/触摸轮询；页面切换、触摸及功能页保留活跃周期。 */
 static void publish_power_state(void)
 {
-    /* 熄屏即视为idle；motion要求未idle且当前页为姿态页。 */
-    uint8_t idle = s_screen_on == 0;
-    /* screen_off与idle同源，sport直接透传当前运动模式标志。 */
-    app_task_set_power_state(idle, idle == 0 && s_page == PAGE_MOTION, s_screen_on == 0, s_sport_mode);
+    uint8_t screen_off = s_screen_on == 0;
+    uint8_t idle = screen_off;
+    if (screen_off == 0 && s_page == PAGE_WATCH && s_transition == 0 && s_sport_mode == 0 &&
+        s_key_armed == 0 && lv_disp_get_inactive_time(NULL) >= UI_WATCH_IDLE_POLL_MS && touch_pressed() == 0)
+    {
+        idle = 1;
+    }
+    app_task_set_power_state(idle, screen_off == 0 && s_page == PAGE_MOTION, screen_off, s_sport_mode);
 }
 
 static void ui_timer_cb(lv_timer_t *timer)

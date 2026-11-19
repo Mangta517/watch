@@ -3,7 +3,9 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#define app_battery_get_snapshot host_battery_get_snapshot
 #include "../../application/app_ui.c"
+#undef app_battery_get_snapshot
 #include "lv_port_indev_template.h"
 #include "app_reset.h"
 #include "app_battery_log.h"
@@ -13,7 +15,39 @@
 #include "app_ota.h"
 #include "app_reset_ble.h"
 #include "app_battery_log_ble.h"
+#include "battery_adc.h"
 
+/* 链接真实标定表，但UI回归只注入快照，任何ADC或快照锁访问都立即失败。 */
+void *xSemaphoreCreateMutex(void)
+{
+    abort();
+}
+
+int xSemaphoreTake(void *mutex, uint32_t wait)
+{
+    (void)mutex;
+    (void)wait;
+    abort();
+}
+
+int xSemaphoreGive(void *mutex)
+{
+    (void)mutex;
+    abort();
+}
+
+void Error_Handler(void)
+{
+    abort();
+}
+
+HAL_StatusTypeDef battery_adc_read_raw(uint32_t timeout_ms, uint16_t *raw, uint32_t *vdda_mv)
+{
+    (void)timeout_ms;
+    (void)raw;
+    (void)vdda_mv;
+    abort();
+}
 
 static app_ble_snapshot_struct host_ble_snapshot(void)
 {
@@ -61,9 +95,20 @@ uint8_t app_ota_service(uint8_t ready, uint32_t now_ms)
     (void)now_ms;
     return 0;
 }
+static uint8_t host_battery_log_busy;
+static uint32_t host_battery_log_slots;
+static uint32_t host_battery_log_reads;
+
 uint8_t app_battery_log_get_status(app_battery_log_status_struct *status)
 {
+    ++host_battery_log_reads;
+    if (host_battery_log_busy != 0)
+    {
+        return 1;
+    }
     memset(status, 0, sizeof(*status));
+    status->slots = host_battery_log_slots;
+    status->capacity = 15360;
     status->state = APP_BATTERY_LOG_READY;
     return 0;
 }
@@ -191,7 +236,7 @@ static uint16_t host_heart_samples_count;
 static app_aht21_struct host_aht21;
 static app_battery_struct host_battery = {.voltage_mv = 3850, .valid = 1, .percent = 50};
 
-void app_battery_get_snapshot(app_battery_struct *snapshot)
+void host_battery_get_snapshot(app_battery_struct *snapshot)
 {
     ++host_battery_reads;
     *snapshot = host_battery;
@@ -938,6 +983,7 @@ static void compass_direction_tests(void)
 static void compass_redraw_tests(void)
 {
     static const int16_t headings[] = {0, 1, 44, 45, 89, 90, 135, 179, 180, 225, 269, 270, 315, 359, -1, 45, 45, -1, 0};
+    static const lv_point_t north_pixels[] = {{-1, -16}, {-16, 1}, {1, 16}, {16, -1}};
     static lv_color_t partial_frame[240 * 280];
     app_imu_struct imu;
     lv_area_t card;
@@ -964,6 +1010,14 @@ static void compass_redraw_tests(void)
         compass_update(&imu);
         lv_refr_now(NULL);
         assert(host_flush_pixels > pixels && host_flush_pixels - pixels < lv_area_get_size(&card));
+        if (online != 0 && headings[i] % 90 == 0)
+        {
+            /* 表盘12点分别朝北、东、南、西时，磁北端在屏幕上、左、下、右。 */
+            lv_point_t north = north_pixels[headings[i] / 90];
+            int x = card.x1 + 106 + north.x;
+            int y = card.y1 + 64 + north.y;
+            assert(framebuffer[y * 240 + x].full == lv_color_hex(s_compass_color).full);
+        }
         memcpy(partial_frame, framebuffer, sizeof(partial_frame));
         lv_obj_invalidate(s_view.motion.compass);
         lv_refr_now(NULL);
@@ -1042,7 +1096,7 @@ static void assert_rtc_seconds(uint8_t seconds)
 static void open_feature(ui_page_t page)
 {
     static const ui_page_t destinations[] = {PAGE_HEART, PAGE_MOTION, PAGE_ENVIRONMENT, PAGE_AHT21,
-                                              PAGE_WEATHER, PAGE_BLUETOOTH, PAGE_DISPLAY, PAGE_SPORT};
+                                              PAGE_WEATHER, PAGE_BLUETOOTH, PAGE_DISPLAY, PAGE_SPORT, PAGE_BATTERY};
     lv_obj_t *entry = NULL;
     lv_area_t area;
     unsigned index;
@@ -1385,8 +1439,15 @@ static void touch_idle_tests(void)
     advance(60);
     assert(App_UI_IsWakeKeyActive() == 0);
     lv_disp_trig_activity(NULL);
-    advance(9980);
-    assert(s_screen_on && host_light == brightness);
+    advance(300);
+    assert(host_idle == 0);
+    advance(300);
+    assert(s_screen_on && host_idle != 0);
+    lv_disp_trig_activity(NULL);
+    advance(20);
+    assert(host_idle == 0);
+    advance(9960);
+    assert(s_screen_on && host_light == brightness && host_idle != 0);
     advance(40);
     assert(!s_screen_on && host_light == 0 && s_brightness == brightness);
     assert(host_idle != 0 && host_bt_powered != 0);
@@ -1472,7 +1533,7 @@ static void page_auto_sleep_tests(void)
     static const ui_page_t pages[] =
     {
         PAGE_HEART, PAGE_MOTION, PAGE_ENVIRONMENT, PAGE_AHT21,
-        PAGE_WEATHER, PAGE_BLUETOOTH, PAGE_DISPLAY, PAGE_SPORT
+        PAGE_WEATHER, PAGE_BLUETOOTH, PAGE_DISPLAY, PAGE_SPORT, PAGE_BATTERY
     };
     uint32_t inactive;
     unsigned index;
@@ -1535,7 +1596,7 @@ static void page_auto_sleep_tests(void)
         advance(220);
         assert(s_page == PAGE_SETTINGS && s_screen_on != 0);
     }
-    puts("PASS: APPS and all eight feature pages stay awake without resetting inactivity; feature PA4/wrist wake and failed LCD power retries preserve the page.");
+    puts("PASS: APPS and all nine feature pages stay awake without resetting inactivity; feature PA4/wrist wake and failed LCD power retries preserve the page.");
 
     /* 不经触摸或PA5提交返回，覆盖旧活动时间已超过10秒的路径。 */
     advance(60000);
@@ -1729,12 +1790,173 @@ static void clock_redraw_tests(void)
     puts("PASS: all three clock hands match full-screen pixels through 360 degrees; unchanged endpoints transfer no pixels.");
 }
 
+static void battery_page_tests(void)
+{
+    lv_area_t body, plot, voltage, unit;
+    lv_coord_t saved_scroll;
+    lv_mem_monitor_t before, after;
+    lv_obj_t *plot_card, *low_key, *normal_key;
+    uint32_t calls, reads;
+    unsigned i;
+    host_wake = GPIO_PIN_RESET;
+    host_battery_log_slots = 2787;
+    advance(250);
+    /* 扩展热区可进入；同一位置按住拖动仍判为滑动。 */
+    drag(180, 51, -120, 0);
+    assert(s_page == PAGE_SETTINGS);
+    key_back();
+    assert(s_page == PAGE_WATCH);
+    host_battery = (app_battery_struct){.voltage_mv = 4002, .adc_raw = 2483, .valid = 1, .percent = 35};
+    tap(180, 36);
+    assert(s_page == PAGE_BATTERY);
+    assert(s_battery_plot.low_mv == 3860);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.voltage), "4.00") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.millivolts), "4002 mV") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.percent), "~35%") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 84%") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.status), "NORMAL") == 0);
+    plot_card = lv_obj_get_parent(s_view.battery_detail.plot);
+    assert(strcmp(lv_label_get_text(lv_obj_get_child(plot_card, 0)), "CURVE") == 0);
+    assert(strcmp(lv_label_get_text(lv_obj_get_child(plot_card, 7)), "3.50V") == 0);
+    assert(strcmp(lv_label_get_text(lv_obj_get_child(plot_card, 8)), "3.77V") == 0);
+    assert(strcmp(lv_label_get_text(lv_obj_get_child(plot_card, 9)), "4.05V") == 0);
+    assert(lv_obj_get_child_cnt(s_view.battery_detail.keys) == 13);
+    assert(strcmp(lv_label_get_text(lv_obj_get_child(s_view.battery_detail.keys, 0)), "CALIBRATION") == 0);
+    lv_obj_get_coords(s_body, &body);
+    lv_obj_get_coords(plot_card, &plot);
+    assert(plot.y1 >= body.y1 && plot.y2 <= body.y2);
+    lv_obj_get_coords(s_view.battery_detail.voltage, &voltage);
+    lv_obj_get_coords(s_view.battery_detail.unit, &unit);
+    assert(unit.x1 > voltage.x2 && unit.x1 - voltage.x2 <= 6);
+
+    reads = host_battery_reads;
+    refresh_data();
+    assert(host_battery_reads == reads + 1);
+    assert_static_refresh();
+    lv_obj_get_coords(s_view.battery_detail.plot, &plot);
+    {
+        lv_coord_t x = plot.x1 + battery_plot_x(4002, 3500, 4050);
+        lv_coord_t y = plot.y1 + battery_plot_y(84);
+        lv_coord_t watch_y = plot.y1 + battery_plot_y(35);
+        assert(framebuffer[y * 240 + x].full == lv_color_hex(UI_BATTERY_GREEN).full);
+        assert(framebuffer[watch_y * 240 + x].full == lv_color_hex(UI_AMBER).full);
+    }
+    screenshot("battery_page_live");
+    calls = host_flush_calls;
+    ++host_battery.adc_raw;
+    advance(1200);
+    assert(host_flush_calls == calls);
+    assert(host_battery_log_reads == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.raw), "RAW --") == 0);
+
+    low_key = lv_obj_get_child(s_view.battery_detail.keys, 5); /* 3850 mV */
+    normal_key = lv_obj_get_child(s_view.battery_detail.keys, 2); /* 4000 mV */
+    host_battery.voltage_mv = 3860;
+    refresh_data();
+    assert(lv_obj_get_style_text_color(low_key, 0).full == lv_color_hex(UI_MUTED).full);
+    assert(lv_obj_get_style_text_color(normal_key, 0).full == lv_color_hex(UI_MUTED).full);
+    lv_obj_scroll_to_y(s_body, 100, LV_ANIM_OFF);
+    advance(120);
+    assert(lv_obj_get_style_text_color(low_key, 0).full == lv_color_hex(UI_BLUE).full);
+    assert(host_battery_log_reads == 0);
+    host_battery.voltage_mv = 4002;
+    refresh_data();
+    assert(lv_obj_get_style_text_color(low_key, 0).full == lv_color_hex(UI_MUTED).full);
+    assert(lv_obj_get_style_text_color(normal_key, 0).full == lv_color_hex(UI_BLUE).full);
+    lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+    drag(105, 228, 0, -150);
+    assert(s_page == PAGE_BATTERY && lv_obj_get_scroll_y(s_body) > 0);
+    lv_obj_scroll_to_y(s_body, 1000, LV_ANIM_OFF);
+    advance(120);
+    assert(host_battery_log_reads == 1);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.raw), "RAW 2484 / ADC OK") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.log), "LOG 2787/15360 READY") == 0);
+    host_battery_log_busy = 1;
+    ++host_battery_log_slots;
+    advance(1100);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.log), "LOG 2787/15360 READY") == 0);
+    host_battery_log_busy = 0;
+    advance(1100);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.log), "LOG 2788/15360 READY") == 0);
+    screenshot("battery_page_telemetry");
+    lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+
+    host_battery.result = HAL_TIMEOUT;
+    refresh_data();
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.status), "ADC HOLD") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.millivolts), "4002 mV") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.raw), "RAW 2484 / ADC OK") == 0);
+    screenshot("battery_page_hold");
+    reads = host_battery_log_reads;
+    ++host_battery_log_slots;
+    lv_obj_scroll_to_y(s_body, 1000, LV_ANIM_OFF);
+    advance(120);
+    assert(host_battery_log_reads == reads + 1);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.log), "LOG 2789/15360 READY") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.raw), "LAST RAW 2484 / ADC TIMEOUT") == 0);
+    lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+    host_battery.valid = 0;
+    refresh_data();
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.status), "ADC ERR") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.millivolts), "-- mV") == 0);
+    screenshot("battery_page_error");
+    host_battery = (app_battery_struct){0};
+    refresh_data();
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.status), "WARMING") == 0);
+    screenshot("battery_page_waiting");
+
+    host_battery = (app_battery_struct){.voltage_mv = 4050, .valid = 1, .percent = 100};
+    refresh_data();
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.voltage), "4.05") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.percent), "~100%") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 100%") == 0);
+    host_battery.voltage_mv = 4060;
+    refresh_data();
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 100%") == 0);
+    screenshot("battery_page_full");
+    host_battery.voltage_mv = 3860;
+    host_battery.percent = 20;
+    refresh_data();
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 20%") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.status), "LOW BATT") == 0);
+    screenshot("battery_page_low");
+    host_battery.voltage_mv = 3861;
+    host_battery.percent = 21;
+    refresh_data();
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 21%") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.status), "NORMAL") == 0);
+
+    tap(46, 19);
+    assert(s_page == PAGE_WATCH);
+    tap(180, 51);
+    drag(60, 143, 120, 0);
+    assert(s_page == PAGE_SETTINGS && lv_obj_get_scroll_y(s_body) == 0);
+    host_battery.percent = 50;
+    open_feature(PAGE_BATTERY);
+    saved_scroll = s_history[s_history_count - 1].scroll_y;
+    assert(saved_scroll > 0);
+    drag(60, 143, 120, 0);
+    assert(s_page == PAGE_SETTINGS && lv_obj_get_scroll_y(s_body) == saved_scroll);
+    lv_mem_monitor(&before);
+    for (i = 0; i < 64; ++i)
+    {
+        open_feature(PAGE_BATTERY);
+        assert(lv_obj_get_scroll_y(s_body) == 0);
+        key_back();
+        assert(s_page == PAGE_SETTINGS && lv_obj_get_scroll_y(s_body) == saved_scroll);
+    }
+    lv_mem_monitor(&after);
+    fprintf(stderr, "Battery page free memory: %u -> %u bytes\n", (unsigned)before.free_size, (unsigned)after.free_size);
+    assert(after.free_size >= before.free_size - 512 && min_free > 4096);
+    puts("PASS: battery entry and return, ADC hold/error/recovery, plot marks, offscreen refresh gating, log contention and 64 page visits.");
+}
+
 static void page_lifecycle_tests(void)
 {
     static const ui_page_t pages[] =
     {
         PAGE_ENVIRONMENT, PAGE_HEART, PAGE_MOTION, PAGE_WEATHER,
-        PAGE_BLUETOOTH, PAGE_AHT21, PAGE_DISPLAY, PAGE_SPORT
+        PAGE_BLUETOOTH, PAGE_AHT21, PAGE_DISPLAY, PAGE_SPORT, PAGE_BATTERY
     };
     lv_mem_monitor_t before, after;
     lv_obj_t *old_screen;
@@ -1764,6 +1986,10 @@ static void page_lifecycle_tests(void)
             {
                 assert(s_view.motion.compass == NULL && s_view.motion.mag_values[0] == NULL);
             }
+            if (pages[index] != PAGE_BATTERY)
+            {
+                assert(s_view.battery_detail.plot == NULL && s_view.battery_detail.raw == NULL);
+            }
             advance(200);
             assert(s_transition == 0 && !lv_obj_is_valid(old_screen));
 
@@ -1782,7 +2008,7 @@ static void page_lifecycle_tests(void)
     fprintf(stderr, "Detail page free memory: %u -> %u bytes\n", (unsigned)before.free_size, (unsigned)after.free_size);
     /* 沿用导航回归的512字节容差；原始UI运行同一用例也有56字节的空闲统计变化。 */
     assert(after.free_size >= before.free_size - 512);
-    puts("PASS: 64 detail-page visits reset inactive references, retain old screens until animation ends and stay within the navigation memory budget.");
+    puts("PASS: 72 detail-page visits reset inactive references, retain old screens until animation ends and stay within the navigation memory budget.");
 }
 
 int main(int argc, char **argv)
@@ -1825,6 +2051,11 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "page_auto_sleep") == 0)
     {
         page_auto_sleep_tests();
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "battery_page") == 0)
+    {
+        battery_page_tests();
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "render_perf") == 0)
@@ -2071,7 +2302,7 @@ int main(int argc, char **argv)
     /* Fixed watch -> feature grid; left swipes stop at the last main page. */
     drag(180, 140, -120, 0);
     assert(s_page == PAGE_SETTINGS && s_history_count == 1);
-    assert(lv_obj_get_child_cnt(s_body) == 8);
+    assert(lv_obj_get_child_cnt(s_body) == 9);
     assert(!s_view.display.brightness && !s_view.motion.mag_values[0] && !s_view.baro.pressure && !s_view.baro.altitude && !s_view.heart.card && !s_view.climate.card);
     open_feature(PAGE_HEART);
     assert_footer_dots(0);
@@ -2122,7 +2353,8 @@ int main(int argc, char **argv)
         lv_obj_get_coords(s_view.heart.button, &area);
         tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
         assert(host_heart.enabled && strcmp(lv_label_get_text(s_view.heart.button), "STOP") == 0);
-        assert(strstr(lv_label_get_text(s_view.heart.status), "MEASURING") != NULL);
+        assert(strcmp(lv_label_get_text(s_view.heart.summary), "MEASURING") == 0);
+        assert(strcmp(lv_label_get_text(s_view.heart.status), "STANDBY") == 0);
         screenshot("heart_measuring");
         host_heart.state = APP_HEART_VALID;
         host_heart.bpm = 72;
@@ -2189,8 +2421,7 @@ int main(int argc, char **argv)
             assert(fclose(stream) == 0);
         }
         assert(strcmp(lv_label_get_text(s_view.heart.value), "72") == 0);
-        assert(strstr(lv_label_get_text(s_view.heart.status), "HRS1 12345  AC 16.0") != NULL);
-        assert(strstr(lv_label_get_text(s_view.heart.status), "PERIOD 830 ms") != NULL);
+        assert(strcmp(lv_label_get_text(s_view.heart.status), "STANDBY") == 0);
         assert(strcmp(lv_label_get_text(s_view.heart.summary), "TRACKING") == 0);
         assert(lv_obj_has_flag(s_view.heart.details, LV_OBJ_FLAG_HIDDEN));
         assert_in_body(s_view.heart.card);
@@ -2200,6 +2431,8 @@ int main(int argc, char **argv)
         tap_object(lv_obj_get_parent(s_view.heart.details_title));
         assert(!lv_obj_has_flag(s_view.heart.details, LV_OBJ_FLAG_HIDDEN));
         assert_in_body(s_view.heart.details);
+        assert(strstr(lv_label_get_text(s_view.heart.status), "HRS1 12345  AC 16.0") != NULL);
+        assert(strstr(lv_label_get_text(s_view.heart.status), "PERIOD 830 ms") != NULL);
         assert(host_heart.enabled && host_heart.bpm == 72);
         screenshot("heart_details");
         tap_object(lv_obj_get_parent(s_view.heart.details_title));
@@ -2239,8 +2472,11 @@ int main(int argc, char **argv)
         advance(1000);
         assert(trend_latest(&s_view.heart.trend) == LV_CHART_POINT_NONE);
         assert(strcmp(lv_label_get_text(s_view.heart.value), "--") == 0);
-        assert(strstr(lv_label_get_text(s_view.heart.status), "NO SIGNAL") != NULL);
+        assert(strstr(lv_label_get_text(s_view.heart.status), "TRACKING") != NULL);
         screenshot("heart_no_signal");
+        /* 直接提交点击事件，验证展开在下一次定时刷新之前就更新详情。 */
+        lv_event_send(lv_obj_get_parent(s_view.heart.details_title), LV_EVENT_CLICKED, NULL);
+        assert(strstr(lv_label_get_text(s_view.heart.status), "NO SIGNAL") != NULL);
         host_heart.state = APP_HEART_ERROR;
         host_heart.enabled = 0;
         host_heart.fault.kind = EM7028_FAULT_READ;
@@ -2250,18 +2486,24 @@ int main(int argc, char **argv)
         assert(strstr(lv_label_get_text(s_view.heart.status), "I2C READ REG 29") != NULL);
         assert(strcmp(lv_label_get_text(s_view.heart.summary), "UNAVAILABLE") == 0);
         assert(strcmp(lv_label_get_text(s_view.heart.button), "START") == 0);
+        lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
         screenshot("heart_unavailable");
+        lv_obj_scroll_to_view(s_view.heart.details, LV_ANIM_OFF);
         host_heart.fault.kind = EM7028_FAULT_CONFIG;
         host_heart.fault.reg = 0x0D;
         host_heart.fault.value = 0x32;
         advance(120);
         assert(strstr(lv_label_get_text(s_view.heart.status), "CONFIG CHECK REG 0D") != NULL);
         assert(strstr(lv_label_get_text(s_view.heart.status), "VALUE 32") != NULL);
+        lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
         tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
         assert(host_heart.enabled);
         tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
-        assert(!host_heart.enabled && strstr(lv_label_get_text(s_view.heart.status), "STANDBY") != NULL);
-        lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
+        assert(!host_heart.enabled && strstr(lv_label_get_text(s_view.heart.status), "VALUE 32") != NULL);
+        lv_obj_scroll_to_view(s_view.heart.details, LV_ANIM_OFF);
+        advance(120);
+        assert(strstr(lv_label_get_text(s_view.heart.status), "STANDBY") != NULL);
+        lv_event_send(lv_obj_get_parent(s_view.heart.details_title), LV_EVENT_CLICKED, NULL);
         advance(120);
     }
     key_back();
@@ -2344,7 +2586,12 @@ int main(int argc, char **argv)
     open_feature(PAGE_MOTION);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
     advance(30);
+    assert(strcmp(lv_label_get_text(s_view.motion.mag_values[1]), "--") == 0);
+    lv_obj_scroll_to_view_recursive(s_view.motion.mag_values[1], LV_ANIM_OFF);
+    advance(120);
     assert(strcmp(lv_label_get_text(s_view.motion.mag_values[1]), "-14.2") == 0);
+    assert(strcmp(lv_label_get_text(s_view.motion.mag_values[2]), "--") == 0);
+    lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "UNCALIBRATED") == 0);
     compass_direction_tests();
     compass_redraw_tests();
@@ -2357,8 +2604,8 @@ int main(int argc, char **argv)
     assert(host_mag_cal_state == APP_MAG_CAL_NONE);
     assert(lv_obj_get_scroll_y(s_body) > 0);
     assert_in_body(lv_obj_get_parent(s_view.motion.cal_label));
-    /* Scroll to and tap the real calibration control. */
-    lv_obj_scroll_to_view(lv_obj_get_parent(s_view.motion.cal_label), LV_ANIM_OFF);
+    /* Put the calibration control and its status in the viewport. */
+    lv_obj_scroll_to_view(s_view.motion.cal_status, LV_ANIM_OFF);
     advance(30);
     {
         lv_area_t area;
@@ -2376,8 +2623,10 @@ int main(int argc, char **argv)
         tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
     }
     assert(host_mag_calibrated);
-    assert(strcmp(lv_label_get_text(s_view.motion.mag_status), "CAL OK / MAG ONLINE") == 0);
     assert(strstr(lv_label_get_text(s_view.motion.cal_status), "CAL SAVED: 120") != NULL);
+    lv_obj_scroll_to_view(s_view.motion.mag_status, LV_ANIM_OFF);
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_view.motion.mag_status), "CAL OK / MAG ONLINE") == 0);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "MAG NORTH") == 0);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
     advance(30);
@@ -2433,10 +2682,10 @@ int main(int argc, char **argv)
         puts("PASS: sport button touch, page retention, automatic heart UI, paused barometer/BLE, screen-off continuity and exit power restore.");
     }
     lv_obj_scroll_to_view(s_view.motion.cal_status, LV_ANIM_OFF);
-    advance(30);
+    advance(120);
     screenshot("motion_calibration_status");
-    lv_obj_scroll_to_y(s_body, lv_obj_get_y(lv_obj_get_parent(s_view.motion.mag_values[0])), LV_ANIM_OFF);
-    advance(30);
+    lv_obj_scroll_to_y(s_body, lv_obj_get_y(s_view.motion.mag_status), LV_ANIM_OFF);
+    advance(120);
     screenshot("motion_magnetic");
     host_mag_online = 0;
     advance(120);
@@ -2449,14 +2698,18 @@ int main(int argc, char **argv)
     host_mag_persist_state = APP_MAG_PERSIST_RESTORED;
     advance(120);
     assert(strcmp(lv_label_get_text(s_view.motion.mag_status), "EEPROM CAL / MAG ONLINE") == 0);
-    assert(strstr(lv_label_get_text(s_view.motion.cal_status), "CAL RESTORED / EEPROM") != NULL);
     lv_obj_scroll_to_view(s_view.motion.cal_status, LV_ANIM_OFF);
-    advance(30);
+    advance(120);
+    assert(strstr(lv_label_get_text(s_view.motion.cal_status), "CAL RESTORED / EEPROM") != NULL);
     screenshot("motion_restored");
     host_mag_persist_state = APP_MAG_PERSIST_SAVE_FAILED;
     advance(120);
-    assert(strcmp(lv_label_get_text(s_view.motion.mag_status), "CAL OK / SAVE FAILED") == 0);
+    assert(strcmp(lv_label_get_text(s_view.motion.mag_status), "EEPROM CAL / MAG ONLINE") == 0);
     assert(strstr(lv_label_get_text(s_view.motion.cal_status), "RAM only") != NULL);
+    lv_obj_scroll_to_view(s_view.motion.mag_status, LV_ANIM_OFF);
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_view.motion.mag_status), "CAL OK / SAVE FAILED") == 0);
+    lv_obj_scroll_to_view(s_view.motion.cal_status, LV_ANIM_OFF);
     screenshot("motion_save_failed");
     host_mag_cal_state = APP_MAG_CAL_NONE;
     host_mag_persist_state = APP_MAG_PERSIST_LOAD_FAILED;
@@ -3116,19 +3369,21 @@ int main(int argc, char **argv)
     key_back();
     assert(s_page == PAGE_WATCH);
     tap(184, 51);
+    assert(s_page == PAGE_BATTERY);
+    key_back();
     assert(s_page == PAGE_WATCH);
     drag(180, 140, -120, 0);
     assert(s_page == PAGE_SETTINGS);
     {
         static const ui_page_t pages[] = {PAGE_HEART, PAGE_MOTION, PAGE_ENVIRONMENT, PAGE_AHT21,
-                                           PAGE_WEATHER, PAGE_BLUETOOTH, PAGE_DISPLAY, PAGE_SPORT};
+                                           PAGE_WEATHER, PAGE_BLUETOOTH, PAGE_DISPLAY, PAGE_SPORT, PAGE_BATTERY};
         /* 网格内不足翻页门槛的横向拖动，不触发卡片点击。 */
         drag(30, 70, 20, 0);
         assert(s_page == PAGE_SETTINGS);
         lv_mem_monitor(&before);
         for (iteration = 0; iteration < 70; ++iteration)
         {
-            open_feature(pages[iteration % 8]);
+            open_feature(pages[iteration % (sizeof(pages) / sizeof(pages[0]))]);
             assert_static_refresh();
             saved_scroll = s_history[s_history_count - 1].scroll_y;
             drag(60, 22, 120, 0);
@@ -3185,7 +3440,7 @@ int main(int argc, char **argv)
     advance(200); /* LVGL首次恢复可能才开始计动画时间，保留原160ms过渡时长。 */
     assert(s_screen_on && !s_transition && s_page == PAGE_SETTINGS);
     puts("PASS: PA4 keeps Bluetooth power/RX across screen sleep and resumes the paused display transition.");
-    printf("PASS: eight feature entries, watch without BLE shortcuts, drag/click isolation, fixed detail swipe return and grid scroll restoration.\n");
+    printf("PASS: nine feature entries, watch without BLE shortcuts, drag/click isolation, fixed detail swipe return and grid scroll restoration.\n");
     printf("PASS: phone weather UART parsing, watch/weather display, age and unchanged redraw.\n");
     printf("PASS: battery fill pixels, percentage, low/empty/full states, cached pages, waiting/error/recovery and unchanged redraw.\n");
     printf("PASS: unchanged UI produces no pixel transfers; displayed decimal and color changes still redraw.\n");

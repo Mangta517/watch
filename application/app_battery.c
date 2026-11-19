@@ -28,31 +28,37 @@ static uint8_t s_last_percent;     /* 本次开机已发布的电量下限(只�
 static uint8_t s_error_streak;
 static uint8_t s_sleep_mode;       /* sensor任务写入的熄屏标志，决定当轮周期档位 */
 
-static uint8_t battery_percent(uint32_t voltage_mv)
+/* 2026-11-19保留3.50~3.85V低段节点，高段按表端4.05V满电锚点重拟合，见docs/battery-log.md。 */
+static const app_battery_curve_point_struct s_curve[] =
 {
-    /* 2026-11-18按两批放电日志标定A2曲线，3.50V和4.20V为显示锚点，3.80V平滑接缝见docs/battery-log.md。 */
-    static const uint16_t voltage_points_mv[] = {3500, 3550, 3600, 3650, 3700, 3750, 3800, 3850, 3900, 3950, 4000, 4050, 4100, 4150, 4200};
-    static const uint8_t percent_points[] = {0, 2, 5, 7, 10, 13, 15, 17, 24, 36, 42, 54, 77, 91, 100};
+    {3500, 0}, {3550, 2}, {3600, 5}, {3650, 7}, {3700, 10}, {3750, 13}, {3800, 15}, {3850, 17},
+    {3900, 34}, {3950, 48}, {4000, 83}, {4050, 100}
+};
+
+const app_battery_curve_point_struct *app_battery_get_curve(uint8_t *count)
+{
+    *count = sizeof(s_curve) / sizeof(s_curve[0]);
+    return s_curve;
+}
+
+uint8_t app_battery_voltage_to_percent(uint32_t voltage_mv)
+{
     uint32_t i; /* 从第 1 个电压节点开始向后查找的数组下标。 */
-    /* 低于最低节点 3.50V 时直接返回 0%，不再插值。 */
-    if (voltage_mv <= voltage_points_mv[0])
+    if (voltage_mv <= s_curve[0].voltage_mv)
     {
-        return 0;
+        return s_curve[0].percent;
     }
-    for (i = 1; i < sizeof(voltage_points_mv) / sizeof(voltage_points_mv[0]); ++i)
+    for (i = 1; i < sizeof(s_curve) / sizeof(s_curve[0]); ++i)
     {
         /* 找到第一个高于当前电压的节点，说明落在 [i-1, i) 这一段内。 */
-        if (voltage_mv < voltage_points_mv[i])
+        if (voltage_mv < s_curve[i].voltage_mv)
         {
-            /* 本段电压跨度(mV)与本段百分比跨度，用于线性插值。 */
-            uint32_t span_mv = voltage_points_mv[i] - voltage_points_mv[i - 1];
-            uint32_t rise = (voltage_mv - voltage_points_mv[i - 1]) * (percent_points[i] - percent_points[i - 1]);
-            /* 左端点百分比加上按比例折算的增量，+span_mv/2 做整数四舍五入。 */
-            return (uint8_t)(percent_points[i - 1] + (rise + span_mv / 2) / span_mv);
+            uint32_t span_mv = s_curve[i].voltage_mv - s_curve[i - 1].voltage_mv;
+            uint32_t rise = (voltage_mv - s_curve[i - 1].voltage_mv) * (s_curve[i].percent - s_curve[i - 1].percent);
+            return (uint8_t)(s_curve[i - 1].percent + (rise + span_mv / 2) / span_mv);
         }
     }
-    /* 高过最高节点 4.20V：按满电 100% 返回。 */
-    return 100;
+    return s_curve[i - 1].percent;
 }
 
 /* ADC驱动采内部参考及PA1；本层按1:2分压换算，并管理节拍、滤波和快照。 */
@@ -146,7 +152,7 @@ void app_battery_service(void)
                 /* 记录低通基准时刻，并从此刻起允许熄屏降频。 */
                 s_filter_ms = now;
                 /* 电量慢滤波与电压共用启动初值，+128 是把 Q8 四舍五入回 mV。 */
-                s_last_percent = battery_percent((uint32_t)(s_percent_mv_q8 + 128) / 256);
+                s_last_percent = app_battery_voltage_to_percent((uint32_t)(s_percent_mv_q8 + 128) / 256);
             }
         }
         else
@@ -173,7 +179,7 @@ void app_battery_service(void)
             /* 启动 8 帧完成：把 Q8 低通值四舍五入回 mV 作为对外电压。 */
             sample.voltage_mv = (uint32_t)(s_filtered_mv_q8 + 128) / 256;
             /* 百分比用慢滤波电压查表，显示/日志仍使用上面的1/8滤波电压。 */
-            sample.percent = battery_percent((uint32_t)(s_percent_mv_q8 + 128) / 256);
+            sample.percent = app_battery_voltage_to_percent((uint32_t)(s_percent_mv_q8 + 128) / 256);
             /* 尚无充电状态输入：本次开机电量只降不升，电压回弹不代表补充了电荷。 */
             if (sample.percent < s_last_percent)
             {

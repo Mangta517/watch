@@ -656,7 +656,17 @@ static void compass_tests(void)
     mag[2] = 40.0f;
     assert(common_imu_compass_heading(&accel, mag, &heading) != 0 && heading == 123.0f);
     mag[0] = 150.0f;
-    assert(common_imu_compass_heading(&accel, mag, &heading) != 0);
+    assert(common_imu_compass_heading(&accel, mag, &heading) == COMMON_COMPASS_FIELD_RANGE);
+    assert(common_imu_compass_heading_with_limit(&accel, mag, 350.0f, &heading) == COMMON_COMPASS_OK &&
+           angle_error(heading, 0.0f) < 0.01f);
+    assert(common_imu_compass_heading_with_limit(&accel, mag, 4.0f, &heading) == COMMON_COMPASS_FIELD_RANGE);
+    assert(common_imu_compass_heading_with_limit(&accel, mag, NAN, &heading) == COMMON_COMPASS_FIELD_RANGE);
+    mag[0] = 400.0f;
+    assert(common_imu_compass_heading_with_limit(&accel, mag, 350.0f, &heading) == COMMON_COMPASS_FIELD_RANGE);
+    mag[0] = 3.0f;
+    mag[1] = 0.0f;
+    mag[2] = 0.0f;
+    assert(common_imu_compass_heading_with_limit(&accel, mag, 350.0f, &heading) == COMMON_COMPASS_FIELD_RANGE);
     mag[0] = NAN;
     assert(common_imu_compass_heading(&accel, mag, &heading) != 0);
     accel.Accel_x = 8192;
@@ -2310,7 +2320,19 @@ static void independent_tests(void)
         App_IMU_Service(0);
     }
     assert(App_IMU_GetSnapshot(&snapshot) == 0);
-    assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 90.0f) < 0.1f);
+    assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 270.0f) < 0.1f);
+    /* 未校准时允许硬铁偏置导致的>100uT非溢出磁场显示指向，但<5uT仍拒绝。 */
+    magnetic(0, 120, 40);
+    tick += 40;
+    app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.mag_calibrated == 0 && snapshot.mag_online != 0 && snapshot.compass_valid != 0 &&
+           snapshot.compass_state == APP_COMPASS_READY && angle_error(snapshot.compass_deg, 270.0f) < 0.1f);
+    magnetic(2, 0, 0);
+    tick += 40;
+    app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.mag_online != 0 && snapshot.compass_valid == 0 && snapshot.compass_state == APP_COMPASS_FIELD_RANGE);
     assert(regs[LSM303DLHC_ACCEL_ADDR][0x20] == 0x37 && regs[LSM303DLHC_ACCEL_ADDR][0x23] == 0x98);
     assert(regs[MPU6050_ADDR][0x6B] == 0x28 && regs[MPU6050_ADDR][0x6C] == 0xC7);
     fail_dev = LSM303DLHC_ACCEL_ADDR;
@@ -2330,7 +2352,28 @@ static void independent_tests(void)
         app_imu_compass_service(1, 1);
     }
     App_IMU_GetSnapshot(&snapshot);
-    assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 180.0f) < 0.1f);
+    assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 0.0f) < 0.1f);
+    /* 核对芯片倒装(Z=-1g)加180°刚体映射：倾斜与平放均保持一致航向。 */
+    regs[LSM303DLHC_ACCEL_ADDR][0x2C] = 0xC0;
+    regs[LSM303DLHC_ACCEL_ADDR][0x2D] = 0xE0; /* -8000 => -1g */
+    magnetic(-7, -40, -25);
+    tick += 40;
+    app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 279.93f) < 0.2f);
+    regs[LSM303DLHC_ACCEL_ADDR][0x28] = 0xD0;
+    regs[LSM303DLHC_ACCEL_ADDR][0x29] = 0xEE; /* -4400 => -0.55g */
+    regs[LSM303DLHC_ACCEL_ADDR][0x2C] = 0x20;
+    regs[LSM303DLHC_ACCEL_ADDR][0x2D] = 0xE6; /* -6624 => -0.828g */
+    magnetic(-24.84f, 0.0f, 16.5f); /* 俯仰时北向磁场投影，同步旋转后仍指向0° */
+    tick += 40;
+    app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 0.0f) < 0.5f);
+    regs[LSM303DLHC_ACCEL_ADDR][0x28] = 0;
+    regs[LSM303DLHC_ACCEL_ADDR][0x29] = 0;
+    regs[LSM303DLHC_ACCEL_ADDR][0x2C] = 0x40;
+    regs[LSM303DLHC_ACCEL_ADDR][0x2D] = 0x1F;
     tick += 251;
     app_imu_compass_service(1, 0);
     App_IMU_GetSnapshot(&snapshot);
@@ -2490,6 +2533,19 @@ static void mag_calibration_tests(uint8_t fail_save, uint8_t reference)
     app_imu_compass_service(1, 0);
     App_IMU_GetSnapshot(&snapshot);
     assert(snapshot.mag_calibrated != 0 && snapshot.mag_cal_state == APP_MAG_CAL_DONE && snapshot.mag_online == 0);
+    /* 校准完成后恢复100uT强磁拦截：>100uT报FIELD RANGE，正常50uT恢复READY。 */
+    magnetic(0, 120, 40);
+    tick += 40;
+    app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.mag_calibrated != 0 && snapshot.mag_online != 0 && snapshot.compass_valid == 0 &&
+           snapshot.compass_state == APP_COMPASS_FIELD_RANGE);
+    magnetic(0, 30, 40);
+    tick += 40;
+    app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.mag_calibrated != 0 && snapshot.mag_online != 0 && snapshot.compass_valid != 0 &&
+           snapshot.compass_state == APP_COMPASS_READY && angle_error(snapshot.compass_deg, 270.0f) < 0.1f);
     if (fail_save != 0)
     {
         eeprom_fail_write_after = 0;
