@@ -1,6 +1,36 @@
 #ifndef BATTERY_LOG_HOST_MAIN_H
 #define BATTERY_LOG_HOST_MAIN_H
 #include <stdint.h>
+typedef struct
+{
+    uint32_t CSR;
+} Host_PVD_TypeDef;
+extern Host_PVD_TypeDef host_pvd;
+#define PWR (&host_pvd)
+#define PWR_CSR_PVDO (1U << 2)
+
+typedef struct
+{
+    uint32_t CTRL, CYCCNT, DEMCR, BSRR;
+} Host_Erase_Type;
+extern Host_Erase_Type host_erase_cycles, host_erase_gpio;
+extern uint32_t SystemCoreClock;
+#define DWT (&host_erase_cycles)
+#define CoreDebug (&host_erase_cycles)
+#define CoreDebug_DEMCR_TRCENA_Msk 1
+#define DWT_CTRL_CYCCNTENA_Msk 1
+#define WDI_GPIO_Port (&host_erase_gpio)
+#define WDI_Pin 4
+#define __NOP() ((void)0)
+#define FLASH_CR_SNB 0x78
+#define FLASH_CR_SNB_Pos 3
+#define FLASH_CR_SER 2
+#define FLASH_CR_MER 4
+#define HOST_BATTERY_LOG_TEST 1
+#define __DSB() ((void)0)
+#define FLASH_PSIZE_WORD 0x200
+void host_log_erase_begin(void);
+#define BATTERY_LOG_START_ERASE() host_log_erase_begin()
 
 typedef enum
 {

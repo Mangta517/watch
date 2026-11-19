@@ -52,8 +52,6 @@
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
 extern void xPortSysTickHandler(void);   /* FreeRTOS(CM4F port) 系统节拍处理函数 */
-extern void vPortSVCHandler(void);       /* FreeRTOS(CM4F port) SVC 处理函数 */
-extern void xPortPendSVHandler(void);    /* FreeRTOS(CM4F port) PendSV 处理函数 */
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -64,13 +62,13 @@ void app_fault_stop(const uint32_t *stack, uint32_t exc_return, uint32_t kind)
 {
     /* 入参: stack 为异常压栈帧地址，exc_return 为 EXC_RETURN，kind 为故障类型编号；
      * 返回: 不返回。记录故障类型、SP 和 EXC_RETURN，并在压栈帧可采信时提取 LR/PC/xPSR；
-     * 完成后原地空转，本路径没有喂狗或主动复位动作，若外部看门狗已启用，则由它超时复位。 */
+     * 完成后主动复位，不依赖外部看门狗是否已启用。 */
     __disable_irq();                                  /* 仅屏蔽可屏蔽中断，避免采集期间被中断打断。 */
     app_reset_capture_fault(kind, stack, exc_return); /* 把故障类型、SP 和 EXC_RETURN 写入备份域，并按需提取 LR/PC/xPSR。 */
+    NVIC_SystemReset();
     for (;;)
     {
-        /* 现场已提交；此处原地空转，本路径没有喂狗或主动复位动作，
-         * 若外部看门狗已启用，则由它超时复位。 */
+        /* 仅在系统复位请求未生效时保留停机。 */
     }
 }
 
@@ -96,8 +94,9 @@ void NMI_Handler(void)
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
-    /* 本工程不区分 NMI 来源；进入后没有恢复路径，直接原地空转，
-     * 本路径没有喂狗或主动复位动作，若外部看门狗已启用，则由它超时复位。 */
+    __disable_irq();
+    app_reset_capture_stop(APP_RESET_ERROR_HANDLER, 0, 0x00494D4E); /* task_tag小端字节为NMI。 */
+    NVIC_SystemReset();
     while (1)
     {
     }
@@ -165,21 +164,6 @@ __asm void UsageFault_Handler(void)
 }
 
 /**
-  * @brief This function handles System service call via SWI instruction.
-  */
-void SVC_Handler(void)
-{
-  /* USER CODE BEGIN SVCall_IRQn 0 */
-
-  /* USER CODE END SVCall_IRQn 0 */
-  /* USER CODE BEGIN SVCall_IRQn 1 */
-    /* 入参: 无；返回: 无。SVC 异常由 FreeRTOS 用于启动第一个任务，
-     * 这里只把控制权转给移植层的 vPortSVCHandler。 */
-    vPortSVCHandler();    /* 交给 FreeRTOS: 首个任务启动入口 */
-  /* USER CODE END SVCall_IRQn 1 */
-}
-
-/**
   * @brief This function handles Debug monitor.
   */
 void DebugMon_Handler(void)
@@ -190,20 +174,6 @@ void DebugMon_Handler(void)
   /* USER CODE BEGIN DebugMonitor_IRQn 1 */
     /* 本工程未使用调试监视异常，函数体为空，进入后直接返回。 */
   /* USER CODE END DebugMonitor_IRQn 1 */
-}
-
-/**
-  * @brief This function handles Pendable request for system service.
-  */
-void PendSV_Handler(void)
-{
-  /* USER CODE BEGIN PendSV_IRQn 0 */
-
-  /* USER CODE END PendSV_IRQn 0 */
-  /* USER CODE BEGIN PendSV_IRQn 1 */
-    /* 入参: 无；返回: 无。PendSV 是 FreeRTOS 的上下文切换入口，这里只转交移植层。 */
-    xPortPendSVHandler(); /* 交给 FreeRTOS: 上下文切换 */
-  /* USER CODE END PendSV_IRQn 1 */
 }
 
 /**
@@ -277,7 +247,7 @@ void EXTI15_10_IRQHandler(void)
   /* USER CODE END EXTI15_10_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(MPU6050_INT_Pin);
   /* USER CODE BEGIN EXTI15_10_IRQn 1 */
-    /* 入参: 无；返回: 无。上面清 PB12(MPU6050_INT，上升沿触发) 的挂起标志，
+    /* 入参: 无；返回: 无。上面清 PB12(MPU6050_INT，下降沿触发) 的挂起标志，
      * 并由 HAL 调用 MPU6050 驱动里的 EXTI 回调累计边沿与数据就绪标志。 */
   /* USER CODE END EXTI15_10_IRQn 1 */
 }

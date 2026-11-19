@@ -200,6 +200,10 @@ uint8_t app_ota_service(uint8_t ready, uint32_t now_ms)
         NVIC_SystemReset();
         return 1;
     }
+    if (ready == 0 && s_ota.reboot == 0 && s_ota.pending == 0)
+    {
+        s_ota.reply = NULL;
+    }
     /* 链路就绪、有待发文本、无在途发送且UART空闲时，异步启动一次回执发送。 */
     if (ready != 0 && s_ota.reply != NULL && s_ota.pending == 0 && kt6368a_tx_is_busy() == 0)
     {

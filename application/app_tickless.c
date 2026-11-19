@@ -5,13 +5,13 @@
   *          IDLE 每轮被调用一次：停 SysTick → 用 RTC(LSE) 亚秒计数作为主参考，再补上
   *          RTC 采样区间之外的 CPU 运行开销 → 一次性补回 uwTick 与 RTOS tick，再恢复
   *          1ms 节拍。DWT 只用于补这段区间外的运行开销，不承担睡眠计时。
-  *          两段深度不同：Sleep 保留外设时钟、能继续响应串口/EXTI，单次最长约 262ms
+  *          两段深度不同：Sleep 保留外设时钟、能继续响应串口/EXTI，单次最长约 199ms
   *          （SysTick LOAD 只有 24 位），更长的等待由内核多次进入；STOP 由 RTC 唤醒
   *          定时器(WUT)唤醒（MPU 的 PB12 临时屏蔽，PA4 等其余 EXTI 保留），醒来后必须
-  *          先恢复 64MHz PLL 再走后面的补时计算。若 RTC 参考不可用，Sleep 改用本次
+  *          先恢复 84MHz PLL 再走后面的补时计算。若 RTC 参考不可用，Sleep 改用本次
   *          加长的 SysTick 回退测量经过时间。并非每个 IDLE 轮次都会睡满一个长周期，
-  *          实际时长受最近任务截止时间、1000ms 上限和 STOP 资格共同收紧；
-  *          无 sensor 进度授权时超过 400ms 的请求再收紧至 400ms 以保持硬件超时。
+  *          实际时长受最近任务截止时间、400ms 上限和 STOP 资格共同收紧；
+  *          WDI 始终保持输出，RTC/LSE 停振时外部看门狗仍能超时复位。
   *          计时归属：LSE/RTC 走时是秒级以下的参考源，TIM2 由 app_diag 用作 100us 诊断
   *          计数并在 STOP 期间停走，本文件负责把停走的这段时间也补回去。
   ******************************************************************************
@@ -19,7 +19,6 @@
 #include "app_tickless.h"
 #include "app_task.h"
 #include "watch_rtc.h"
-#include "tps3823.h"
 #include "lcd.h"
 #include "kt6368a.h"
 #include "battery_adc.h"
@@ -30,11 +29,8 @@
 #error Tickless HAL compensation requires a 1ms RTOS tick.
 #endif
 
-/* Sleep保留串口接收，合适的熄屏间隙用RTC唤醒STOP；最长1000ms覆盖静止熄屏1秒唤醒，仍受最近任务截止时间约束。 */
-#define APP_TICKLESS_MAX_TICKS 1000
-/* 无sensor进度授权时，超过该时长的等待收紧至此值；TPS3823最短900ms超时能在此范围内触发，
- * 保持硬件计时可在任务停滞后复位。 */
-#define APP_TICKLESS_WATCHDOG_PAUSE_MIN_TICKS 400
+/* 保持TPS3823连续计时；400ms上限给最短900ms超时留出运行裕量，正常熄屏任务每200ms到期。 */
+#define APP_TICKLESS_MAX_TICKS 400
 #define APP_TICKLESS_STOP_MIN_TICKS 5
 /* MPU DATA_RDY接PB12；sensor按任务期限读数据，STOP临时屏蔽PB12无效唤醒。 */
 #define APP_TICKLESS_MPU_EXTI_LINE 12
@@ -52,9 +48,9 @@ static uint8_t app_tickless_stop_allowed(void)
            lcd_is_stop_idle() != 0 && kt6368a_is_stop_idle() != 0 && battery_adc_is_stop_idle() != 0;
 }
 
-/* STOP醒来后把系统时钟切回64MHz PLL：STOP唤醒后硬件先以HSI运行，RCC配置保留。
+/* STOP醒来后把系统时钟切回84MHz PLL：STOP唤醒后硬件先以HSI运行，RCC配置保留。
  * 全程在关中断上下文执行，用寄存器轮询而不是HAL延时；PLL或切换超时进Error_Handler。 */
-static void app_tickless_restore_clock(void)
+static uint8_t app_tickless_restore_clock(void)
 {
     /* 轮询计数：按 HSI_VALUE/100 设定重试上限，超时则进入错误处理。 */
     uint32_t retries = HSI_VALUE / 100;
@@ -67,7 +63,16 @@ static void app_tickless_restore_clock(void)
     {
         if (--retries == 0)
         {
-            Error_Handler();
+            return 1;
+        }
+    }
+    /* PLL锁定后还需等待电压调节器达到84MHz所需档位。 */
+    retries = HSI_VALUE / 100;
+    while ((PWR->CSR & PWR_CSR_VOSRDY) == 0)
+    {
+        if (--retries == 0)
+        {
+            return 1;
         }
     }
     /* 把系统时钟切换源设为 PLL。 */
@@ -79,23 +84,21 @@ static void app_tickless_restore_clock(void)
     {
         if (--retries == 0)
         {
-            Error_Handler();
+            return 1;
         }
     }
     /* 数据同步屏障，确保时钟切换在后续指令前生效。 */
     __DSB();
     /* 指令同步屏障，清空流水线，避免取到切换前的旧状态。 */
     __ISB();
+    return 0;
 }
 
-/* 在IDLE上下文、关中断状态下合并一次空闲：先查询sensor进度授权，再判断能否STOP，
- * 停SysTick、取RTC起点，然后STOP(或加长SysTick的Sleep)等待，醒来按RTC差值(不可用时按SysTick)
- * 折算周期，最后一次性补uwTick与RTOS tick并恢复1ms节拍。expected_ticks单位是tick(1ms)，
- * 会被APP_TICKLESS_MAX_TICKS和最近任务截止时间收紧；无授权时超过
- * APP_TICKLESS_WATCHDOG_PAUSE_MIN_TICKS的请求还会进一步收紧至该值。 */
+/* 关中断合并空闲，按RTC实测时间补回HAL/RTOS；最近任务期限与400ms上限共同限制等待。
+ * Sleep、STOP和1ms回退均不暂停或刷新看门狗，喂狗仍只由双任务进度决定。 */
 void app_tickless_sleep(uint32_t expected_ticks)
 {
-    /* 每 tick 对应的 CPU 周期数：64MHz 主频 / 1000Hz 节拍 = 64000。 */
+    /* 每 tick 对应的 CPU 周期数：84MHz 主频 / 1000Hz 节拍 = 84000。 */
     const uint32_t counts_per_tick = configCPU_CLOCK_HZ / configTICK_RATE_HZ;
     /* control 保存 SysTick 原 CTRL 配置；remaining 为停表时剩余计数；rtc_start/rtc_end 为一分钟内计数；
      * elapsed_counts 为折算出的总 CPU 周期；phase 为停表时已走过的当前 tick 相位。 */
@@ -110,9 +113,6 @@ void app_tickless_sleep(uint32_t expected_ticks)
     uint32_t exti_imr_saved = 0;
     /* 本轮是否选择STOP路径：RTC唤醒配置成功时为1。 */
     uint8_t use_stop = 0;
-    /* 本轮是否已获sensor进度授权：在实际WFI/STOP前暂停TPS3823超时检测，醒来后立即恢复；
-     * 不依赖use_stop，RTC无效、1ms回退和Sleep路径同样可暂停。 */
-    uint8_t pause_watchdog = 0;
     /* 64 位中间量：亚秒计数换算成 CPU 周期时避免乘法溢出。 */
     uint64_t scaled_counts;
 
@@ -131,58 +131,26 @@ void app_tickless_sleep(uint32_t expected_ticks)
     }
     /* 清 SLEEPDEEP 位，默认走 Sleep 而非 STOP；与原HAL Sleep入口一致，保留外设时钟。 */
     SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk; /* 与原HAL Sleep入口一致，保留外设时钟。 */
-    /* 查询一次sensor进度授权：sensor已启动且距最近喂狗不超过200ms时为1。
-     * 该结果决定本轮所有实际等待路径（含1ms回退、Sleep、STOP）是否暂停TPS3823超时检测；
-     * 授权不依赖use_stop，不在tps3823_stop_resume路径更新last_feed_ms，
-     * 因此200ms内无新sensor进度即失去授权，不会无限掩盖任务停滞。 */
-    pause_watchdog = app_task_watchdog_stop_allowed();
     /* 读取 RTC 一分钟内递增计数作为睡眠起点的参考时基。 */
     rtc_start = watch_rtc_get_counter();
     /* RTC 参考不可用（UINT32_MAX）或等待短于 2 tick 时不做补偿，只保留 1ms 心跳 WFI。 */
     if (rtc_start == UINT32_MAX || expected_ticks < 2)
     {
-        /* LSE启动/故障或等待过短时不做补偿，只保留1ms心跳WFI；
-         * 已获sensor进度授权时在实际WFI前暂停超时检测，醒来立即恢复并补喂。 */
-        if (pause_watchdog != 0)
-        {
-            tps3823_stop_pause();
-        }
+        /* LSE启动/故障或等待过短时，保持看门狗计时并由1ms心跳唤醒。 */
         /* 屏障保证 WFI 前的状态已写入。 */
         __DSB();
         /* 进入一次普通 WFI，由下一个中断（通常是 1ms 节拍）唤醒。 */
         __WFI();
-        /* WFI返回后立即恢复超时检测，早于后面的任何补时计算。 */
-        if (pause_watchdog != 0)
-        {
-            tps3823_stop_resume();
-        }
         /* 唤醒后清流水线，再开中断返回。 */
         __ISB();
         __enable_irq();
         return;
     }
-    /* 把期望睡眠时长收紧到 1000 tick 上限，避免单轮睡得过久。 */
+    /* 把期望睡眠时长收紧到 400 tick 上限，避免单轮睡得过久。 */
     if (expected_ticks > APP_TICKLESS_MAX_TICKS)
     {
         expected_ticks = APP_TICKLESS_MAX_TICKS;
     }
-    /* 无sensor进度授权时超过400ms的等待收紧至该值，使TPS3823硬件超时（最短900ms）
-     * 能在任务停滞后及时触发复位。授权时不收紧，全段等待由pause/resume保护。 */
-    if (pause_watchdog == 0 && expected_ticks > APP_TICKLESS_WATCHDOG_PAUSE_MIN_TICKS)
-    {
-        expected_ticks = APP_TICKLESS_WATCHDOG_PAUSE_MIN_TICKS;
-    }
-
-    /* 时长达到 STOP 门槛且软件前提全部满足时，尝试用 RTC 唤醒定时器安排 STOP。 */
-    if (expected_ticks >= APP_TICKLESS_STOP_MIN_TICKS && app_tickless_stop_allowed() != 0)
-    {
-        /* 预留1ms给RTC同步/PLL恢复，余下不足一拍的时间由恢复后的SysTick完成。 */
-        /* 把 tick 数换算成 RTC 亚秒计数（32768Hz 参考）；减 1 即预留的那 1ms。 */
-        stop_counts = (expected_ticks - 1) * WATCH_RTC_SUBSECOND_HZ / configTICK_RATE_HZ;
-        /* 启动唤醒定时器；返回 0 表示配置成功，才把 use_stop 置 1。 */
-        use_stop = watch_rtc_start_wakeup(stop_counts) == 0;
-    }
-
     /* DWT只测量RTC区间之外的运行开销，不依赖它在Sleep中的计数行为。 */
     /* 使能调试跟踪单元与 DWT 周期计数器。 */
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -198,11 +166,6 @@ void app_tickless_sleep(uint32_t expected_ticks)
     /* 停表前刚到期的普通tick由原ISR处理，不能清掉或再次补偿。 */
     if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
     {
-        /* 若已安排 STOP 唤醒，先撤销，避免残留定时器。 */
-        if (use_stop != 0)
-        {
-            watch_rtc_stop_wakeup();
-        }
         /* 原样恢复 SysTick 控制，重新开中断后返回。 */
         SysTick->CTRL = control;
         __enable_irq();
@@ -215,6 +178,13 @@ void app_tickless_sleep(uint32_t expected_ticks)
     }
     /* 已走过的相位 = 一个 tick 的周期数 - 剩余计数。 */
     phase = counts_per_tick - remaining;
+    if (expected_ticks >= APP_TICKLESS_STOP_MIN_TICKS && app_tickless_stop_allowed() != 0)
+    {
+        /* 从任务期限扣除当前相位，并给唤醒后的时钟恢复预留1ms。 */
+        stop_counts = (uint32_t)((uint64_t)((expected_ticks - 1) * counts_per_tick - phase) *
+                                 WATCH_RTC_SUBSECOND_HZ / configCPU_CLOCK_HZ);
+        use_stop = watch_rtc_start_wakeup(stop_counts) == 0;
+    }
     /* 记录 RTC 起始读取前的 DWT 周期戳，供后面扣除读取开销。 */
     rtc_start_cycle = DWT->CYCCNT;
     /* 记录 TIM2 起始计数值，STOP 后据此补回停钟时间。 */
@@ -240,40 +210,46 @@ void app_tickless_sleep(uint32_t expected_ticks)
         exti_imr_saved = EXTI->IMR;
         /* 只清 PB12 对应的屏蔽位，其余中断线保持原状。 */
         EXTI->IMR = exti_imr_saved & ~(1U << APP_TICKLESS_MPU_EXTI_LINE);
-        /* 已获sensor进度授权时在实际STOP前暂停超时检测，PB1/WDG_EN保持接通欠压复位。 */
-        if (pause_watchdog != 0)
-        {
-            tps3823_stop_pause();
-        }
-        /* 屏障保证屏蔽设置与授权暂停在进入 STOP 前生效。 */
+        /* 屏障保证EXTI屏蔽设置在进入STOP前生效，WDI继续保持输出。 */
         __DSB();
         /* 进入 STOP 模式（低功耗稳压器、WFI 进入），由 RTC 唤醒定时器等中断唤醒。 */
         HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
-        /* 醒来立即恢复超时检测，必须早于PLL恢复；PLL失败时欠压/超时复位通路已恢复。 */
-        if (pause_watchdog != 0)
+        /* 仍处于HSI时查询供电；欠压不再切回84MHz，走已有故障记录/复位路径。 */
+        if ((PWR->CSR & PWR_CSR_PVDO) != 0)
         {
-            tps3823_stop_resume();
+            EXTI->IMR = exti_imr_saved;
+            watch_rtc_stop_wakeup();
+            Error_Handler();
+            return;
         }
-        /* 醒来后把系统时钟从 HSI 切回 64MHz PLL。 */
-        app_tickless_restore_clock();
+        /* 醒来后把系统时钟从 HSI 切回 84MHz PLL。 */
+        if (app_tickless_restore_clock() != 0)
+        {
+            EXTI->IMR = exti_imr_saved;
+            watch_rtc_stop_wakeup();
+            Error_Handler();
+            return;
+        }
         /* 精确恢复原IMR；保留的pending请求在开中断后处理。 */
         EXTI->IMR = exti_imr_saved;
-        /* STOP后重新同步RTC；失败则将RTC参考标为不可用，本轮无法通过SysTick恢复STOP停钟期间的时间。 */
+        /* STOP没有独立的运行时钟可补偿；同步失败时记录并复位，不能把未知时长当作0继续运行。 */
         if (watch_rtc_sync_after_stop() != 0)
         {
-            rtc_start = UINT32_MAX;
+            watch_rtc_stop_wakeup();
+            Error_Handler();
+            return;
         }
         /* 关闭本轮 RTC 唤醒定时器，避免影响后续睡眠。 */
         watch_rtc_stop_wakeup();
     }
     else
     {
-        /* Sleep保留外设时钟由SysTick定时；LOAD仅24位，单次最长约262ms。超过该上限的等待
+        /* Sleep保留外设时钟由SysTick定时；LOAD仅24位，单次最长约199ms。超过该上限的等待
          * 分多次Sleep完成，内核每次返回后再按最近截止时间重排，不跨过解阻塞点。
          * 长SysTick同时充当RTC参考失效时的回退时基。 */
         /* 本轮 Sleep 的 tick 数，先按期望值，再受 24 位 LOAD 上限收紧。 */
         uint32_t sleep_ticks = expected_ticks;
-        /* 24 位重装值能表示的最大 tick 数：0x1000000 个周期 / 64000。 */
+        /* 24 位重装值能表示的最大 tick 数：0x1000000 个周期 / 84000。 */
         uint32_t sleep_max = (0xFFFFFFU + 1U) / counts_per_tick;
         if (sleep_ticks > sleep_max)
         {
@@ -285,20 +261,10 @@ void app_tickless_sleep(uint32_t expected_ticks)
         SysTick->VAL = 0;
         /* 按原配置重新使能 SysTick。 */
         SysTick->CTRL = control;
-        /* 已获sensor进度授权时在实际WFI前暂停超时检测，Sleep期间TPS3823不计数。 */
-        if (pause_watchdog != 0)
-        {
-            tps3823_stop_pause();
-        }
         /* 屏障保证重装与使能在 WFI 前完成。 */
         __DSB();
         /* 进入 Sleep，等待长 SysTick 或外设中断唤醒。 */
         __WFI();
-        /* WFI返回后立即恢复超时检测并补喂一次，早于后面的补时计算。 */
-        if (pause_watchdog != 0)
-        {
-            tps3823_stop_resume();
-        }
         /* 唤醒后清流水线。 */
         __ISB();
         /* 再次停表，进入统一的补时计算。 */
@@ -310,16 +276,27 @@ void app_tickless_sleep(uint32_t expected_ticks)
     timer_end = TIM2->CNT;
     /* 读取 RTC 一分钟内计数作为睡眠终点参考。 */
     rtc_end = watch_rtc_get_counter();
-
-    /* RTC可用时以一分钟内计数为准：两次读数之差按 64MHz / 32768Hz 折算成CPU周期，
-     * 除不尽的余数留在 s_rtc_fraction 里下一轮继续折算，避免每轮都向下取整把空闲时间越睡越少。 */
+    uint32_t rtc_delta = UINT32_MAX;
     if (rtc_start != UINT32_MAX && rtc_end != UINT32_MAX)
     {
-        /* 单次最长1000ms，远小于一分钟模数；先加模数再取模，覆盖跨秒、跨分和午夜。
-         * 日历校时只能在任务恢复后发生，本区间内计数单调递增。 */
-        scaled_counts = (uint64_t)((rtc_end + WATCH_RTC_COUNTER_MOD - rtc_start) % WATCH_RTC_COUNTER_MOD);
-        /* 换算成 CPU 周期，并加上上一轮遗留的余数。 */
-        scaled_counts = scaled_counts * configCPU_CLOCK_HZ + s_rtc_fraction;
+        rtc_delta = (rtc_end + WATCH_RTC_COUNTER_MOD - rtc_start) % WATCH_RTC_COUNTER_MOD;
+        /* 允许时钟恢复及调度余量，拒绝影子错读形成的整秒或整分钟跳变。 */
+        if (rtc_delta > (APP_TICKLESS_MAX_TICKS + 10) * WATCH_RTC_SUBSECOND_HZ / configTICK_RATE_HZ)
+        {
+            rtc_delta = UINT32_MAX;
+        }
+    }
+    if (use_stop != 0 && rtc_delta == UINT32_MAX)
+    {
+        Error_Handler();
+        return;
+    }
+
+    /* RTC可用时以一分钟内计数为准：两次读数之差按 84MHz / 32768Hz 折算成CPU周期，
+     * 除不尽的余数留在 s_rtc_fraction 里下一轮继续折算，避免每轮都向下取整把空闲时间越睡越少。 */
+    if (rtc_delta != UINT32_MAX)
+    {
+        scaled_counts = (uint64_t)rtc_delta * configCPU_CLOCK_HZ + s_rtc_fraction;
         /* 取出完整 CPU 周期数作为经过时间。 */
         elapsed_counts = (uint32_t)(scaled_counts / WATCH_RTC_SUBSECOND_HZ);
         /* 除不尽的余数留到下一轮，避免反复向下取整累积误差。 */
@@ -368,6 +345,12 @@ void app_tickless_sleep(uint32_t expected_ticks)
     complete_ticks = elapsed_counts / counts_per_tick;
     /* 余数换算成下一个 tick 还差的周期数，用于收尾装载。 */
     remaining = counts_per_tick - elapsed_counts % counts_per_tick;
+    /* 极短尾段直接进位，避免LOAD=0或新到期tick与软件pending合并。 */
+    if (remaining <= 32)
+    {
+        ++complete_ticks;
+        remaining = counts_per_tick;
+    }
     /* 实测达到或超过期望时长时，只补到最后一拍之前，把最后一拍留给正常 ISR。 */
     if (complete_ticks >= expected_ticks)
     {
@@ -387,6 +370,7 @@ void app_tickless_sleep(uint32_t expected_ticks)
     SysTick->VAL = 0;
     /* 按原配置重新使能 SysTick。 */
     SysTick->CTRL = control;
+    __DSB(); /* 确保当前周期先装载短尾段，再恢复标准重装值。 */
     /* HAL 毫秒计数一次性补上折算出的完整 tick 数。 */
     uwTick += complete_ticks;
     /* RTOS tick 同步推进同样的 tick 数。 */

@@ -29,16 +29,17 @@ TickType_t xTaskGetTickCount(void)
     return elapsed_ms;
 }
 
-TaskHandle_t xTaskGetCurrentTaskHandle(void)
+SemaphoreHandle_t xSemaphoreCreateBinary(void)
 {
-    return &elapsed_ms;
+    return &timeout_notifications;
 }
 
-void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken)
+BaseType_t xSemaphoreGiveFromISR(SemaphoreHandle_t semaphore, BaseType_t *woken)
 {
-    assert(task == &elapsed_ms && timeout_host_ipsr != 0);
+    assert(semaphore == &timeout_notifications && timeout_host_ipsr != 0);
     ++timeout_notifications;
     *woken = pdTRUE;
+    return pdTRUE;
 }
 
 void host_dma_yield(BaseType_t woken)
@@ -46,10 +47,10 @@ void host_dma_yield(BaseType_t woken)
     assert(woken == pdTRUE);
 }
 
-uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
+int xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t wait)
 {
     uint32_t count;
-    assert(clear == pdTRUE);
+    assert(semaphore == &timeout_notifications);
     if (timeout_notifications == 0 && wait != 0)
     {
         vTaskDelay(wait);

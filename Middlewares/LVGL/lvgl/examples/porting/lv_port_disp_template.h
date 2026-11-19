@@ -32,6 +32,8 @@ extern "C"
  **********************/
     void lv_port_disp_init(void);
     void lv_port_disp_service(void);
+    /* 唤醒后等整帧成功提交，再应用最新请求的背光亮度。 */
+    void lv_port_disp_set_brightness(uint8_t brightness);
     /* 显示任务内调用：等待在途DMA安全完成后，切换LCD控制器休眠。 */
     uint8_t lv_port_disp_set_sleep(uint8_t sleeping); /* 0成功，1失败，调用方保留目标状态重试。 */
     /* 显示任务内每次提交新分块后调用；传NULL解除，等待同一笔DMA时不调用。 */

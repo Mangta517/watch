@@ -25,7 +25,7 @@ public final class OtaProtocolTest
         {
             data[i] = (byte)(i * 37 + 11);
         }
-        byte[] vectors = {0, 0, 2, 0x20, 9, 0, 1, 8};
+        byte[] vectors = {0, 0, 2, 0x20, (byte)0x99, 1, 1, 8};
         System.arraycopy(vectors, 0, data, 0, 8);
         return data;
     }
@@ -139,7 +139,7 @@ public final class OtaProtocolTest
 
     public static void main(String[] args) throws Exception
     {
-        for (int length : new int[]{101, 512, 10001, 327680})
+        for (int length : new int[]{411, 512, 10001, 327680})
         {
             byte[] data = image(length);
             Fake fake = new Fake();
@@ -179,7 +179,7 @@ public final class OtaProtocolTest
         fake.reject = true;
         try
         {
-            OtaProtocol.send(fake, image(101), (sent, total, stage) ->
+            OtaProtocol.send(fake, image(411), (sent, total, stage) ->
             {
             });
             throw new AssertionError("device error accepted");
@@ -192,7 +192,7 @@ public final class OtaProtocolTest
         old.oldLayout = true;
         try
         {
-            OtaProtocol.send(old, image(101), (sent, total, stage) ->
+            OtaProtocol.send(old, image(411), (sent, total, stage) ->
             {
             });
             throw new AssertionError("old Flash layout accepted");

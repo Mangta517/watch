@@ -210,7 +210,7 @@ static void style_init(void)
         LV_STYLE_TRANSLATE_Y, LV_STYLE_TRANSLATE_X,
         LV_STYLE_TRANSFORM_ZOOM, LV_STYLE_TRANSFORM_ANGLE,
         LV_STYLE_COLOR_FILTER_OPA, LV_STYLE_COLOR_FILTER_DSC,
-        0
+        LV_STYLE_PROP_INV
     };
 
     color_scr = theme.flags & MODE_DARK ? DARK_COLOR_SCR : LIGHT_COLOR_SCR;

@@ -46,7 +46,7 @@
 #include "app_tickless.h"
 #define portSUPPRESS_TICKS_AND_SLEEP(ticks) app_tickless_sleep(ticks)
 #define configUSE_TICK_HOOK                 0
-#define configCPU_CLOCK_HZ                  ((unsigned long)64000000) /* F411: HSI/8*128/4 = 64MHz */
+#define configCPU_CLOCK_HZ                  ((unsigned long)84000000) /* F411: HSI/8*168/4 = 84MHz */
 #define configTICK_RATE_HZ                  1000                      /* HAL补时及LVGL时间单位均为1ms。 */
 #define configMAX_PRIORITIES                (5)
 #define configMINIMAL_STACK_SIZE            ((unsigned short)128)
@@ -61,9 +61,16 @@
 #define configUSE_16_BIT_TICKS                   0
 #define configIDLE_SHOULD_YIELD                  1
 
-/* 栈溢出检测(方法1: 切换时检查保存的栈指针边界, 开销小):
- * 触发即进入 vApplicationStackOverflowHook(app_task.c) 停死, 便于调试定位越界任务 */
-#define configCHECK_FOR_STACK_OVERFLOW 1
+/* 检查保存的栈指针和栈底哨兵，失败时记录原因并复位。 */
+#define configCHECK_FOR_STACK_OVERFLOW 2
+
+void app_reset_assert_stop(void);
+#define configASSERT(condition) do { \
+    if (!(condition)) \
+    { \
+        app_reset_assert_stop(); \
+    } \
+} while (0)
 
 /* Set the following definitions to 1 to include the API function, or zero
 to exclude the API function. */
@@ -79,13 +86,13 @@ to exclude the API function. */
 
 /* NVIC优先级寄存器原始值，255的有效高4位对应最低优先级15。 */
 #define configKERNEL_INTERRUPT_PRIORITY 255
-/* !!!! configMAX_SYSCALL_INTERRUPT_PRIORITY must not be set to zero !!!!
-See http://www.FreeRTOS.org/RTOS-F411: it.c SVC/PendSV handler call vPortSVCHandler/xPortPendSVHandler directly-M4.html. */
 #define configMAX_SYSCALL_INTERRUPT_PRIORITY 191 /* BASEPRI写入0xBF，有效高4位为0xB0，对应抢占优先级11。 */
 
 /* HAL/CMSIS使用0..15的逻辑优先级；15与上方内核原始优先级255对应。 */
 #define configLIBRARY_KERNEL_INTERRUPT_PRIORITY 15
 
-/* FreeRTOS端口的SVC/PendSV处理函数由stm32f4xx_it.c的中断入口直接调用。 */
+/* 异常向量直接进入汇编端口，保留硬件写入LR的EXC_RETURN。 */
+#define vPortSVCHandler SVC_Handler
+#define xPortPendSVHandler PendSV_Handler
 
 #endif /* FREERTOS_CONFIG_H */

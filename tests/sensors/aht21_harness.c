@@ -43,6 +43,13 @@ static void expect_command(uint8_t command, uint8_t first, uint8_t nack)
     transfers[transfer_count - 1].command = command;
 }
 
+static void expect_reset(void)
+{
+    expected_transfer *transfer = &transfers[transfer_count++];
+    assert(transfer_count <= sizeof(transfers) / sizeof(transfers[0]));
+    *transfer = (expected_transfer){.command = 0xBA};
+}
+
 static void expect_status(uint8_t status, uint8_t nack)
 {
     expect_read(&status, 1, nack);
@@ -164,13 +171,14 @@ uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
     return transfer->data[read_pos++];
 }
 
-void my_i2c_stop(my_i2c_bus_t bus)
+uint8_t my_i2c_stop(my_i2c_bus_t bus)
 {
     assert(bus == MY_I2C_BUS_SENSOR && phase == 3);
     assert(transfers[transfer_pos].nack != 0 || read_pos == transfers[transfer_pos].size);
     ++transfer_pos;
     phase = 0;
     now_ms += transfer_ms;
+    return 0;
 }
 
 uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t address, uint8_t command, const uint8_t *data, uint16_t size)
@@ -178,7 +186,7 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t address, uint8_t command, c
     expected_transfer *transfer;
     assert(bus == MY_I2C_BUS_SENSOR && address == 0x38 && phase == 0 && locked == 0 && transfer_pos < transfer_count);
     transfer = &transfers[transfer_pos++];
-    assert(command == transfer->command && size == transfer->size && memcmp(data, transfer->data, size) == 0);
+    assert(command == transfer->command && size == transfer->size && (size == 0 || memcmp(data, transfer->data, size) == 0));
     now_ms += transfer_ms;
     return transfer->nack;
 }
@@ -362,7 +370,11 @@ static void check_recovery(void)
     now_ms += 39;
     assert(checked_recover_step() == AHT21_BUSY);
     ++now_ms;
+    expect_reset();
     assert(checked_recover_step() == AHT21_BUSY);
+    now_ms += 19;
+    assert(checked_recover_step() == AHT21_BUSY);
+    ++now_ms;
     expect_status(0, 0);
     assert(checked_recover_step() == AHT21_BUSY);
     expect_command(0xBE, 0x08, 0);
@@ -375,17 +387,21 @@ static void check_recovery(void)
     assert(checked_recover_step() == AHT21_OK);
     aht21_recover_begin(now_ms);
     now_ms += 40;
+    expect_reset();
     assert(checked_recover_step() == AHT21_BUSY);
+    now_ms += 20;
     expect_status(0x88, 0);
     assert(checked_recover_step() == AHT21_BUSY);
-    now_ms += 959;
+    now_ms += 939;
     expect_status(0x88, 0);
     assert(checked_recover_step() == AHT21_BUSY);
     ++now_ms;
     assert(checked_recover_step() == AHT21_TIMEOUT);
     aht21_recover_begin(now_ms);
     now_ms += 40;
+    expect_reset();
     assert(checked_recover_step() == AHT21_BUSY);
+    now_ms += 20;
     expect_status(0, 0);
     assert(checked_recover_step() == AHT21_BUSY);
     expect_command(0xBE, 0x08, 1);
@@ -406,18 +422,20 @@ static void check_service_recovery(void)
     now_ms = APP_AHT21_PERIOD_MS + 40;
     app_aht21_service();
     now_ms = APP_AHT21_PERIOD_MS + 80;
+    expect_reset();
     app_aht21_service();
+    now_ms += 20;
     expect_status(0, 0);
     app_aht21_service();
     expect_command(0xBE, 0x08, 0);
     app_aht21_service();
-    now_ms = APP_AHT21_PERIOD_MS + 90;
+    now_ms = APP_AHT21_PERIOD_MS + 110;
     app_aht21_service();
     expect_status(0x08, 0);
     app_aht21_service();
     expect_command(0xAC, 0x33, 0);
     app_aht21_service();
-    now_ms = APP_AHT21_PERIOD_MS + 170;
+    now_ms = APP_AHT21_PERIOD_MS + 190;
     expect_frame(0x08, 0x80000, 0x60000, 0);
     app_aht21_service();
     app_aht21_get_snapshot(&snapshot);
@@ -435,12 +453,14 @@ static void check_service_recovery(void)
     now_ms = APP_AHT21_PERIOD_MS * 3 + 170;
     app_aht21_service();
     now_ms = APP_AHT21_PERIOD_MS * 3 + 210;
+    expect_reset();
     app_aht21_service();
+    now_ms += 20;
     expect_status(0x08, 0);
     app_aht21_service();
     expect_command(0xAC, 0x33, 0);
     app_aht21_service();
-    now_ms = APP_AHT21_PERIOD_MS * 3 + 290;
+    now_ms = APP_AHT21_PERIOD_MS * 3 + 310;
     expect_frame(0x08, 0x80000, 0x60000, 0);
     app_aht21_service();
     app_aht21_get_snapshot(&snapshot);
@@ -490,6 +510,7 @@ static void check_slow_service_recovery(void)
             now_ms += APP_AHT21_SLEEP_PERIOD_MS;
             started = now_ms;
             waits = delay_calls + task_delay_calls;
+            expect_reset();
             expect_status(0, 0);
             expect_command(0xBE, 0x08, 0);
             expect_status(0x08, 0);
@@ -622,6 +643,7 @@ static void check_sleep_recovery_phase(void)
         window = started + cycle * APP_AHT21_SLEEP_PERIOD_MS;
         if (cycle == 1)
         {
+            expect_reset();
             expect_status(0x08, 0);
         }
         expect_command(0xAC, 0x33, 0);

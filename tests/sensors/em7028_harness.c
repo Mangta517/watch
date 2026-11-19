@@ -56,10 +56,11 @@ void my_i2c_start(my_i2c_bus_t bus)
     phase = 1;
 }
 
-void my_i2c_stop(my_i2c_bus_t bus)
+uint8_t my_i2c_stop(my_i2c_bus_t bus)
 {
     assert(bus == MY_I2C_BUS_SENSOR && phase != 0);
     phase = 0;
+    return 0;
 }
 
 void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t data)

@@ -59,7 +59,7 @@ public final class OtaActivity extends Activity
     private volatile long deadline;
     private volatile Thread worker;
     private boolean scanForStart;
-    private int runId;
+    private volatile int runId;
     private int dialogSession;
 
     private final Runnable watchdog = new Runnable()
@@ -944,7 +944,17 @@ public final class OtaActivity extends Activity
     protected void onStop()
     {
         foreground = false;
-        stopTransfer("已离开升级页面，停止扫描/升级；重新进入后从头完整重传");
+        // 首次SPP配对弹窗可能覆盖Activity；仍由连接超时和主动取消约束等待。
+        OtaUpgrade.Connection active = ble;
+        if (!isFinishing() && active instanceof OtaSppTransport && ((OtaSppTransport)active).isConnecting())
+        {
+            stopScan();
+            dismissDeviceDialog();
+        }
+        else
+        {
+            stopTransfer("已离开升级页面，停止扫描/升级；重新进入后从头完整重传");
+        }
         super.onStop();
     }
 

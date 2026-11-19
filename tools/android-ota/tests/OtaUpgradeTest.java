@@ -14,7 +14,7 @@ public final class OtaUpgradeTest
     private static final String TIMEOUT = "!timeout";
     private static final String READY = "Flash erased, ready to receive data...";
     private static final int PINNED_TARGET = 7;
-    // 与固件application/app_ui.c的UI_BT_ECO_QUIET_MS一致：普通APP静默1秒即断电。
+    // 保留旧固件及未确认手机通信时的1秒ECO窗口，验证升级器仍兼容最短宽限。
     private static final int ECO_QUIET_MS = 1000;
 
     private static void check(boolean value, String message)
@@ -32,7 +32,7 @@ public final class OtaUpgradeTest
         {
             data[i] = (byte)(i * 37 + 11);
         }
-        byte[] vectors = {0, 0, 2, 0x20, 9, 0, 1, 8};
+        byte[] vectors = {0, 0, 2, 0x20, (byte)0x99, 1, 1, 8};
         System.arraycopy(vectors, 0, data, 0, 8);
         return data;
     }
@@ -320,9 +320,9 @@ public final class OtaUpgradeTest
     private static void normalThenRecovery() throws Exception
     {
         Link oldApp = new Link(false, TIMEOUT, "OTA,REBOOTING,SPP");
-        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:101");
+        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:411");
         Actions actions = new Actions(oldApp, recovery);
-        String result = OtaUpgrade.run(actions, image(101), progress());
+        String result = OtaUpgrade.run(actions, image(411), progress());
         check(result == null, "successful restore must return null");
         check(actions.createdBle.size() == 1 && actions.createdSpp.size() == 1, "normal APP must open BLE then SPP");
         check(actions.createRecoveryAfterBleCloseViolation == 0, "BLE must close before SPP recovery");
@@ -339,9 +339,9 @@ public final class OtaUpgradeTest
     private static void alreadyRecovery() throws Exception
     {
         Link control = new Link(false, OtaProtocol.LAYOUT);
-        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:101");
+        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:411");
         Actions actions = new Actions(control, recovery);
-        String result = OtaUpgrade.run(actions, image(101), progress());
+        String result = OtaUpgrade.run(actions, image(411), progress());
         check(result == null, "already recovery must succeed");
         check(actions.createdBle.size() == 1 && actions.createdSpp.size() == 1, "already recovery still needs SPP");
         check(actions.createRecoveryAfterBleCloseViolation == 0, "already recovery must close BLE before SPP");
@@ -349,15 +349,15 @@ public final class OtaUpgradeTest
         checkBodyOnlyOnSpp(actions, recovery, "already recovery");
         check(actions.restores == 1, "restore must run after ACK");
         check(control.closes == 1 && recovery.closes == 1, "both links must close before restore");
-        check(actions.restoreAtMs == 1000, "already recovery must skip reset wait but keep APP wait");
+        check(actions.restoreAtMs == 1040, "already recovery must skip reset wait but keep APP wait");
     }
 
     private static void lostAckButLayoutProof() throws Exception
     {
         Link oldApp = new Link(false, TIMEOUT);
-        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:101");
+        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:411");
         Actions actions = new Actions(oldApp, recovery);
-        String result = OtaUpgrade.run(actions, image(101), progress());
+        String result = OtaUpgrade.run(actions, image(411), progress());
         check(result == null, "layout proof after lost ACK must succeed");
         check(actions.createdBle.size() == 1 && actions.createdSpp.size() == 1, "lost ACK must fall through to SPP");
         check(actions.createRecoveryAfterBleCloseViolation == 0, "lost ACK must close BLE before SPP");
@@ -371,9 +371,9 @@ public final class OtaUpgradeTest
     {
         Link deadBle = new Link(false);
         deadBle.failOpen = true;
-        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:101");
+        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:411");
         Actions actions = new Actions(deadBle, recovery);
-        String result = OtaUpgrade.run(actions, image(101), progress());
+        String result = OtaUpgrade.run(actions, image(411), progress());
         check(result == null, "failed BLE open must fall through to SPP");
         check(actions.createdBle.size() == 1 && actions.createdSpp.size() == 1, "BLE failure must try SPP once");
         check(deadBle.startWrites == 0, "failed BLE open must not send OTA,START");
@@ -386,9 +386,9 @@ public final class OtaUpgradeTest
     {
         Link oldApp = new Link(false, TIMEOUT);
         oldApp.failStartWrite = true;
-        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:101");
+        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:411");
         Actions actions = new Actions(oldApp, recovery);
-        String result = OtaUpgrade.run(actions, image(101), progress());
+        String result = OtaUpgrade.run(actions, image(411), progress());
         check(result == null, "write failure during request may still recover");
         check(actions.createdBle.size() == 1 && actions.createdSpp.size() == 1, "write failure must fall through to SPP");
         check(oldApp.startWrites == 0, "no OTA,START retry after write failure");
@@ -402,7 +402,7 @@ public final class OtaUpgradeTest
         {
             Link rejected = new Link(false, line);
             Actions actions = new Actions(rejected);
-            expectFailure(actions, image(101), "device rejection must fail: " + line);
+            expectFailure(actions, image(411), "device rejection must fail: " + line);
             check(actions.releases == 1, "release must run before probe");
             check(actions.createdBle.size() == 1 && actions.createdSpp.isEmpty(), "rejection must not reach SPP");
             check(rejected.startWrites == 0, "rejection must not send OTA,START");
@@ -420,7 +420,7 @@ public final class OtaUpgradeTest
             "invalid image must not touch the old connection");
         Actions canceled = new Actions();
         canceled.cancelled = true;
-        expectFailure(canceled, image(101), "cancel before release must fail");
+        expectFailure(canceled, image(411), "cancel before release must fail");
         check(canceled.releases == 0 && canceled.createdBle.isEmpty(), "cancel must stop before release");
     }
 
@@ -429,7 +429,7 @@ public final class OtaUpgradeTest
         Link oldApp = new Link(false, TIMEOUT, "OTA,REBOOTING,SPP");
         Actions actions = new Actions(oldApp);
         actions.cancelAfterPause = 1;
-        expectFailure(actions, image(101), "cancel during reconnect must fail");
+        expectFailure(actions, image(411), "cancel during reconnect must fail");
         check(actions.createdBle.size() == 1 && actions.createdSpp.isEmpty(), "cancel during reconnect must stop before SPP");
         check(actions.restores == 0, "cancel before ACK must not restore");
         check(oldApp.closes == 1, "old link must close before waiting");
@@ -442,7 +442,7 @@ public final class OtaUpgradeTest
         Link recovery = new Link(true, OtaProtocol.LAYOUT);
         recovery.cancelOnLayout = true;
         Actions actions = new Actions(control, recovery);
-        expectFailure(actions, image(101), "cancel after SPP recovery must fail");
+        expectFailure(actions, image(411), "cancel after SPP recovery must fail");
         check(actions.createRecoveryAfterBleCloseViolation == 0, "cancel path must still close BLE before SPP");
         check(recovery.infoWrites == 1, "probe may run once before cancellation");
         check(recovery.startWrites == 0 && recovery.sendStartWrites == 0 && recovery.payloadBytes == 0,
@@ -456,7 +456,7 @@ public final class OtaUpgradeTest
         Link control = new Link(false, OtaProtocol.LAYOUT);
         Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:1");
         Actions actions = new Actions(control, recovery);
-        expectFailure(actions, image(101), "wrong ACK must fail");
+        expectFailure(actions, image(411), "wrong ACK must fail");
         check(actions.createdSpp.size() == 1, "transfer failure must not reconnect");
         check(recovery.sendStartWrites == 1, "firmware start must not be resent");
         check(actions.restores == 0, "failed firmware must not restore");
@@ -466,10 +466,10 @@ public final class OtaUpgradeTest
     private static void restoreFailureKeepsFirmwareSuccess() throws Exception
     {
         Link control = new Link(false, OtaProtocol.LAYOUT);
-        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:101");
+        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:411");
         Actions actions = new Actions(control, recovery);
         actions.restoreFailure = true;
-        String result = OtaUpgrade.run(actions, image(101), progress());
+        String result = OtaUpgrade.run(actions, image(411), progress());
         check(result != null, "restore failure must return a message");
         check(result.contains("升级已完成") && result.contains("恢复"), "message must report firmware success and restore failure");
         check(actions.restores == 1, "restore must be attempted once");
@@ -481,11 +481,11 @@ public final class OtaUpgradeTest
     private static void canceledDuringAppStartWait() throws Exception
     {
         Link control = new Link(false, OtaProtocol.LAYOUT);
-        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:101");
+        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:411");
         Actions actions = new Actions(control, recovery);
         // 第1次pause是ACK后的等待分片；取消后应保留固件成功并跳过恢复。
         actions.cancelAtPause = 1;
-        String result = OtaUpgrade.run(actions, image(101), progress());
+        String result = OtaUpgrade.run(actions, image(411), progress());
         check(result != null, "cancel during APP start wait must return a warning");
         check(result.contains("升级已完成") && result.contains("取消"), "warning must preserve firmware success");
         check(actions.restores == 0, "cancel during APP start wait must skip restore");
@@ -498,7 +498,7 @@ public final class OtaUpgradeTest
         Link oldApp = new Link(false);
         oldApp.cancelOnTimeout = true;
         Actions actions = new Actions(oldApp);
-        expectFailure(actions, image(101), "cancel during probe timeout must fail");
+        expectFailure(actions, image(411), "cancel during probe timeout must fail");
         check(oldApp.startWrites == 0, "no OTA,START after cancel during probe");
         check(actions.createdBle.size() == 1 && actions.createdSpp.isEmpty(), "cancel during probe must not reach SPP");
         check(actions.restores == 0, "cancel before ACK must not restore");
@@ -510,9 +510,9 @@ public final class OtaUpgradeTest
     {
         Link oldApp = new Link(false, TIMEOUT);
         oldApp.ecoCutoff = true;
-        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:101");
+        Link recovery = new Link(true, OtaProtocol.LAYOUT, OtaProtocol.LAYOUT, READY, "ok,len:411");
         Actions actions = new Actions(oldApp, recovery);
-        String result = OtaUpgrade.run(actions, image(101), progress());
+        String result = OtaUpgrade.run(actions, image(411), progress());
         check(result == null, "normal APP must finish OTA before ECO cuts BLE");
         // 初次探测必须短于1秒ECO窗口，否则START还没发出就被断电。
         check(oldApp.ecoCutoffs == 0, "initial BLE probe must stay below the 1s ECO quiet window");

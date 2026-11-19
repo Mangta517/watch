@@ -1,8 +1,8 @@
 /**
  * @file app_bootloader.c
- * @brief 保底程序收固件状态机：文本命令(start:len[:crc32]/OTA,INFO) + 循环DMA分块接收 + CRC校验。
+ * @brief 保底程序收固件状态机：文本命令(start:len:crc32/OTA,INFO) + 循环DMA分块接收 + CRC校验。
  *        整幅镜像不驻留RAM：int层用8KiB双半区环形缓冲按已接收进度分块搬运并写APP区Flash，本层只看进度与结果。
- *        启用CRC协议时才校验整幅CRC；start:len为旧协议，允许不带CRC。
+ *        必须提供整幅CRC；缺失或残缺的CRC字段在擦除APP前拒绝。
  *        int层擦除/编程/DMA回报0成功、1失败；本层只做协议解析、回执和跳转/复位决策。
  */
 #include "app_bootloader.h"
@@ -15,7 +15,6 @@ Bootloader_state boot_state = BOOTLOADER_STATE_DEFAULT;
 /* 本轮传输参数：start命令解析成功后才有效，直到复位或跳转。 */
 static uint32_t uart1_rx_app_len;
 static uint32_t uart1_rx_app_crc;
-static uint8_t uart1_rx_crc_enabled;
 /* 行缓冲状态：last_tick用于无换行时按BOOTLOADER_COMMAND_IDLE_MS做静默判定，
  * errors/dropped快照发现接收丢字节后整帧作废。 */
 static uint32_t command_last_tick;
@@ -51,16 +50,17 @@ void app_bootloader_init(void)
     /* 先取接收故障快照作基线，避免把开机前已发生的丢字节算到第一条命令上。 */
     command_errors = kt6368a_get_rx_errors();
     command_dropped = kt6368a_get_rx_dropped();
-    /* 发送欢迎与用法提示，告诉上位机用start:len[:crc32]开始。 */
+    /* 发送欢迎与用法提示，告诉上位机用start:len:crc32开始。 */
     app_bootloader_message("Independent recovery started, waiting for user data transfer...\r\n"
                            "Please use the bootloader tool to send data to the device.\r\n"
-                           "send 'start:len[:crc32]' to start\r\n");
+                           "send 'start:len:crc32' to start\r\n");
     /* 状态切到INIT，后续work()每轮解析命令行。 */
+    command_last_tick = HAL_GetTick();
     boot_state = BOOTLOADER_STATE_INIT;
 }
 
-/* 解析一行命令：OTA,INFO回报布局；start:len[:crc32]校验长度区间与8位十六进制CRC，
- * 通过后切到RUN。非法或残缺命令回执提示，CRC字段残缺被明确拒绝，start:len旧协议可无CRC。 */
+/* 解析一行命令：OTA,INFO回报布局；start:len:crc32校验长度区间与8位十六进制CRC，
+ * 通过后切到RUN。非法或残缺命令回执提示，缺失或残缺CRC字段均明确拒绝。 */
 static void app_bootloader_parse_command(void)
 {
     uint32_t length = 0; /* 从命令文本解析出的镜像长度(字节)。 */
@@ -148,13 +148,12 @@ static void app_bootloader_parse_command(void)
             }
         }
     }
-    /* 解析有效且长度在8字节到APP_MAX_SIZE之间：保存参数并进入RUN。 */
-    if (valid != 0 && length >= 8 && length <= APP_MAX_SIZE)
+    /* 至少容纳完整向量表及一条Thumb指令，再进入擦除阶段。 */
+    if (valid != 0 && crc_enabled != 0 && length >= BOOT_APP_MIN_SIZE && length <= APP_MAX_SIZE)
     {
-        /* 保存长度、CRC值以及是否启用CRC，供RUN/CHECK阶段使用。 */
+        /* 保存长度和CRC值，供RUN/CHECK阶段使用。 */
         uart1_rx_app_len = length;
         uart1_rx_app_crc = crc;
-        uart1_rx_crc_enabled = crc_enabled;
         /* 回执确认收到的长度，然后切到RUN准备擦除。 */
         (void)snprintf(response, sizeof(response), "Received start command, program length: %lu len\r\n", (unsigned long)length);
         app_bootloader_message(response);
@@ -163,7 +162,7 @@ static void app_bootloader_parse_command(void)
     else
     {
         /* 非法或越界：回执用法提示，状态保持INIT继续等命令。 */
-        app_bootloader_message("Invalid length/command, use 'start:len[:crc32]'\r\n");
+        app_bootloader_message("Invalid length/command, use 'start:len:crc32'\r\n");
     }
     /* 无论成功失败都清空行缓冲，准备接收下一条命令。 */
     command_length = command_overflow = 0;
@@ -224,6 +223,11 @@ static void app_bootloader_run(void)
     }
 }
 
+uint8_t app_bootloader_idle_expired(void)
+{
+    return boot_state == BOOTLOADER_STATE_INIT && (uint32_t)(HAL_GetTick() - command_last_tick) >= 180000;
+}
+
 void app_bootloader_work(void)
 {
     char response[48]; /* CHECK_DATA成功后的回执文本缓冲区。 */
@@ -249,16 +253,7 @@ void app_bootloader_work(void)
             app_bootloader_fail();
             break;
         }
-        /* 本命令带CRC：把期望值交给int层，收完数据后整幅校验。 */
-        if (uart1_rx_crc_enabled != 0)
-        {
-            int_bootloader_expect_crc(uart1_rx_app_crc);
-        }
-        else
-        {
-            /* 旧协议无CRC：只回执警告，不设置期望值。 */
-            app_bootloader_message("Warning: legacy transfer without CRC\r\n");
-        }
+        int_bootloader_expect_crc(uart1_rx_app_crc);
         /* 进入收数据状态，并告知主机Flash已擦除可以发送。 */
         boot_state = BOOTLOADER_STATE_REC_DATA;
         app_bootloader_message("Flash erased, ready to receive data...\r\n");
@@ -279,7 +274,7 @@ void app_bootloader_work(void)
         }
         break;
     case BOOTLOADER_STATE_CHECK_DATA:
-        /* finish完成收尾检查，启用CRC协议时才校验整幅CRC，再做写后回读和向量提交，
+        /* finish完成收尾检查，校验整幅CRC，再做写后回读和向量提交，
          * 全过才把EEPROM标志改成VALID。 */
         if (int_bootloader_finish() != 0)
         {

@@ -10,6 +10,8 @@
 #include <stddef.h>
 
 #define BL24C02_READY_TIMEOUT_MS 10
+/* sensor按25ms推进，异步就绪轮询至少有两次探测机会。 */
+#define BL24C02_ASYNC_READY_TIMEOUT_MS 60
 
 static bl24c02_error s_error;
 static uint16_t s_address;
@@ -69,11 +71,11 @@ static uint8_t bl24c02_transfer_step_active(bl24c02_transfer_struct *transfer)
     /* 就绪阶段：等待EEPROM内部写周期结束，或确认总线可用。 */
     if (transfer->phase == 0)
     {
-        /* 先探测再判超时，正常页写在下一拍(10ms)已完成，不因调度间隔误报。 */
+        /* 先探测再判超时，调度晚到时仍可接收已恢复的ACK。 */
         if (my_i2c_probe(MY_I2C_BUS_EEPROM, BL24C02_ADDR) != 0)
         {
             /* 器件仍未ACK，累计等待达到超时上限就判为就绪超时。 */
-            if ((uint32_t)(HAL_GetTick() - transfer->started_ms) >= BL24C02_READY_TIMEOUT_MS)
+            if ((uint32_t)(HAL_GetTick() - transfer->started_ms) >= BL24C02_ASYNC_READY_TIMEOUT_MS)
             {
                 s_error = BL24C02_ERROR_READY_TIMEOUT;
                 transfer->phase = 3;

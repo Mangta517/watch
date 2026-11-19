@@ -187,13 +187,14 @@ public final class OtaSppTransportTest
 
     /**
      * 持续可读的对抗流：available恒大于0，read不返回数据。
-     * close若还去排空输入，就会卡在read并留下计数，测试据此证明close完全不碰InputStream。
+     * CLOSE须解除后台在途读取，且关闭线程自身不能进入read。
      */
     private static final class AdversarialInput extends InputStream
     {
         volatile boolean closed;
         int availableCalls;
-        int readCalls;
+        volatile int readCalls;
+        final CountDownLatch reading = new CountDownLatch(1);
 
         @Override
         public int available()
@@ -206,6 +207,7 @@ public final class OtaSppTransportTest
         public int read() throws IOException
         {
             ++readCalls;
+            reading.countDown();
             while (!closed)
             {
                 try
@@ -400,13 +402,16 @@ public final class OtaSppTransportTest
         BlockingInput ended = new BlockingInput();
         OtaSppTransport endedTransport = opened(new BluetoothSocket(ended, new RecordingOutput()));
         ended.finish();
+        long eofStarted = System.nanoTime();
         try
         {
-            endedTransport.readLine(500);
+            endedTransport.readLine(10000);
             throw new AssertionError("EOF必须失败");
         }
         catch (IOException expected)
         {
+            check(!(expected instanceof SocketTimeoutException), "EOF必须报告断开，不得等到读超时");
+            check((System.nanoTime() - eofStarted) / 1000000L < 1000, "EOF应及时唤醒读取方");
         }
         endedTransport.close();
     }
@@ -579,6 +584,7 @@ public final class OtaSppTransportTest
             input.closed = true;
         };
         final OtaSppTransport transport = opened(socket);
+        awaitLatch(input.reading, "后台读取应已进入阻塞");
         Thread closer = new Thread(transport::close);
         long start = System.nanoTime();
         closer.start();
@@ -592,7 +598,7 @@ public final class OtaSppTransportTest
             throw new AssertionError("close不得阻塞在InputStream读取");
         }
         check(elapsedMs < 500, "close必须立即返回，不能排空输入");
-        check(input.readCalls == 0, "close不得调用InputStream.read");
+        check(input.readCalls == 1, "close不得额外调用InputStream.read");
         check(input.availableCalls == 0, "close不得调用InputStream.available");
         check(socket.closes == 1, "close必须恰好关闭socket一次");
         transport.close();
@@ -705,7 +711,7 @@ public final class OtaSppTransportTest
         {
             image[i] = (byte)(i * 13 + 5);
         }
-        byte[] vectors = {0, 0, 2, 0x20, 9, 0, 1, 8};
+        byte[] vectors = {0, 0, 2, 0x20, (byte)0x99, 1, 1, 8};
         System.arraycopy(vectors, 0, image, 0, 8);
         // INFO、start之后是两包正文；第4次写入即最后一包。
         int lastBodyWrite = 4;
@@ -760,7 +766,7 @@ public final class OtaSppTransportTest
         {
             image[i] = (byte)(i * 13 + 5);
         }
-        byte[] vectors = {0, 0, 2, 0x20, 9, 0, 1, 8};
+        byte[] vectors = {0, 0, 2, 0x20, (byte)0x99, 1, 1, 8};
         System.arraycopy(vectors, 0, image, 0, 8);
         OtaProtocol.send(transport, image, (sent, total, stage) ->
         {

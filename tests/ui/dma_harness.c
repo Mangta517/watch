@@ -16,7 +16,7 @@ static TickType_t host_tick;
 static unsigned notifications, dma_wakes, yields;
 static uint32_t host_ipsr;
 static uint8_t dma_failed;
-static uint8_t panel_sleeping;
+static uint8_t panel_sleeping, panel_light;
 static unsigned progress_calls;
 static unsigned dma_latency = 2;
 
@@ -28,10 +28,16 @@ static void render_progress(void)
     vTaskDelay(1);
 }
 
+void LCD_Set_Light(uint8_t brightness)
+{
+    panel_light = brightness;
+}
+
 uint8_t LCD_ST7789_SleepIn(void)
 {
     assert(dma_pending == 0 && s_flush_drv == NULL);
     panel_sleeping = 1;
+    panel_light = 0;
     return 0;
 }
 
@@ -59,17 +65,18 @@ uint8_t LCD_Flush_Service(void)
     return 1;
 }
 
-TaskHandle_t xTaskGetCurrentTaskHandle(void)
+SemaphoreHandle_t xSemaphoreCreateBinary(void)
 {
-    return (TaskHandle_t)&host_tick;
+    return &notifications;
 }
 
-void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken)
+BaseType_t xSemaphoreGiveFromISR(SemaphoreHandle_t semaphore, BaseType_t *woken)
 {
-    assert(task == (TaskHandle_t)&host_tick);
+    assert(semaphore == &notifications);
     ++notifications;
     ++dma_wakes;
     *woken = pdTRUE;
+    return pdTRUE;
 }
 
 void host_dma_yield(BaseType_t woken)
@@ -78,9 +85,9 @@ void host_dma_yield(BaseType_t woken)
     ++yields;
 }
 
-uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
+int xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t wait)
 {
-    assert(clear == pdTRUE);
+    assert(semaphore == &notifications);
     if (notifications == 0 && wait != 0)
     {
         vTaskDelay(wait);
@@ -171,7 +178,7 @@ int main(void)
     puts("PASS: task-side DMA error completion releases LVGL and schedules a full redraw without ISR API calls.");
     assert(dma_wakes + 1 == flush_calls && yields == dma_wakes);
     before = sensor_runs;
-    (void)ulTaskNotifyTake(pdTRUE, 0);
+    (void)xSemaphoreTake(s_flush_done, 0);
     notifications = 1;
     disp_wait(display->driver); /* 完成通知已到时立即返回，不再等待一个tick。 */
     assert(sensor_runs == before && notifications == 0);
@@ -205,6 +212,17 @@ int main(void)
     assert(panel_sleeping != 0 && s_redraw_pending != 0);
     lv_port_disp_set_sleep(0);
     puts("PASS: LCD sleep waits for active DMA completion or safe error cleanup before issuing a panel command.");
+    lv_port_disp_set_brightness(77);
+    lv_port_disp_service();
+    assert(panel_light == 0);
+    lv_refr_now(display);
+    while (dma_pending)
+    {
+        disp_wait(display->driver);
+    }
+    assert(panel_light == 0);
+    lv_port_disp_service();
+    assert(panel_light == 77);
     lv_port_disp_set_progress_callback(render_progress);
     for (dma_latency = 1; dma_latency <= 2; ++dma_latency)
     {

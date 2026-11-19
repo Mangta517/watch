@@ -18,19 +18,76 @@ void int_battery_log_set_rx_callbacks(uint8_t (*is_enabled)(void), void (*receiv
 #ifndef BATTERY_LOG_POLL_STATUS
 #define BATTERY_LOG_POLL_STATUS() (FLASH->SR)
 #endif
+#ifndef BATTERY_LOG_START_ERASE
+#define BATTERY_LOG_START_ERASE() (FLASH->CR |= FLASH_CR_STRT)
+#endif
+
+/* 擦除期间单Bank Flash不能取指，等待、喂狗和超时复位必须全部留在SRAM。 */
+#if defined(__CC_ARM) || defined(__ARMCC_VERSION)
+__attribute__((section("battery_log_ram"), noinline))
+#elif !defined(HOST_BATTERY_LOG_TEST)
+#error Flash operations require the Keil SRAM scatter section.
+#endif
+static uint8_t battery_log_erase_sector(uint32_t timeout_counts, uint32_t feed_counts)
+{
+    uint32_t started = DWT->CYCCNT;
+    uint32_t fed = started;
+    uint32_t status, now;
+    uint8_t i;
+
+    if ((PWR->CSR & PWR_CSR_PVDO) != 0)
+    {
+        return 1;
+    }
+    FLASH->CR = (FLASH->CR & ~(FLASH_CR_PSIZE | FLASH_CR_SNB | FLASH_CR_PG | FLASH_CR_MER)) |
+                FLASH_PSIZE_WORD | FLASH_CR_SER | (7 << FLASH_CR_SNB_Pos);
+    BATTERY_LOG_START_ERASE();
+    __DSB();
+    do
+    {
+        status = BATTERY_LOG_POLL_STATUS();
+        now = DWT->CYCCNT;
+        if ((uint32_t)(now - started) >= timeout_counts)
+        {
+            /* CMSIS内联写AIRCR，Flash永久忙时也不跳回Flash取指。 */
+            NVIC_SystemReset();
+        }
+        if ((uint32_t)(now - fed) >= feed_counts)
+        {
+            WDI_GPIO_Port->BSRR = WDI_Pin;
+            for (i = 0; i < 16; ++i)
+            {
+                __NOP();
+            }
+            WDI_GPIO_Port->BSRR = (uint32_t)WDI_Pin << 16;
+            fed = now;
+        }
+    }
+    while ((status & FLASH_SR_BSY) != 0);
+    FLASH->CR &= ~(FLASH_CR_SER | FLASH_CR_SNB);
+    return (status & (FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR)) != 0;
+}
 
 /* 两个APP的scatter把此段复制到SRAM；循环及常量均不能依赖Flash取指。 */
-#if defined(__CC_ARM)
+#if defined(__CC_ARM) || defined(__ARMCC_VERSION)
 __attribute__((section("battery_log_ram"), noinline))
+#elif !defined(HOST_BATTERY_LOG_TEST)
+#error Flash operations require the Keil SRAM scatter section.
 #endif
 static uint8_t battery_log_program_halfword(uint32_t address, uint16_t value, uint16_t received[8], uint8_t *count, uint8_t uart_enabled)
 {
     /* status保存最近一次读到的Flash状态寄存器快照。 */
     uint32_t status;
-    /* 只改PSIZE字段，设为半字编程并置PG位，进入编程状态。 */
-    FLASH->CR = (FLASH->CR & ~FLASH_CR_PSIZE) | FLASH_PSIZE_HALF_WORD | FLASH_CR_PG;
+    if ((PWR->CSR & PWR_CSR_PVDO) != 0)
+    {
+        return 1;
+    }
+    /* 退出其他擦写模式，再启用半字编程。 */
+    FLASH->CR = (FLASH->CR & ~(FLASH_CR_PSIZE | FLASH_CR_SER | FLASH_CR_MER | FLASH_CR_SNB)) |
+                FLASH_PSIZE_HALF_WORD | FLASH_CR_PG;
     /* 直接向目标地址写入半字，由硬件启动本次编程；该宏不经过Flash中的HAL函数。 */
     BATTERY_LOG_PROGRAM_HALFWORD(address, value);
+    __DSB();
     /* 轮询BSY直到编程结束；期间利用空档把UART收到的字节取出，避免中断屏蔽时丢数据。 */
     do
     {
@@ -69,7 +126,7 @@ void int_battery_log_read(uint32_t slot, uint8_t record[BATTERY_LOG_RECORD_BYTES
     /* 逐字节读取的循环下标。 */
     uint32_t i;
     /* 槽号超出容量：没有对应记录，用0xFF填充表示未写入的擦除态。 */
-    if (slot >= BATTERY_LOG_CAPACITY)
+    if (slot >= BATTERY_LOG_LEGACY_CAPACITY)
     {
         memset(record, 0xFF, BATTERY_LOG_RECORD_BYTES);
         return;
@@ -81,7 +138,7 @@ void int_battery_log_read(uint32_t slot, uint8_t record[BATTERY_LOG_RECORD_BYTES
     }
 }
 
-uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RECORD_BYTES])
+static uint8_t battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RECORD_BYTES], uint8_t resume)
 {
     /* 暂存写入前读到的槽内容，也用于最后读回校验。 */
     uint8_t old[BATTERY_LOG_RECORD_BYTES];
@@ -99,21 +156,26 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
     HAL_StatusTypeDef result;
 
     /* 槽号越界直接判为参数错误。 */
-    if (slot >= BATTERY_LOG_CAPACITY)
+    if (slot >= BATTERY_LOG_LEGACY_CAPACITY)
     {
         return 1;
     }
     /* 先读该槽当前内容，用于判断是否仍为擦除态。 */
     int_battery_log_read(slot, old);
-    /* 任一字节不是0xFF说明该槽已写过，拒绝覆盖并返回失败。 */
-    for (i = 0; i < sizeof(old); ++i)
+    /* 普通记录只写空槽，布局标记续写仅允许跳过完全相同的已提交半字。 */
+    for (i = 0; i < sizeof(old); i += 2)
     {
-        if (old[i] != 0xFF)
+        if ((old[i] != 0xFF || old[i + 1] != 0xFF) &&
+            (resume == 0 || old[i] != record[i] || old[i + 1] != record[i + 1]))
         {
             return 1;
         }
     }
     /* sensor持有日志锁；单次编程在SRAM轮询UART，半字之间恢复中断，逐半字写入调用方传入的8字节记录并读回校验。 */
+    if ((FLASH->SR & FLASH_SR_BSY) != 0)
+    {
+        return 1;
+    }
     result = HAL_FLASH_Unlock();
     /* 只有解锁成功才进行擦除标志清除和编程。 */
     if (result == HAL_OK)
@@ -124,6 +186,10 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
         /* 每两个字节组成一个半字写入，因此步长为2。 */
         for (i = 0; i < BATTERY_LOG_RECORD_BYTES; i += 2)
         {
+            if (resume != 0 && old[i] == record[i] && old[i + 1] == record[i + 1])
+            {
+                continue;
+            }
             /* 低字节在前、高字节在后拼成STM32小端半字。 */
             value = (uint16_t)((uint16_t)record[i] | ((uint16_t)record[i + 1] << 8));
             /* 保存当前中断屏蔽状态。 */
@@ -174,32 +240,36 @@ uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RE
     return result != HAL_OK;
 }
 
-void int_battery_log_erase(void)
+uint8_t int_battery_log_write(uint32_t slot, const uint8_t record[BATTERY_LOG_RECORD_BYTES])
 {
-    /* 擦除参数结构体，先整体清零再逐项填写。 */
-    FLASH_EraseInitTypeDef erase = {0};
-    /* HAL在擦除出错时回填的扇区号，本函数不据此分支。 */
-    uint32_t sector_error;
+    return battery_log_write(slot, record, 0);
+}
+
+uint8_t int_battery_log_resume_step_header(const uint8_t record[BATTERY_LOG_RECORD_BYTES])
+{
+    return battery_log_write(STEP_LOG_FIRST_SLOT, record, 1);
+}
+
+uint8_t int_battery_log_erase(void)
+{
+    uint8_t result;
     /* 解锁失败则无法擦除，直接返回。 */
-    if (HAL_FLASH_Unlock() != HAL_OK)
+    if ((FLASH->SR & FLASH_SR_BSY) != 0 || HAL_FLASH_Unlock() != HAL_OK)
     {
-        return;
+        return 1;
     }
-    /* 选择按扇区擦除方式。 */
-    erase.TypeErase = FLASH_TYPEERASE_SECTORS;
-    /* 固定擦除第7扇区，即日志所在的0x08060000起128KB。 */
-    erase.Sector = FLASH_SECTOR_7;
-    /* 只擦除一个扇区。 */
-    erase.NbSectors = 1;
-    /* 供电电压范围3，对应2.7V～3.6V的编程/擦除参数。 */
-    erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
     /* 清除历史完成与错误标志，避免干扰本次擦除。 */
     __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
                            FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
-    /* 执行扇区擦除，返回状态被忽略；随后仍会加锁。 */
-    (void)HAL_FLASHEx_Erase(&erase, &sector_error);
-    /* 擦除后重新加锁Flash，返回值同样被忽略。 */
-    (void)HAL_FLASH_Lock();
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    /* 32位并行擦除(2.7~3.6V)，最长5秒；每100ms刷新已接通的外部看门狗。 */
+    result = battery_log_erase_sector(SystemCoreClock * 5, SystemCoreClock / 10);
+    if (HAL_FLASH_Lock() != HAL_OK)
+    {
+        result = 1;
+    }
     /* 复位数据Cache，保证之后读到擦除后的新内容。 */
     battery_log_refresh_cache();
+    return result;
 }

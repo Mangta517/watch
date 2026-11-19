@@ -34,5 +34,6 @@ void app_bootloader_init(void);
 /* 保底裸机主循环每轮调用；依据boot_state解析命令、驱动擦除/接收/校验并回执或复位。
  * 单执行流，回执用带1000ms超时的阻塞发送即可，不需要APP里的异步分时发送。 */
 void app_bootloader_work(void);
+uint8_t app_bootloader_idle_expired(void); /* 仅待机收命令时计无活动时间，升级中不退出。 */
 
 #endif

@@ -133,8 +133,6 @@ const uint8_t * lv_font_get_bitmap_fmt_txt(const lv_font_t * font, uint32_t unic
 #endif
     }
 
-    /*If not returned earlier then the letter is not found in this font*/
-    return NULL;
 }
 
 /**

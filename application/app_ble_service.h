@@ -50,7 +50,7 @@ typedef struct
  * 返回1仅表示原管理服务需要延长UI活动时间，由UI调用lv_disp_trig_activity。
  * 不在此更新供电，调用方处理完按键/抬腕后再执行update_power。 */
 uint8_t app_ble_service(uint8_t screen_on, uint8_t sport_mode);
-/* restart_quiet=1用于LCD电源切换成功后，重新开始1000ms安静期。
+/* restart_quiet=1用于LCD电源切换成功后，重新开始安静期：未确认手机1秒，合法校时后30秒。
  * SPORT立即断电；ECO须等待初始化、管理服务、TX、RX空闲后再等待安静期。 */
 void app_ble_update_power(uint8_t screen_on, uint8_t sport_mode, uint8_t restart_quiet);
 /* 仅RAM保存，开机默认ECO；设置时重启安静期，随后由调用方更新供电。 */

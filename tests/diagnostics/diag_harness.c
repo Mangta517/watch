@@ -28,7 +28,7 @@ void diag_exit(void)
 
 uint32_t HAL_RCC_GetPCLK1Freq(void)
 {
-    return 32000000;
+    return 42000000;
 }
 
 uint32_t HAL_GetTick(void)
@@ -104,7 +104,7 @@ uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result)
 
 HAL_StatusTypeDef kt6368a_write_async(const uint8_t *data, uint16_t size, uint32_t timeout_ms)
 {
-    assert(locked == 0 && size <= 78 && timeout_ms == 10);
+    assert(locked == 0 && size <= 78 && timeout_ms == 30);
     assert(memcmp(data, "WDG1", 4) == 0);
     assert(diag_crc16(data, size - 2) == ((uint16_t)data[size - 2] | ((uint16_t)data[size - 1] << 8)));
     if (force_busy != 0)
@@ -129,14 +129,14 @@ int main(int argc, char **argv)
     assert(fixture != NULL);
     diag_rcc.CFGR = RCC_CFGR_PPRE1;
     app_diag_clock_init();
-    assert(diag_timer.PSC == 6399 && diag_timer.CR1 == TIM_CR1_CEN);
+    assert(diag_timer.PSC == 8399 && diag_timer.CR1 == TIM_CR1_CEN);
     assert(s_sensors[APP_DIAG_MPU].init_result == UINT32_MAX);
     if (APP_DEBUG_TELEMETRY == 0)
     {
         tick = 1000;
         for (i = 0; i < 20; ++i)
         {
-            app_diag_service();
+            app_diag_service(1);
             tick += 100;
         }
         assert(sent == 0 && s_enabled == 0 && s_tx_pending == 0);
@@ -214,20 +214,20 @@ int main(int argc, char **argv)
     tick = 1000;
     diag_timer.CNT = 10000;
     tx_busy = tx_ready = 1; /* 模拟心率帧结果待其原发起者收取。 */
-    app_diag_service();
+    app_diag_service(1);
     assert(tx_busy && tx_ready && sent == 0 && s_tx_ok == 0);
     tx_busy = tx_ready = 0;
     force_busy = 1;
-    app_diag_service();
+    app_diag_service(1);
     assert(sent == 0 && s_sequence == 0 && s_row == 0 && s_tx_ok == 0 && s_tx_failed == 0);
     force_busy = 0;
     for (i = 0; i < 14; ++i)
     {
-        app_diag_service();
-        app_diag_service();
+        app_diag_service(1);
+        app_diag_service(1);
         assert(sent == i + 1U);
         tx_ready = 1;
-        app_diag_service();
+        app_diag_service(1);
         tick += 100;
     }
     assert(s_tx_ok == 13 && s_tx_failed == 1);
@@ -250,18 +250,18 @@ int main(int argc, char **argv)
     assert(s_system_words[3] == 41000);
     app_diag_receive((const uint8_t *)"DI", 2);
     app_diag_receive((const uint8_t *)"AG,0\n", 5);
-    app_diag_service();
+    app_diag_service(1);
     assert(s_enabled == 0 && sent == 14);
     app_diag_receive((const uint8_t *)"xxxxxxxxxxxxxxxxDIAG,1\n", 23);
     assert(s_enabled == 0);
     app_diag_receive((const uint8_t *)"DIAG,1\n", 7);
     assert(s_enabled == 1 && s_row == 0);
     assert(app_diag_take_imu_calibration() == 0);
-    app_diag_service();
+    app_diag_service(1);
     assert(tx_busy && sent == 15 && s_tx_ok == 13);
     app_diag_receive((const uint8_t *)"DIAG,0\n", 7);
     tx_ready = 1;
-    app_diag_service();
+    app_diag_service(1);
     assert(!tx_busy && s_enabled == 0 && s_tx_ok == 14 && s_tx_failed == 1);
     app_diag_receive((const uint8_t *)"IMU,", 4);
     assert(app_diag_take_imu_calibration() == 0);

@@ -9,6 +9,7 @@
 #include "main.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
+#include "task.h"
 #include <string.h>
 
 #define APP_AHT21_TIMEOUT_MS 200 /* 自触发算起允许推迟读回的最长毫秒数，超时即丢弃该次转换 */
@@ -25,8 +26,12 @@ static uint32_t s_period_ms = APP_AHT21_PERIOD_MS;
  * 拉长时清掉待办与在途转换，在途恢复改为待恢复，并把measuring清零。 */
 void app_aht21_set_period(uint32_t period_ms)
 {
-    /* 先比较新旧周期：新周期更短则为1，表示切换后要尽快补一次采样。 */
-    uint8_t sample_due = period_ms < s_period_ms;
+    uint8_t sample_due;
+    if (period_ms == 0)
+    {
+        return;
+    }
+    sample_due = period_ms < s_period_ms;
     /* 新周期立即生效，后续 service 的到期判断都按这个毫秒数计算。 */
     s_period_ms = period_ms;
     /* 把周期起点重设为当前 tick，切换周期后从这一刻重新计时。 */
@@ -55,8 +60,8 @@ void app_aht21_init(void)
 {
     aht21_result result; /* 暂存驱动初始化的返回码，稍后同时写快照和诊断。 */
     /* 在 sensor 任务上下文创建快照锁；创建失败进入 Error_Handler，停止后续初始化。 */
-    s_aht21_mux = xSemaphoreCreateMutex();
-    if (s_aht21_mux == NULL)
+    SemaphoreHandle_t mux = xSemaphoreCreateMutex();
+    if (mux == NULL)
     {
         Error_Handler();
         return;
@@ -65,11 +70,8 @@ void app_aht21_init(void)
     result = aht21_init();
     /* 把本次初始化结果登记到 AHT 诊断通道，供诊断页显示。 */
     app_diag_sensor_init(APP_DIAG_AHT, (uint32_t)result);
-    /* 加锁把快照清零，只把 result 填成刚才的初始化结果，其余字段为 0。 */
-    xSemaphoreTake(s_aht21_mux, portMAX_DELAY);
     memset(&s_aht21_data, 0, sizeof(s_aht21_data));
     s_aht21_data.result = result;
-    xSemaphoreGive(s_aht21_mux);
     /* 清空待读回与待采样两项待办，开机的第一帧由下面的周期起点前移来安排。 */
     s_pending = s_sample_due = 0;
     /* 初始化成功则无需恢复；失败则置待恢复，由 service 按周期尝试重新初始化。 */
@@ -82,6 +84,9 @@ void app_aht21_init(void)
         /* 起点前移一整周期，首轮service立即触发首帧转换，至少80ms后才读回。 */
         s_period_start_ms -= s_period_ms;
     }
+    taskENTER_CRITICAL();
+    s_aht21_mux = mux;
+    taskEXIT_CRITICAL();
 }
 
 /* 每轮至多推进一笔事务：恢复中→到期触发→在途读回；等待转换期间直接返回，不占总线也不延时。 */

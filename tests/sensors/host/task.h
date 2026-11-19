@@ -5,6 +5,8 @@ typedef void *TaskHandle_t;
 typedef int BaseType_t;
 #define pdTRUE 1
 #define pdFALSE 0
+#define taskENTER_CRITICAL() ((void)0)
+#define taskEXIT_CRITICAL() ((void)0)
 void host_dma_yield(BaseType_t woken);
 #define portYIELD_FROM_ISR(woken) host_dma_yield(woken)
 TaskHandle_t xTaskGetCurrentTaskHandle(void);

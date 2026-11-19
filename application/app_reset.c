@@ -7,7 +7,7 @@
   *          数据归属: s_previous 只在开机读一次并对外发布(app_reset_get_info)；
   *          s_current 是本次运行正在更新的记录，喂狗检查点和异常现场都写它。
   *          写入时机: 开机先提交一份"本次运行中"的骨架；此后每次实际喂狗顺带推进检查点；
-  *          硬件异常、LVGL断言、栈溢出时提交现场并停机，等外部看门狗复位。
+  *          硬件异常、LVGL断言、栈溢出时提交现场，再由故障入口主动复位。
   *          跨复位能力: 备份域在系统复位后保留，但被清过(掉电或RTC复位)时magic/CRC会失配，
   *          此时只保留本次读到的 RCC 复位标志，其余字段按无效处理。
   ******************************************************************************
@@ -220,7 +220,7 @@ void app_reset_capture_fault(uint32_t kind, const uint32_t *stack, uint32_t exc_
     __set_PRIMASK(mask); /* 恢复中断屏蔽状态。 */
 }
 
-/* 无硬件帧的停机记录：记录kind、pc、task_tag并落盘，随后由调用方死循环等看门狗。
+/* 无硬件帧的停机记录：记录kind、pc、task_tag并落盘，随后由调用方主动复位。
  * s_stopped已置位时直接返回，先到的现场优先。 */
 void app_reset_capture_stop(uint32_t kind, uint32_t pc, uint32_t task_tag)
 {
@@ -232,7 +232,7 @@ void app_reset_capture_stop(uint32_t kind, uint32_t pc, uint32_t task_tag)
         reset_capture_registers(kind); /* 置停机标记并抓取故障状态寄存器。 */
         s_current.pc = pc; /* 记录调用方给出的停机地址。 */
         s_current.task_tag = task_tag; /* 记录任务名字节等辅助标记。 */
-        reset_store(); /* 提交到备份域，之后由调用方死循环等看门狗。 */
+        reset_store(); /* 提交到备份域，之后由调用方主动复位。 */
     }
     __set_PRIMASK(mask);
 }
@@ -247,7 +247,8 @@ void app_reset_assert_stop(void)
 #else
     app_reset_capture_stop(APP_RESET_LVGL_ASSERT, (uint32_t)(uintptr_t)__builtin_return_address(0), 0);
 #endif
-    /* 记录后原地死循环，等外部看门狗复位。 */
+    /* 启动早期或看门狗暂停时也能退出故障态。 */
+    NVIC_SystemReset();
     for (;;)
     {
     }

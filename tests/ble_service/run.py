@@ -19,5 +19,5 @@ with tempfile.TemporaryDirectory(prefix="watch-ble-service-") as out:
             "tests/ble_service/ble_service_harness.c", "application/app_ble_service.c",
             "application/app_clock.c", "application/app_weather.c", "-o", exe,
         ], cwd=root, check=True)
-        for mode in ["receive_power", "uptime", "uptime_error", "uptime_timeout", "ownership", "uptime_heart"]:
+        for mode in ["receive_power", "uptime", "uptime_error", "uptime_timeout", "ownership", "uptime_heart", "eco_phone", "eco_phone_wrap"]:
             subprocess.run([exe, mode], cwd=root, check=True)

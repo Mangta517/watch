@@ -16,6 +16,8 @@
 #include "lcd.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
+#include "app_reset.h"
 
 /**********************
  *  STATIC PROTOTYPES
@@ -35,8 +37,10 @@ static lv_color_t buf_2[LVGL_BUF_PX];
 
 /* 本次在途 flush 的驱动指针: LVGL 保证 flush_ready 前不会再进 flush_cb, 单飞安全 */
 static lv_disp_drv_t *volatile s_flush_drv = NULL;
-static TaskHandle_t s_flush_task;
-static uint8_t s_redraw_pending;
+static SemaphoreHandle_t s_flush_done;
+static volatile uint8_t s_flush_can_signal, s_redraw_pending;
+static volatile uint8_t s_wait_first_frame, s_first_frame_drawn;
+static uint8_t s_brightness;
 static void (*s_progress_callback)(void);
 
 /**********************
@@ -47,6 +51,12 @@ void lv_port_disp_init(void)
     /* 先初始化物理屏 (含刷黑与背光, 均为阻塞路径) */
     disp_init();
 
+    s_flush_done = xSemaphoreCreateBinary();
+    if (s_flush_done == NULL)
+    {
+        app_reset_assert_stop();
+        return;
+    }
     /* DMA 完成通知接线 (在任何 flush_cb 之前) */
     LCD_Set_Flush_Complete_Callback(lcd_flush_ready_cb);
 
@@ -83,13 +93,10 @@ static void disp_init(void)
 /* 常规小块异步发送像素，完成由DMA回调上报；大块阻塞回退和失败由驱动完成/服务路径收尾。 */
 static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
 {
-    /* 先清空本拍记录的任务句柄，未启动调度器时不会做任务通知等待。 */
-    s_flush_task = NULL;
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+    s_flush_can_signal = xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
+    if (s_flush_can_signal != 0)
     {
-        /* 记录当前（LVGL）任务句柄，供完成中断定向发通知。 */
-        s_flush_task = xTaskGetCurrentTaskHandle();
-        (void)ulTaskNotifyTake(pdTRUE, 0); /* 清除上一块已完成、无需等待的通知。 */
+        (void)xSemaphoreTake(s_flush_done, 0); /* 丢弃上一块的完成信号。 */
     }
     /* 记录驱动指针，完成回调据此调用 lv_disp_flush_ready。 */
     s_flush_drv = disp_drv;
@@ -116,7 +123,7 @@ static void disp_wait(lv_disp_drv_t *disp_drv)
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     {
         /* 最多等 1 个 tick 的完成通知；已被清除的旧通知不会误唤醒本次等待。 */
-        (void)ulTaskNotifyTake(pdTRUE, 1);
+        (void)xSemaphoreTake(s_flush_done, 1);
     }
 }
 
@@ -131,11 +138,15 @@ static void lcd_flush_ready_cb(void)
     {
         /* 先清驱动指针，保证同一笔只上报一次完成。 */
         s_flush_drv = NULL;
-        lv_disp_flush_ready(drv);
-        /* 仅在中断上下文且确实记录了等待任务时发通知，避免在任务上下文误用 ISR 接口。 */
-        if (s_flush_task != NULL && __get_IPSR() != 0)
+        if (s_wait_first_frame != 0 && s_redraw_pending == 0 && __get_IPSR() != 0 && lv_disp_flush_is_last(drv))
         {
-            vTaskNotifyGiveFromISR(s_flush_task, &woken);
+            s_first_frame_drawn = 1;
+        }
+        lv_disp_flush_ready(drv);
+        /* DMA使用专用信号量，PA4、UART和sensor唤醒仍使用任务通知。 */
+        if (s_flush_can_signal != 0 && __get_IPSR() != 0)
+        {
+            xSemaphoreGiveFromISR(s_flush_done, &woken);
             portYIELD_FROM_ISR(woken);
         }
     }
@@ -153,6 +164,21 @@ void lv_port_disp_service(void)
     {
         s_redraw_pending = 0;
         lv_obj_invalidate(lv_scr_act());
+        s_first_frame_drawn = 0;
+    }
+    if (s_wait_first_frame != 0 && s_first_frame_drawn != 0)
+    {
+        s_wait_first_frame = 0;
+        LCD_Set_Light(s_brightness);
+    }
+}
+
+void lv_port_disp_set_brightness(uint8_t brightness)
+{
+    s_brightness = brightness;
+    if (s_wait_first_frame == 0)
+    {
+        LCD_Set_Light(brightness);
     }
 }
 
@@ -165,12 +191,15 @@ uint8_t lv_port_disp_set_sleep(uint8_t sleeping)
     }
     if (sleeping != 0)
     {
-        /* 非 0 表示进入熄屏：关背光、发睡眠命令并关外设时钟。 */
+        s_wait_first_frame = 0;
+        s_first_frame_drawn = 0;
         return LCD_ST7789_SleepIn();
     }
-    else
+    if (LCD_ST7789_SleepOut() != 0)
     {
-        /* 0 表示亮屏：恢复外设时钟并唤醒面板。 */
-        return LCD_ST7789_SleepOut();
+        return 1;
     }
+    s_first_frame_drawn = 0;
+    s_wait_first_frame = 1;
+    return 0;
 }

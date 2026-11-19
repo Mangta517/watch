@@ -12,6 +12,7 @@
 
 #include "FreeRTOS.h"
 #include "semphr.h"
+#include "task.h"
 
 #include "spl006.h"
 #include <math.h>
@@ -22,6 +23,8 @@
  *********************/
 /* 连续 N 次总线失败才判离线: SPL006 与 MPU6050 共总线, 偶发瞬态不宜翻 OFFLINE */
 #define APP_BARO_OFFLINE_STREAK 3
+/* 允许连续两轮失败，超过三个采样间隔的快照也会单独过期。 */
+#define APP_BARO_MAX_AGE_MS (APP_BARO_SAMPLE_PERIOD_MS * APP_BARO_OFFLINE_STREAK + 1000)
 
 /* 标准模型保留原参数；有手机环境温度时，按0.0065K/m递减率求温压高度。
  * 手机温度近似所在地空气温度，芯片原始温度仍只用于SPL006压力补偿。 */
@@ -116,8 +119,8 @@ void App_Baro_Init(void)
 {
     uint16_t i; /* 遍历 24 个历史槽的下标。 */
     /* mutex 在任务上下文创建 (同 App_IMU_Init 的理由) */
-    s_baro_mux = xSemaphoreCreateMutex();
-    if (s_baro_mux == NULL)
+    SemaphoreHandle_t mux = xSemaphoreCreateMutex();
+    if (mux == NULL)
     {
         Error_Handler();
         return;
@@ -131,6 +134,9 @@ void App_Baro_Init(void)
         /* 逐槽写入缺测标记 INT16_MIN，开机画面先显示 24 个空柱。 */
         s_history.altitude_m[i] = APP_BARO_HISTORY_NONE;
     }
+    taskENTER_CRITICAL();
+    s_baro_mux = mux;
+    taskEXIT_CRITICAL();
 }
 
 /* 仅sensor任务调用：把本轮已取得的有效高度落柱；每跨10分钟一柱，
@@ -187,9 +193,19 @@ void app_baro_record_history(void)
 /* 锁内复制24柱历史；NULL不处理，首帧前为初始化后的全空柱。 */
 void app_baro_get_history(app_baro_history_struct *history)
 {
+    uint16_t i;
     /* 输出指针为空时不处理，避免写空地址。 */
     if (history == NULL)
     {
+        return;
+    }
+    if (s_baro_mux == NULL)
+    {
+        history->sequence = 0;
+        for (i = 0; i < APP_BARO_HISTORY_POINTS; ++i)
+        {
+            history->altitude_m[i] = APP_BARO_HISTORY_NONE;
+        }
         return;
     }
     /* 锁内整体复制 24 个高度槽与序列号，保证调用方拿到同一时刻的整屏历史。 */
@@ -257,8 +273,11 @@ void App_Baro_Service(void)
     {
         /* 任一路是总线失败：把两个状态字节拼回诊断值(高字节温度)后记录错误。 */
         app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_ERROR, pr | ((uint32_t)tr << 8), read_started);
-        /* 仅总线失败计入离线; 返回1=数据未就绪时保留快照，过期仍按3s判定。 */
-        if (++s_err_streak >= APP_BARO_OFFLINE_STREAK)
+        if (s_err_streak < APP_BARO_OFFLINE_STREAK)
+        {
+            ++s_err_streak;
+        }
+        if (s_err_streak >= APP_BARO_OFFLINE_STREAK)
         {
             /* 连续 3 次总线失败：加锁把在线标志清 0，快照数值保留。 */
             s_online = 0;
@@ -282,12 +301,6 @@ void App_Baro_Service(void)
     {
         /* 本次采样失败时结束请求，保留此前的校准偏差，等待用户重新提交。 */
         s_baro_data.calibration_state = APP_BARO_CAL_FAILED;
-    }
-    /* 1Hz 器件在暂停(运动/环境窗口)后仍可能留旧快照，用新鲜度门限统一判离线。 */
-    if ((uint32_t)(HAL_GetTick() - s_sample_ms) >= SPL006_SAMPLE_MAX_AGE_MS)
-    {
-        /* 距最近成功采样已超过最大允许年龄：加锁清在线标志，快照数值不动。 */
-        s_online = 0;
     }
     baro_unlock();
 }
@@ -377,9 +390,18 @@ uint8_t App_Baro_GetSnapshot(app_baro_struct *baro)
         return 0;
     }
 
+    if (s_baro_mux == NULL)
+    {
+        memset(baro, 0, sizeof(*baro));
+        return 0;
+    }
     /* 锁内整体复制快照结构体并读在线位，保证返回值和数据对应同一时刻。 */
     baro_lock();
     *baro = s_baro_data;
+    if ((uint32_t)(HAL_GetTick() - s_sample_ms) >= APP_BARO_MAX_AGE_MS)
+    {
+        s_online = 0;
+    }
     online = s_online;
     baro_unlock();
 

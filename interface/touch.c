@@ -54,19 +54,19 @@ static uint8_t s_tp_addr8 = CST816_ADDR_1; /* 当前在用的 8bit 写地址 */
 volatile uint8_t g_tp_chip_id = 0; /* 诊断: 最近一次读到的 CST816 ChipID (0xB5/0xB7=正常) */
 
 /******************************************************************************
- * APP使用64MHz的51次位延时；volatile防止优化掉，实际总线频率需实测。
+ * APP使用84MHz的67次位延时；volatile防止优化掉，实际总线频率需实测。
  *****************************************************************************/
 static void tp_delay(void)
 {
     /* n 为循环次数；volatile 阻止编译器把这段空循环整体优化掉 */
-    volatile uint32_t n = 51;
+    volatile uint32_t n = 67;
     /* 逐次自减到 0，用空循环消耗时间，构成软 I2C 的半周期延时 */
     while (n--)
     {
     }
 }
 
-/* SDA 方向切换: 输出(主机发送) / 输入+上拉(读 ACK 与数据)
+/* SDA 方向切换: 开漏输出(主机发送) / 输入(读 ACK 与数据)
  * 加 PRIMASK 临界区的原因: HAL_GPIO_Init 对 GPIOB 的 MODER/PUPDR 是读-改-写,
  * sensor可能抢占touch对GPIOB的读改写，touch恢复后可能用旧值覆盖sensor的SDA方向；
  * 两边短临界区使同端口GPIO更新互斥。MPU EXTI只置标志，不操作总线。 */
@@ -78,10 +78,9 @@ static void tp_sda_out(void)
     uint32_t primask = __get_PRIMASK();
     /* 指定只重配 SDA 这一根引脚，不动同端口的其他引脚 */
     g.Pin = TP_SDA_Pin;
-    /* 推挽输出：主机需要主动把 SDA 拉低或拉高 */
-    g.Mode = GPIO_MODE_OUTPUT_PP;
-    /* 使能内部上拉，与后续输入态配置保持一致 */
-    g.Pull = GPIO_PULLUP;
+    /* 开漏只主动拉低，写高时交给Core板R4的4.7k上拉。 */
+    g.Mode = GPIO_MODE_OUTPUT_OD;
+    g.Pull = GPIO_NOPULL;
     /* 高速档，缩短引脚翻转时间，减小软 I2C 边沿延迟 */
     g.Speed = GPIO_SPEED_FREQ_HIGH;
     /* 关中断，避免别的任务在读改写 GPIOB 寄存器时插入本次配置 */
@@ -102,8 +101,8 @@ static void tp_sda_in(void)
     g.Pin = TP_SDA_Pin;
     /* 输入模式：让从机可以驱动 SDA，主机只读取电平 */
     g.Mode = GPIO_MODE_INPUT;
-    /* 输入态启用上拉，总线无人驱动时读到高电平 */
-    g.Pull = GPIO_PULLUP;
+    /* 输入态也由外部4.7k上拉保持空闲高电平。 */
+    g.Pull = GPIO_NOPULL;
     /* 输入模式下速度字段仍按高速填写，保持与输出配置一致 */
     g.Speed = GPIO_SPEED_FREQ_HIGH;
     /* 关中断，与 tp_sda_out 以及 my_i2c 的端口读改写互斥 */
@@ -121,7 +120,7 @@ static void iic_start(void)
 {
     /* 先把 SDA 预置高电平，保证下面切输出时不会误拉低总线 */
     TP_SDA_1();
-    /* 把 SDA 切成推挽输出，之后主机才能主动产生边沿 */
+    /* 把SDA切成开漏输出，拉低或释放数据线 */
     tp_sda_out();
     /* 释放 SCL 为高，准备在 SCL 高电平期间制造 START 条件 */
     TP_SCL_1();
@@ -140,7 +139,7 @@ static void iic_stop(void)
 {
     /* 先把 SDA 预置为低，切输出后即把总线数据线驱动为低 */
     TP_SDA_0();
-    /* SDA 切换为推挽输出，主机主动控制数据线 */
+    /* SDA切换为开漏输出，主机拉低或释放数据线 */
     tp_sda_out();
     /* 等待低电平建立 */
     tp_delay();
@@ -414,8 +413,11 @@ static uint8_t tp_probe(uint8_t retries_per_addr)
                 /* 返回读到的 ChipID，探测成功 */
                 return id;
             }
-            /* 本次失败，等 100ms 再试，给芯片上电/复位后的引导留时间 */
-            platform_delay_min_ms(100);
+            /* 本地址还要重试时才等待，最后一次失败直接切地址或结束。 */
+            if (try_n + 1 < retries_per_addr)
+            {
+                platform_delay_min_ms(100);
+            }
         }
     }
     /* 两个地址都没探到有效 ID，清掉诊断值 */
@@ -446,7 +448,7 @@ uint8_t Touch_Init(void)
     id = tp_probe(5);
 
     /* 本板无 INT 引脚；关闭自动休眠失败时，由后续轮询继续配置和恢复。 */
-    if (tp_configure() != 0)
+    if (id != 0 && tp_configure() != 0)
     {
         /* 配置失败说明当前通信不可用，对外按未初始化处理 */
         id = 0;
@@ -467,7 +469,7 @@ uint8_t Touch_Init(void)
  * 有触点时才更新x/y屏幕坐标，读取失败或恢复中不能据此确认松手。
  * 恢复流程包括复位、地址探测和关闭自动休眠，实际耗时随任务调度变化。
  *****************************************************************************/
-#define TP_FAIL_STREAK_RECOVER 200 /* touch任务目标5ms/次；实际恢复时间随抢占延长。 */
+#define TP_FAIL_STREAK_RECOVER 200 /* 连续失败阈值；实际恢复时间随任务调度变化。 */
 static uint32_t s_tp_fail_streak = 0;
 
 enum
@@ -477,6 +479,7 @@ enum
     TP_RECOVER_BOOT_WAIT,
     TP_RECOVER_PROBE,
     TP_RECOVER_PROBE_WAIT,
+    TP_RECOVER_RETRY_WAIT,
     TP_RECOVER_CONFIG
 };
 static struct
@@ -603,11 +606,18 @@ static void tp_recover_step(void)
             }
             else
             {
-                /* 两个地址都试过仍失败，仍进入配置阶段，由写寄存器结果决定后续 */
-                tp_recovery.phase = TP_RECOVER_CONFIG;
+                /* 双地址均未应答，冷却后重新探测，不向未知地址连续写配置。 */
+                tp_recovery.phase_ms = now_ms;
+                tp_recovery.phase = TP_RECOVER_RETRY_WAIT;
             }
         }
         /* 未满 100ms 则本拍直接结束 */
+        break;
+    case TP_RECOVER_RETRY_WAIT:
+        if ((uint32_t)(now_ms - tp_recovery.phase_ms) >= 1000)
+        {
+            tp_recover_begin();
+        }
         break;
     case TP_RECOVER_CONFIG:
         /* 重新写自动休眠配置；失败时 tp_configure 内部会安排下一轮恢复 */
@@ -645,7 +655,7 @@ uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
     }
 
     /* 0xFF 不是有效手指数，按扫描异常处理 */
-    if (num == 0xFF)
+    if (num > 2)
     {
         /* 同样累计失败，持续异常会触发恢复 */
         tp_read_failed();
@@ -665,13 +675,18 @@ uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
         tp_read_failed(); /* 坐标失败同样累计；后续轮询推进复位，不阻塞LVGL。 */
         return TOUCH_READ_ERROR; /* XposH..YposL 连读 */
     }
-    /* 坐标读取成功，说明通信正常，清空连续失败计数 */
-    s_tp_fail_streak = 0;
     /* X 为 12bit：高字节低 4 位是高位，拼上低字节构成完整坐标 */
     px = (uint16_t)(((uint16_t)(d[0] & 0x0F) << 8) | d[1]);
     /* Y 同样按 12bit 拆装：d[2] 的低 4 位为高 4 位，d[3] 为低 8 位 */
     py = (uint16_t)(((uint16_t)(d[2] & 0x0F) << 8) | d[3]);
 
+    /* 越界帧沿用读取失败路径，取消手势并累计恢复，避免镜像下溢和边缘误触。 */
+    if (px >= TOUCH_SCREEN_W || py >= TOUCH_SCREEN_H)
+    {
+        tp_read_failed();
+        return TOUCH_READ_ERROR;
+    }
+    s_tp_fail_streak = 0;
 #if TOUCH_REVERSE
     /* 面板与 LCD 装配相差 180°，X 轴按屏宽做镜像 */
     px = TOUCH_SCREEN_W - 1 - px;
@@ -688,6 +703,14 @@ uint8_t Touch_GetPoint(uint16_t *x, uint16_t *y)
 
 uint8_t Touch_Sleep(void)
 {
+    if (tp_recovery.phase != TP_RECOVER_IDLE)
+    {
+        tp_recover_step();
+        if (tp_recovery.phase != TP_RECOVER_IDLE)
+        {
+            return 1;
+        }
+    }
     /* 熄屏后由touch任务进入睡眠；无INT时唤醒只能靠复位 */
     /* 向0xE5睡眠控制寄存器写0x03；返回0表示写事务获ACK，1表示失败。 */
     return tp_write_reg(REG_SLEEP_CTRL, 0x03);
@@ -700,7 +723,11 @@ void Touch_Wakeup(void)
     /* 硬复位芯片，退出睡眠并重新引导 */
     Touch_Reset();
     /* 每个候选地址只探测一次，尽量缩短唤醒耗时 */
-    (void)tp_probe(1);                           /* 两个候选地址各探测一次 */
-    /* 复位后重新关闭自动休眠；写失败时由内部状态机继续异步恢复 */
-    (void)tp_configure(); /* 复位后配置丢失；写失败时继续异步恢复。 */
+    if (tp_probe(1) == 0)
+    {
+        tp_recovery.phase_ms = HAL_GetTick();
+        tp_recovery.phase = TP_RECOVER_RETRY_WAIT;
+        return;
+    }
+    (void)tp_configure();
 }

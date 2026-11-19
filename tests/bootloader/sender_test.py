@@ -45,7 +45,7 @@ class Connection:
 
 class SenderTest(unittest.TestCase):
     def setUp(self):
-        self.image = struct.pack("<II", 0x20020000, 0x08010009) + bytes(range(256)) * 9 + b"x"
+        self.image = struct.pack("<II", 0x20020000, 0x08010199) + bytes(range(256)) * 9 + b"x"
 
     def test_crc_ready_and_exact_payload(self):
         connection = Connection(self.image)

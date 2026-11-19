@@ -6,9 +6,9 @@
  *          沿用旧函数名；量程、采样与校准行为以本工程当前实现为准，便于旧上层代码直接复用。
  *
  * 中断说明：器件数据就绪中断输出仍使能 —— INT_ENABLE(0x38)=0x01；
- *          器件 INT_PIN_CFG(0x37) 仍为 0x20 (高有效/推挽/锁存, 读 0x3A 清除)；
+ *          INT_PIN_CFG(0x37)=0xC0，低有效/开漏/50µs脉冲，空闲由外部4.7k上拉；
  *          main 启动即持续屏蔽 PB12 EXTI（早于稍后的 sensor 初始化，避免倒置时序），
- *          sensor 任务按周期轮询 INT_STATUS 的 DATA_RDY，读 0x3A 同时释放器件锁存。
+ *          INT_RD_CLEAR=0，sensor按周期轮询INT_STATUS的DATA_RDY，仅读0x3A清状态。
  *          ISR 边沿计数/标志 API 仅为兼容旧调用方保留。
  ******************************************************************************
  */
@@ -86,7 +86,7 @@ extern "C"
 /* 手表运动档：寄存器配置与解算/校准共同引用，改量程时须同步灵敏度。 */
 #define MPU6050_GYRO_RANGE       MPU6050_GYRO_RANGE_1000DPS
 #define MPU6050_ACCEL_RANGE      MPU6050_ACCEL_RANGE_4G
-#define MPU6050_SAMPLE_PERIOD_MS 10   /* DLPF启用时1kHz/(9+1)=100Hz */
+#define MPU6050_SAMPLE_PERIOD_MS 25   /* 上电默认40Hz低功耗加速度循环。 */
 #define MPU6050_DLPF_CFG         0x03 /* 陀螺仪42Hz、加速度44Hz */
 
     /* ------------------------------------------------------------ 接口函数 */
@@ -94,9 +94,9 @@ extern "C"
 
     /* 初始化 MPU6050 (调用前需先 my_i2c_init(MY_I2C_BUS_SENSOR)) */
     uint8_t my_mpu6050_init(void);
-    /* 仅sensor任务：10/20/40ms为六轴100/50/25Hz，200ms为加速度5Hz低功耗循环。 */
+    /* 仅sensor任务：10ms为100Hz纯加速度，25ms为40Hz低功耗循环。 */
     uint8_t my_mpu6050_set_sample_period(uint32_t period_ms);
-    /* accel_reference=1连续采加速度，陀螺仪/温度待机；200ms仍使用原5Hz循环。 */
+    /* accel_reference=1连续采加速度，陀螺仪/温度待机；25ms使用40Hz循环。 */
     uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference);
     uint8_t my_mpu6050_set_sleep(uint8_t sleeping);
     /* 仅sensor任务：begin使数据无效，step每拍至多一笔事务；0=就绪，1=失败冷却，2=推进中。 */
@@ -164,21 +164,21 @@ extern "C"
     uint8_t my_mpu6050_get_accel(Accel_struct *accel);
 /* 0=新帧，1=通信/配置失败，2=未就绪；失败或无新帧不覆盖输出。 */
 #define MPU6050_DATA_NOT_READY 2
-    /* 常规轮询状态+六轴，低功耗只读加速度并将角速度置零；DATA_RDY有效才发布。 */
+    /* 固定读取状态与加速度共7字节，角速度置零；DATA_RDY有效才发布。 */
     uint8_t my_mpu6050_get_data(Accel_Gyro_struct *accel_gyro);
     uint32_t my_mpu6050_sample_ms(void); /* 最近有效帧的HAL读取开始时刻，非硬件时间戳。 */
     /* 读片内温度传感器, 输出 0.01℃ 定点 (T = raw/340 + 36.53) */
     uint8_t my_mpu6050_get_temp(int16_t *temp_01c);
 
     /* ---------------------------------------- 数据就绪中断 (PB12 EXTI 上升沿) */
-    /* 器件 DATA_RDY 输出仍使能 (INT_ENABLE=0x01, INT_PIN_CFG=0x20)；main 启动即持续屏蔽 PB12，
+    /* 器件 DATA_RDY 输出使能 (INT_ENABLE=0x01, INT_PIN_CFG=0xC0)；main 启动即持续屏蔽 PB12，
      * 以下 ISR/计数 API 仅为兼容旧调用方保留，正常运行不再进入本驱动的中断回调；
-     * 器件锁存仍在 get_data 的任务事务中读取 INT_STATUS 释放。 */
+     * 脉冲结束后DATA_RDY状态保留，在get_data的任务事务中读取INT_STATUS清除。 */
 
     /* 任务上下文查询并清除"数据就绪"标志: 1=发生过(已清), 0=无。
  * 注意: 标志只有 1 位, 同一时刻窗口内多个中断会合并成一个, 不能用来计频! */
     uint8_t my_mpu6050_int_check_clear(void);
-    /* ISR 边沿计数快照；INT 锁存期间 DATA_RDY 合并，不能代表器件采样率 */
+    /* ISR边沿计数快照；PB12常驻屏蔽期间计数不推进，不能代表器件采样率。 */
     uint16_t my_mpu6050_int_count(void);
     /* 取 sensor 任务读回的 INT_STATUS 快照 (bit0=DATA_RDY) */
     uint8_t my_mpu6050_get_int_status(void);

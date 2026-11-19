@@ -7,11 +7,11 @@ import zlib
 
 
 def build_command(image):
-    if not 8 <= len(image) <= 0x50000:
-        raise ValueError("BIN must contain 8..327680 bytes")
+    if not 0x19A <= len(image) <= 0x50000:
+        raise ValueError("BIN must contain 410..327680 bytes")
     stack, reset = struct.unpack_from("<II", image)
-    if not (0x20000000 < stack <= 0x20020000 and stack & 7 == 0 and
-            reset & 1 and 0x08010008 <= (reset & ~1) < 0x08010000 + len(image)):
+    if not (0x20000400 <= stack <= 0x20020000 and stack & 7 == 0 and
+            reset & 1 and 0x08010198 <= (reset & ~1) < 0x08010000 + len(image)):
         raise ValueError("BIN vectors do not match the upgrade APP at 0x08010000")
     return f"start:{len(image)}:{zlib.crc32(image):08x}\n".encode("ascii")
 
@@ -57,6 +57,7 @@ def main():
         command = build_command(image)
         print(f"{command.decode('ascii').strip()}; waiting for ready, then sending BIN", flush=True)
         with serial.Serial(args.port, 115200, timeout=1, write_timeout=5) as connection:
+            connection.reset_input_buffer()
             send_image(connection, image)
     except (OSError, ValueError, RuntimeError, serial.SerialException) as error:
         parser.exit(1, f"Transfer failed: {error}\n")

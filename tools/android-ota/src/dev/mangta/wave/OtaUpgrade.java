@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets;
 public final class OtaUpgrade
 {
     private static final int PROBE_TIMEOUT_MS = 1500;
-    // 普通APP静默时固件1秒无收发就切断蓝牙（UI_BT_ECO_QUIET_MS=1000）；
+    // 兼容旧APP及未确认手机通信的新APP：APP_BLE_ECO_QUIET_MS仍为1秒；
     // 初次BLE探测必须短于该窗口，否则等不到OTA,START就已被ECO断电。
     private static final int BLE_PROBE_TIMEOUT_MS = 500;
     private static final int OPEN_TIMEOUT_MS = 5000;

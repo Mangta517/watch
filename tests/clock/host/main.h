@@ -43,7 +43,7 @@ typedef struct
 } RTC_DateTypeDef;
 typedef struct
 {
-    uint32_t PRER, BKP0R, CR, ISR, TR, DR;
+    volatile uint32_t PRER, BKP0R, CR, ISR, TR, DR, SSR;
 } RTC_TypeDef;
 extern RTC_TypeDef host_rtc;
 #define RTC (&host_rtc)
@@ -54,6 +54,11 @@ extern RTC_TypeDef host_rtc;
 #define RTC_ISR_INITF (1UL << 6)
 #define RTC_ISR_INIT (1UL << 7)
 #define RTC_CR_BYPSHAD (1UL << 5)
+#define RTC_CR_FMT (1UL << 6)
+#define RTC_CR_OSEL (3UL << 21)
+#define RTC_PRER_PREDIV_A (127UL << 16)
+#define RTC_DR_WDU_Pos 13U
+#define RTC_DR_MU_Pos 8U
 #define RTC_CR_BKP (1UL << 18)
 #define HAL_RTC_STATE_READY 1
 #define HAL_RTC_STATE_BUSY 2
@@ -113,6 +118,12 @@ uint32_t mock_lse_flag(uint32_t flag);
 uint32_t HAL_GetTick(void);
 #define __HAL_RCC_PWR_CLK_ENABLE() mock_power_enable()
 #define __HAL_RCC_RTC_ENABLE()     mock_rtc_enable()
+extern uint32_t host_rtc_source;
+void host_reset_backup(void);
+#define __HAL_RCC_GET_RTC_SOURCE() host_rtc_source
+#define __HAL_RCC_RTC_CONFIG(source) (host_rtc_source = (source))
+#define __HAL_RCC_BACKUPRESET_FORCE() host_reset_backup()
+#define __HAL_RCC_BACKUPRESET_RELEASE() ((void)0)
 void mock_power_enable(void);
 void mock_rtc_enable(void);
 void HAL_PWR_EnableBkUpAccess(void);

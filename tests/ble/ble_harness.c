@@ -114,6 +114,7 @@ void __DMB(void)
 }
 void HAL_GPIO_Init(void *port, GPIO_InitTypeDef *gpio)
 {
+    assert(mask == 1);
     assert(port == GPIOA && gpio->Pin == (BLE_TX_Pin | BLE_RX_Pin));
     uart_gpio_mode = gpio->Mode;
 }
@@ -267,7 +268,14 @@ static void async_tx_tests(void)
     assert(tx_target == NULL && !rx_armed && tx_aborts == aborts + 2);
     assert(kt6368a_take_tx_result(&result) && result == HAL_ERROR);
     assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_BUSY);
+    before = tick;
     assert(kt6368a_power_on() == HAL_OK);
+    tick = before + 100; /* 模拟完整tick回绕后再次落入上电时间窗口。 */
+    assert(kt6368a_write_async(frame, sizeof(frame), 10) == HAL_OK);
+    tx_target = NULL;
+    HAL_UART_TxCpltCallback(&huart1);
+    assert(!kt6368a_take_tx_result(NULL));
+    assert(kt6368a_take_tx_result(&result) && result == HAL_OK);
     kt6368a_flush_rx();
     puts("PASS: async TX returns promptly, preserves RX, serializes writers, completes once, aborts on timeout/wrap and power off.");
 }

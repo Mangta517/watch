@@ -8,7 +8,7 @@
   *          ② SPI1_TX DMA(DMA2_Stream2) 已由 CubeMX 配置 → 提供 Watch 同款
   *             "阻塞整块发送" + "DMA 异步刷屏(经 TxCplt 回调报完成)" 双路径;
   *          ③ 背光为 TIM3_CH3/PB0, OCPolarity=HIGH → CCR 正映射 (不反转);
- *             CubeMX 已配 PSC=63/ARR=300 → 1MHz/301 ≈ 3.32kHz, LCD_Open_Light
+ *             CubeMX 已配 PSC=83/ARR=300 → 1MHz/301 ≈ 3.32kHz, LCD_Open_Light
   *             里仍按 LCD_BL_ARR 重写一次 ARR 作防御 (AutoReloadPreload=DISABLE,
   *             立即生效), 保证与驱动宏一致。
   *          依赖: hspi1(spi.c, Mode3: CPOL=High/CPHA=2Edge, MSB, DIV2), htim3(tim.c),
@@ -20,12 +20,6 @@
 #include "tim.h"
 #include "platform_delay.h"
 
-uint8_t lcd_is_stop_idle(void)
-{
-    return __HAL_TIM_GET_COMPARE(&htim3, TIM_CHANNEL_3) == 0 &&
-           (SPI1->SR & SPI_SR_BSY) == 0 && (DMA2_Stream2->CR & DMA_SxCR_EN) == 0;
-}
-
 /* 引脚快捷宏 (全部来自 CubeMX 生成的 main.h) */
 #define LCD_CS_Clr()  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET)
 #define LCD_CS_Set()  HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET)
@@ -34,9 +28,9 @@ uint8_t lcd_is_stop_idle(void)
 #define LCD_RES_Clr() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_RESET)
 #define LCD_RES_Set() HAL_GPIO_WritePin(LCD_RST_GPIO_Port, LCD_RST_Pin, GPIO_PIN_SET)
 
-/* 最大65534字节在32MHz下约16.4ms；50ms保留调度余量并限制故障阻塞时间。 */
+/* 最大65534字节在42MHz下约12.5ms；50ms保留调度余量并限制故障阻塞时间。 */
 #define LCD_SPI_TMO 50
-/* 最大65534字节在32MHz下约16.4ms；100ms后仍无回调则按失败收尾。 */
+/* 最大65534字节在42MHz下约12.5ms；100ms后仍无回调则按失败收尾。 */
 #define LCD_DMA_TIMEOUT_MS 100
 
 /******************************************************************************
@@ -201,6 +195,12 @@ void LCD_Color_Fill(uint16_t xsta, uint16_t ysta, uint16_t xend, uint16_t yend, 
  *****************************************************************************/
 static LCD_CallbackFunc_t s_lcd_flush_done_cb = NULL;
 static volatile uint8_t s_lcd_flush_active;
+static volatile uint8_t s_lcd_bus_suspended;
+
+uint8_t lcd_is_stop_idle(void)
+{
+    return s_lcd_bus_suspended != 0 && s_lcd_flush_active == 0;
+}
 static volatile uint8_t s_lcd_flush_failed;
 static volatile uint32_t s_lcd_flush_errors; /* 调试器可观察累计失败次数。 */
 static uint32_t s_lcd_flush_started_ms;
@@ -298,11 +298,25 @@ uint8_t LCD_Flush_Service(void)
     /* DMA 通道仍使能说明还在访问像素缓冲，此时不能通知 LVGL 复用该缓冲。 */
     if (hspi1.hdmatx != NULL && (hspi1.hdmatx->Instance->CR & DMA_SxCR_EN) != 0)
     {
-        return 0; /* DMA尚未停止访问像素缓冲，不能通知LVGL复用。 */
+        /* 停止失败不能释放像素缓冲，也不能无限喂狗等待。 */
+        Error_Handler();
+        return 0;
     }
-    /* DMA 已停：关闭 SPI 外设并中止 HAL 侧传输状态，便于下一笔重新开始。 */
+    /* DMA已停，给SPI移完最后一字节的时间；异常卡忙也必须限时退出。 */
+    uint32_t remaining = SystemCoreClock / 1000;
+    while ((SPI1->SR & (SPI_SR_TXE | SPI_SR_BSY)) != SPI_SR_TXE && remaining != 0)
+    {
+        --remaining;
+    }
     __HAL_SPI_DISABLE(&hspi1);
     (void)HAL_SPI_Abort(&hspi1);
+    /* 收尾可能截断时钟，以CS高电平重建下一笔的字节边界。 */
+    LCD_CS_Set();
+    for (remaining = SystemCoreClock / 1000000; remaining != 0; --remaining)
+    {
+        __NOP();
+    }
+    LCD_CS_Clr();
     /* 累计失败次数供调试观察，然后清在途与失败标志。 */
     ++s_lcd_flush_errors;
     s_lcd_flush_active = 0;
@@ -383,6 +397,10 @@ void LCD_Set_Light(uint8_t percent)
 {
     /* 换算后的比较值，写入 TIM3_CH3 决定背光占空比。 */
     uint32_t ccr;
+    if (s_lcd_bus_suspended != 0)
+    {
+        return;
+    }
     /* 入参按百分比解释，超过 100 一律压到满亮。 */
     if (percent > 100)
     {
@@ -535,40 +553,82 @@ static uint8_t lcd_power_command(uint8_t command)
     return 0;
 }
 
-uint8_t LCD_ST7789_SleepIn(void)
+static void lcd_suspend_bus(void)
 {
-    /* 先把背光占空比降到 0，避免面板休眠过程中仍亮着。 */
-    LCD_Set_Light(0);
-    /* 发送 0x10 进入睡眠；失败直接返回 1，后续断电步骤不执行。 */
-    if (lcd_power_command(0x10) != 0)
-    {
-        return 1;
-    }
-    /* 命令发出后等 100ms，再停时钟、关外设。 */
-    platform_delay_min_ms(100);
+    GPIO_InitTypeDef gpio = {0};
+    uint32_t mask;
     /* 移植层已等DMA收尾；CCR=0保持PB0低电平，停计数并关闭显示外设时钟。 */
     htim3.Instance->CR1 &= ~TIM_CR1_CEN;
     __HAL_SPI_DISABLE(&hspi1);
+    /* CLK/MOSI有4.7k外部上拉；释放复用输出，避免MOSI末位为0时持续耗电。 */
+    gpio.Pin = LCD_CLK_Pin | LCD_SDA_Pin;
+    gpio.Mode = GPIO_MODE_ANALOG;
+    gpio.Pull = GPIO_NOPULL;
+    mask = __get_PRIMASK();
+    __disable_irq();
+    HAL_GPIO_Init(GPIOB, &gpio);
     __HAL_RCC_TIM3_CLK_DISABLE();
     __HAL_RCC_SPI1_CLK_DISABLE();
     __HAL_RCC_DMA2_CLK_DISABLE();
-    /* 0 表示休眠命令已成功发出并完成外设关闭。 */
+    s_lcd_bus_suspended = 1;
+    __set_PRIMASK(mask);
+}
+
+static void lcd_resume_bus(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+    uint32_t mask;
+    /* 发唤醒命令前恢复SPI1复用；与同口触摸/I2C的方向切换互斥。 */
+    gpio.Pin = LCD_CLK_Pin | LCD_SDA_Pin;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio.Alternate = GPIO_AF5_SPI1;
+    mask = __get_PRIMASK();
+    __disable_irq();
+    s_lcd_bus_suspended = 0;
+    __HAL_RCC_DMA2_CLK_ENABLE();
+    __HAL_RCC_SPI1_CLK_ENABLE();
+    __HAL_RCC_TIM3_CLK_ENABLE();
+    HAL_GPIO_Init(GPIOB, &gpio);
+    __set_PRIMASK(mask);
+}
+
+uint8_t LCD_ST7789_SleepIn(void)
+{
+    uint8_t bus_suspended = s_lcd_bus_suspended;
+
+    /* 唤醒失败后若改回熄屏，恢复总线以确认屏幕进入休眠。 */
+    if (bus_suspended != 0)
+    {
+        lcd_resume_bus();
+    }
+    LCD_Set_Light(0);
+    if (lcd_power_command(0x10) != 0)
+    {
+        if (bus_suspended != 0)
+        {
+            lcd_suspend_bus();
+        }
+        return 1;
+    }
+    platform_delay_min_ms(100);
+    lcd_suspend_bus();
     return 0;
 }
 
 uint8_t LCD_ST7789_SleepOut(void)
 {
-    /* 依次恢复 DMA2、SPI1、TIM3 的时钟，供后续命令与 PWM 使用。 */
-    __HAL_RCC_DMA2_CLK_ENABLE();
-    __HAL_RCC_SPI1_CLK_ENABLE();
-    __HAL_RCC_TIM3_CLK_ENABLE();
+    uint8_t result;
+
+    lcd_resume_bus();
     __HAL_TIM_ENABLE(&htim3); /* 先以CCR=0恢复，应用层在面板醒后设置原亮度。 */
-    /* 发送 0x11 退出睡眠；失败返回 1，调用方需据此决定是否继续显示。 */
-    if (lcd_power_command(0x11) != 0)
+    result = lcd_power_command(0x11);
+    /* SPI报告失败时面板也可能收到了命令，留足120ms再允许绘图或发0x10。 */
+    platform_delay_min_ms(120);
+    if (result != 0)
     {
-        return 1;
+        lcd_suspend_bus();
     }
-    platform_delay_min_ms(120); /* 与初始化Sleep Out相同，等待面板恢复后再绘图、开背光。 */
-    /* 0 表示唤醒命令已发送并等待了恢复时间。 */
-    return 0;
+    return result;
 }

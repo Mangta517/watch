@@ -67,7 +67,11 @@ static uint8_t em7028_read_reg(uint8_t reg, uint8_t *value)
         return 1;
     }
     /* 按手册先发 STOP，结束写寄存器地址这一段。 */
-    my_i2c_stop(MY_I2C_BUS_SENSOR);
+    if (my_i2c_stop(MY_I2C_BUS_SENSOR) != 0)
+    {
+        em7028_last_fault.kind = EM7028_FAULT_READ;
+        return 1;
+    }
 
     /* 第二段事务前重新准备总线，失败即读故障。 */
     if (my_i2c_prepare(MY_I2C_BUS_SENSOR) != 0)
@@ -87,7 +91,11 @@ static uint8_t em7028_read_reg(uint8_t reg, uint8_t *value)
     }
     *value = my_i2c_read_byte(MY_I2C_BUS_SENSOR, 1); /* 最后一个字节发送 NACK */
     /* 读完后发 STOP，释放总线。 */
-    my_i2c_stop(MY_I2C_BUS_SENSOR);
+    if (my_i2c_stop(MY_I2C_BUS_SENSOR) != 0)
+    {
+        em7028_last_fault.kind = EM7028_FAULT_READ;
+        return 1;
+    }
     return 0;
 }
 

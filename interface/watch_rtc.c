@@ -8,7 +8,7 @@ static RTC_HandleTypeDef watch_rtc;
 static uint8_t rtc_ready;
 static uint8_t rtc_configured;
 static uint32_t rtc_start_ms;
-static uint8_t rtc_start_pending;
+static uint8_t rtc_waiting_lse;
 static HAL_StatusTypeDef rtc_start_status = HAL_ERROR;
 
 /* RTC异步标志按DWT限1ms并用次数兜底；IDLE屏蔽中断时不依赖HAL tick。 */
@@ -52,12 +52,19 @@ void watch_rtc_init_begin(void)
     __HAL_RCC_PWR_CLK_ENABLE();
     /* 解除备份域写保护，才能配置 RTC 和备份寄存器 */
     HAL_PWR_EnableBkUpAccess();
-    /* 启动 LSE 振荡器，RTC 以 32768Hz 作为时钟源 */
+    /* 只有旧镜像使用其他时钟源时才复位备份域，同源升级保留日历。 */
+    uint32_t source = __HAL_RCC_GET_RTC_SOURCE();
+    if (source != 0 && source != RCC_RTCCLKSOURCE_LSE)
+    {
+        __HAL_RCC_BACKUPRESET_FORCE();
+        __HAL_RCC_BACKUPRESET_RELEASE();
+    }
     __HAL_RCC_LSE_CONFIG(RCC_LSE_ON);
+    __HAL_RCC_RTC_CONFIG(RCC_RTCCLKSOURCE_LSE);
     /* 记录启动时刻，供 watch_rtc_init_service 计算 5s 超时 */
     rtc_start_ms = HAL_GetTick();
     /* 标记启动流程尚未完成，后续由 service 逐拍推进 */
-    rtc_start_pending = 1;
+    rtc_waiting_lse = 1;
     /* 初始状态设为 BUSY，表示正在等待 LSE 起振 */
     rtc_start_status = HAL_BUSY;
 }
@@ -65,7 +72,7 @@ void watch_rtc_init_begin(void)
 HAL_StatusTypeDef watch_rtc_init_service(void)
 {
     /* 没有待完成的启动流程时，直接返回上一次记录的启动结果 */
-    if (rtc_start_pending == 0)
+    if (rtc_waiting_lse == 0)
     {
         return rtc_start_status;
     }
@@ -75,15 +82,13 @@ HAL_StatusTypeDef watch_rtc_init_service(void)
         /* 记录配置结果，供后续调用直接查询 */
         rtc_start_status = watch_rtc_init();
         /* 启动流程结束，不再重复配置 */
-        rtc_start_pending = 0;
+        rtc_waiting_lse = 0;
     }
     /* LSE 尚未就绪，检查是否已超过 5s 启动超时 */
-    else if ((uint32_t)(HAL_GetTick() - rtc_start_ms) >= LSE_STARTUP_TIMEOUT)
+    else if (rtc_start_status == HAL_BUSY && (uint32_t)(HAL_GetTick() - rtc_start_ms) >= LSE_STARTUP_TIMEOUT)
     {
-        /* 超时后记录 TIMEOUT，调用方据此显示 RTC 不可用 */
+        /* 启动阶段结束，保持LSE开启，后续发现起振时仍配置RTC。 */
         rtc_start_status = HAL_TIMEOUT;
-        /* 结束等待，避免每拍都继续轮询 */
-        rtc_start_pending = 0;
     }
     /* 返回当前启动状态：BUSY 表示仍在等 LSE */
     return rtc_start_status;
@@ -91,143 +96,95 @@ HAL_StatusTypeDef watch_rtc_init_service(void)
 
 uint8_t watch_rtc_init_is_pending(void)
 {
-    /* 返回 1 表示启动流程仍在等待 LSE 或尚未配置完成 */
-    return rtc_start_pending;
+    /* 只有首次等待窗口计入启动阶段，超时后以正常任务节拍检查LSE。 */
+    return rtc_waiting_lse != 0 && rtc_start_status == HAL_BUSY;
 }
 
 HAL_StatusTypeDef watch_rtc_init(void)
 {
-    /* oscillator 描述本次要应用的 LSE 振荡器配置 */
-    RCC_OscInitTypeDef oscillator = {0};
-    /* clock 指定 RTC 使用 LSE 作为内核时钟 */
-    RCC_PeriphCLKInitTypeDef clock = {0};
-    /* time 保存首次初始化时要写入的时间值（字段先清零） */
-    RTC_TimeTypeDef time = {0};
-    /* date 保存首次初始化时要写入的占位日期 */
-    RTC_DateTypeDef date = {0};
-    /* status 接收各 HAL 调用返回的执行状态 */
-    HAL_StatusTypeDef status;
-    /* marker 保存从备份寄存器读出的初始化/校时标记 */
     uint32_t marker;
+    uint8_t fresh, failed = 0;
 
-    /* 配置未完成前先撤销就绪标志 */
     rtc_ready = 0;
-    /* 同时撤销已配置标志，失败时调用方不会误用 RTC */
     rtc_configured = 0;
-    /* 打开 PWR 时钟，备份域写访问的前提 */
-    __HAL_RCC_PWR_CLK_ENABLE();
-    /* 解除备份域写保护，允许配置 RTC 和备份寄存器 */
-    HAL_PWR_EnableBkUpAccess();
-    /* 本次只配置 LSE，不涉及 HSE/HSI/PLL */
-    oscillator.OscillatorType = RCC_OSCILLATORTYPE_LSE;
-    /* 请求打开 LSE 振荡器 */
-    oscillator.LSEState = RCC_LSE_ON;
-    /* 不修改 PLL，避免影响系统主频配置 */
-    oscillator.PLL.PLLState = RCC_PLL_NONE;
-    /* 应用振荡器配置；若 LSE 尚未起振，HAL 内部会等待或超时 */
-    status = HAL_RCC_OscConfig(&oscillator);
-    /* LSE 未能起振时直接返回 HAL 状态，RTC 保持未配置 */
-    if (status != HAL_OK)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) == 0)
     {
-        return status;
+        return HAL_TIMEOUT;
     }
-    /* 只配置 RTC 这一路外设时钟 */
-    clock.PeriphClockSelection = RCC_PERIPHCLK_RTC;
-    /* RTC 内核时钟选择 LSE（32768Hz） */
-    clock.RTCClockSelection = RCC_RTCCLKSOURCE_LSE;
-    /* 应用RTC时钟源选择；同源LSE复用，若原先已选择其他RTC时钟源，切换至LSE时HAL会复位备份域。 */
-    status = HAL_RCCEx_PeriphCLKConfig(&clock);
-    /* 时钟源配置失败则返回，避免后续按错误时钟配置分频 */
-    if (status != HAL_OK)
+    if (__HAL_RCC_GET_RTC_SOURCE() != RCC_RTCCLKSOURCE_LSE)
     {
-        return status;
+        return HAL_ERROR;
     }
-    /* 打开 RTC 外设时钟，寄存器访问才有效 */
     __HAL_RCC_RTC_ENABLE();
-    /* 指定使用芯片的 RTC 实例 */
     watch_rtc.Instance = RTC;
-    /* 24 小时制，与上层显示和校时参数一致 */
-    watch_rtc.Init.HourFormat = RTC_HOURFORMAT_24;
-    /* 异步分频为 0：32768Hz 全部由同步分频承担 */
-    watch_rtc.Init.AsynchPrediv = 0;
-    /* 同步分频 = 32767，使亚秒计数范围为 0~32767 */
-    watch_rtc.Init.SynchPrediv = WATCH_RTC_SUBSECOND_HZ - 1;
-    /* 关闭 RTC 输出引脚功能，本板不需要输出时钟 */
-    watch_rtc.Init.OutPut = RTC_OUTPUT_DISABLE;
-    /* 输出极性配置为高（输出已关闭，此项仅保持结构体完整） */
-    watch_rtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
-    /* 输出类型配置为开漏（输出已关闭，此项仅保持结构体完整） */
-    watch_rtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
-    /* 初始化 RTC 外设；若备份域已初始化过，HAL 会跳过日历重配 */
-    status = HAL_RTC_Init(&watch_rtc);
-    /* 初始化失败直接返回，不继续改分频或写时间 */
-    if (status != HAL_OK)
-    {
-        return status;
-    }
-    /* HAL_RTC_Init会跳过已初始化的备份域；升级旧固件时只迁移分频，保留日期/时间/备份标记。 */
-    if (RTC->PRER != WATCH_RTC_SUBSECOND_HZ - 1)
-    {
-        /* 改 PRER 前先关闭 RTC 寄存器写保护 */
-        __HAL_RTC_WRITEPROTECTION_DISABLE(&watch_rtc);
-        /* 进入初始化模式，日历计数暂停后才能安全改分频 */
-        status = RTC_EnterInitMode(&watch_rtc);
-        /* 只有成功进入初始化模式才写分频值 */
-        if (status == HAL_OK)
-        {
-            /* 同步分频写为 32767，得到 32768Hz 的亚秒计数 */
-            RTC->PRER = WATCH_RTC_SUBSECOND_HZ - 1;
-            /* 退出初始化模式，日历恢复计数 */
-            status = RTC_ExitInitMode(&watch_rtc);
-        }
-        /* 无论是否进入过初始化模式，都恢复写保护 */
-        __HAL_RTC_WRITEPROTECTION_ENABLE(&watch_rtc);
-        /* 进入/退出初始化模式失败时返回错误，避免带着旧分频继续运行 */
-        if (status != HAL_OK)
-        {
-            return status;
-        }
-    }
-    /* 读备份寄存器 DR0，判断这是首次上电还是已有走时/已校时 */
+    watch_rtc.State = HAL_RTC_STATE_BUSY;
     marker = HAL_RTCEx_BKUPRead(&watch_rtc, RTC_BKP_DR0);
-    /* 备份标记为“已初始化”或“已校时”时跳过写时间，保留备份域里已有的走时 */
-    if (marker != WATCH_RTC_INITIALIZED && marker != WATCH_RTC_SYNCED)
+    fresh = marker != WATCH_RTC_INITIALIZED && marker != WATCH_RTC_SYNCED;
+    __HAL_RTC_WRITEPROTECTION_DISABLE(&watch_rtc);
+    if (fresh != 0 || RTC->PRER != WATCH_RTC_SUBSECOND_HZ - 1 ||
+        (RTC->CR & (RTC_CR_FMT | RTC_CR_BYPSHAD | RTC_CR_OSEL)) != 0)
     {
-        /* 手机发送时间，日期为内部日历占位。首次初始化，后续复位保留走时。 */
-        date.Year = 0;
-        /* 月份用 1 月占位，真正的日期由上层忽略 */
-        date.Month = RTC_MONTH_JANUARY;
-        /* 日设为 1 号，保证日期字段合法 */
-        date.Date = 1;
-        /* 星期设为周六占位，仅需满足 HAL 参数范围 */
-        date.WeekDay = RTC_WEEKDAY_SATURDAY;
-        /* 不使用夏令时补偿 */
-        time.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
-        /* 复位 BKP 位（HAL 的 StoreOperation 语义），不保留旧夏令时状态 */
-        time.StoreOperation = RTC_STOREOPERATION_RESET;
-        /* 写入时间字段（全 0），后续由手机校时覆盖 */
-        status = HAL_RTC_SetTime(&watch_rtc, &time, RTC_FORMAT_BIN);
-        /* 写时间失败直接返回，避免留下半配置状态 */
-        if (status != HAL_OK)
+        RTC->ISR |= RTC_ISR_INIT;
+        failed = watch_rtc_wait_flag(RTC_ISR_INITF);
+        if (failed == 0)
         {
-            return status;
+            RTC->CR &= ~(RTC_CR_FMT | RTC_CR_BYPSHAD | RTC_CR_OSEL);
+            /* RM0383要求先写同步分频，再单独写异步分频。 */
+            RTC->PRER = (RTC->PRER & RTC_PRER_PREDIV_A) | (WATCH_RTC_SUBSECOND_HZ - 1);
+            RTC->PRER &= ~RTC_PRER_PREDIV_A;
+            if (fresh != 0)
+            {
+                RTC->TR = 0;
+                RTC->DR = (RTC_WEEKDAY_SATURDAY << RTC_DR_WDU_Pos) | (1U << RTC_DR_MU_Pos) | 1U;
+                RTC->CR &= ~RTC_CR_BKP;
+            }
         }
-        /* 写入占位日期，使日历寄存器组合法 */
-        status = HAL_RTC_SetDate(&watch_rtc, &date, RTC_FORMAT_BIN);
-        /* 写日期失败同样返回错误 */
-        if (status != HAL_OK)
-        {
-            return status;
-        }
-        /* 记录“已初始化”标记，下次复位不再覆盖日期和时间 */
+        RTC->ISR &= ~RTC_ISR_INIT;
+    }
+    if (failed == 0)
+    {
+        RTC->ISR = RTC_RSF_MASK & RTC_ISR_RESERVED_MASK;
+        failed = watch_rtc_wait_flag(RTC_ISR_RSF);
+    }
+    __HAL_RTC_WRITEPROTECTION_ENABLE(&watch_rtc);
+    if (failed != 0)
+    {
+        watch_rtc.State = HAL_RTC_STATE_ERROR;
+        return HAL_TIMEOUT;
+    }
+    if (fresh != 0)
+    {
         HAL_RTCEx_BKUPWrite(&watch_rtc, RTC_BKP_DR0, WATCH_RTC_INITIALIZED);
     }
-    /* 标记配置完成，允许上层校时 */
+    watch_rtc.State = HAL_RTC_STATE_READY;
     rtc_configured = 1;
-    /* 标记 RTC 就绪，允许读取时间和亚秒计数 */
     rtc_ready = 1;
-    /* 返回 HAL_OK 表示 RTC 初始化成功 */
     return HAL_OK;
+}
+
+/* ES0287：SSR/TR/DR可能未被正确锁存，重读SSR验证并再读DR释放锁存。 */
+static HAL_StatusTypeDef watch_rtc_read_calendar(RTC_TimeTypeDef *time, RTC_DateTypeDef *date)
+{
+    for (uint8_t attempt = 0; attempt < 3; ++attempt)
+    {
+        HAL_StatusTypeDef status = HAL_RTC_GetTime(&watch_rtc, time, RTC_FORMAT_BIN);
+        if (status != HAL_OK)
+        {
+            return status;
+        }
+        status = HAL_RTC_GetDate(&watch_rtc, date, RTC_FORMAT_BIN);
+        if (status != HAL_OK)
+        {
+            return status;
+        }
+        uint32_t second_ssr = RTC->SSR;
+        (void)RTC->DR;
+        if (time->SubSeconds == second_ssr && __HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) != 0)
+        {
+            return HAL_OK;
+        }
+    }
+    return HAL_ERROR;
 }
 
 uint8_t watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t seconds)
@@ -309,24 +266,10 @@ HAL_StatusTypeDef watch_rtc_get_time(watch_time_struct *time)
     {
         return HAL_ERROR;
     }
-    /* 读当前时间；Format=BIN 时 HAL 把 TR 中的 BCD 字段转成二进制填入 rtc_time */
-    status = HAL_RTC_GetTime(&watch_rtc, &rtc_time, RTC_FORMAT_BIN);
-    /* 读时间失败直接返回 HAL 状态 */
+    status = watch_rtc_read_calendar(&rtc_time, &date);
     if (status != HAL_OK)
     {
         return status;
-    }
-    /* 读取日期才能释放RTC影子寄存器锁存，否则时间可能停在上一份快照。 */
-    status = HAL_RTC_GetDate(&watch_rtc, &date, RTC_FORMAT_BIN);
-    /* 读日期失败同样返回，避免把未同步的数据交给上层 */
-    if (status != HAL_OK)
-    {
-        return status;
-    }
-    /* 两次读取之间 LSE 若停振，读到的值不可信，返回错误 */
-    if (__HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) == 0)
-    {
-        return HAL_ERROR;
     }
     /* 把 HAL 转好的小时值（二进制，0~23）复制到调用方结构体 */
     time->hours = rtc_time.Hours;
@@ -342,6 +285,44 @@ uint8_t watch_rtc_is_synced(void)
 {
     /* RTC 就绪且备份标记为“已校时”才返回 1，否则返回 0 */
     return rtc_ready && HAL_RTCEx_BKUPRead(&watch_rtc, RTC_BKP_DR0) == WATCH_RTC_SYNCED;
+}
+
+uint8_t watch_rtc_get_day_key(uint16_t *day_key)
+{
+    static const uint16_t month_days[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365};
+    RTC_TimeTypeDef time = {0};
+    RTC_DateTypeDef date = {0};
+    uint16_t days, month_length;
+    uint8_t leap;
+    if (day_key == NULL || watch_rtc_is_synced() == 0 || __HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) == 0)
+    {
+        return 1;
+    }
+    if (watch_rtc_read_calendar(&time, &date) != HAL_OK)
+    {
+        return 1;
+    }
+    if (date.Year > 99 || date.Month < 1 || date.Month > 12 || time.Hours > 23 || time.Minutes > 59 || time.Seconds > 59)
+    {
+        return 1;
+    }
+    leap = date.Year % 4 == 0; /* RTC覆盖2000..2099，2000年为闰年。 */
+    month_length = month_days[date.Month] - month_days[date.Month - 1];
+    if (date.Month == 2)
+    {
+        month_length += leap;
+    }
+    if (date.Date < 1 || date.Date > month_length)
+    {
+        return 1;
+    }
+    days = date.Year * 365 + (date.Year + 3) / 4 + month_days[date.Month - 1] + date.Date;
+    if (date.Month > 2)
+    {
+        days += leap;
+    }
+    *day_key = days;
+    return 0;
 }
 
 void watch_rtc_get_status(watch_rtc_status_struct *status)
@@ -364,9 +345,7 @@ void watch_rtc_get_status(watch_rtc_status_struct *status)
     status->read_status = watch_rtc_get_time(&status->time);
 }
 
-/* 一次HAL时间/日期快照合成一分钟内的递增32768Hz计数：秒×32768 + 本秒已过亚秒。
- * 单次HAL_RTC_GetTime/GetDate在同一影子锁存内取秒与亚秒，避免两次独立读取跨秒后拼出不存在的相位。
- * 未就绪、LSE停振或读取失败返回UINT32_MAX。 */
+/* 由一致的日历快照合成一分钟内的递增32768Hz计数。 */
 static uint32_t watch_rtc_read_counter(void)
 {
     /* time 接收 HAL 读出的时间与亚秒计数 */
@@ -380,13 +359,7 @@ static uint32_t watch_rtc_read_counter(void)
     {
         return UINT32_MAX;
     }
-    /* 读取时间寄存器；失败时同样返回 UINT32_MAX 表示无效 */
-    if (HAL_RTC_GetTime(&watch_rtc, &time, RTC_FORMAT_BIN) != HAL_OK)
-    {
-        return UINT32_MAX;
-    }
-    /* 与表盘读取一样，必须读DR释放影子寄存器锁存；此处不等待硬件或调用HAL_Delay。 */
-    if (HAL_RTC_GetDate(&watch_rtc, &date, RTC_FORMAT_BIN) != HAL_OK || time.SubSeconds >= WATCH_RTC_SUBSECOND_HZ)
+    if (watch_rtc_read_calendar(&time, &date) != HAL_OK || time.SubSeconds >= WATCH_RTC_SUBSECOND_HZ)
     {
         return UINT32_MAX;
     }

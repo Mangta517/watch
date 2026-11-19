@@ -1,8 +1,10 @@
 """Add the OTA page to the user's existing APK, preserving the original file."""
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import zipfile
 
 
@@ -198,18 +200,34 @@ def main():
     parser.add_argument("--jdk", type=Path, required=True)
     parser.add_argument("--android-tools", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--keystore", type=Path, help="Existing signing keystore; defaults to ota-signing.p12 in work-dir")
+    parser.add_argument("--key-alias", default="ota")
     args = parser.parse_args()
+    if not os.environ.get("F411_OTA_KEYSTORE_PASSWORD"):
+        parser.error("Set F411_OTA_KEYSTORE_PASSWORD for the signing key")
+    if args.output.resolve() == args.base_apk.resolve():
+        parser.error("Output must not overwrite the original APK")
+    work_root = args.work_dir.resolve()
+    work_root.mkdir(parents=True, exist_ok=True)
+    keystore = work_root / "ota-signing.p12"
+    if args.keystore is not None:
+        keystore = args.keystore.resolve()
+        if not keystore.is_file():
+            parser.error("The specified signing keystore does not exist")
+    # Windows的解包路径包含长smali文件名，在短临时根下构建。
+    with tempfile.TemporaryDirectory(prefix="ota-") as work:
+        build(args, Path(work), keystore)
+
+
+def build(args, work, keystore):
     source = Path(__file__).resolve().parent / "src"
-    work = args.work_dir.resolve()
-    work.mkdir(parents=True, exist_ok=True)
     java = args.jdk.resolve() / "bin/java.exe"
     javac = args.jdk.resolve() / "bin/javac.exe"
     keytool = args.jdk.resolve() / "bin/keytool.exe"
     sdk = args.android_tools.resolve() / "android-15"
     android = args.android_tools.resolve() / "android-35/android.jar"
     decoded = work / "decoded"
-    if not decoded.exists():
-        run([java, "-jar", args.apktool.resolve(), "d", args.base_apk.resolve(), "-o", decoded], work)
+    run([java, "-jar", args.apktool.resolve(), "d", args.base_apk.resolve(), "-o", decoded], work)
 
     # 原签名密钥不在所给目录内；使用独立包名，旧App及其数据可继续保留。
     manifest_path = decoded / "AndroidManifest.xml"
@@ -237,8 +255,8 @@ def main():
     manifest_path.write_text(manifest, encoding="utf-8")
     yaml_path = decoded / "apktool.yml"
     yaml = yaml_path.read_text(encoding="utf-8")
-    yaml = re.sub(r"(?m)^  versionCode:.*$", "  versionCode: 25", yaml)
-    yaml = re.sub(r"(?m)^  versionName:.*$", "  versionName: 1.95-wave.20-baro-sync", yaml)
+    yaml = re.sub(r"(?m)^  versionCode:.*$", "  versionCode: 26", yaml)
+    yaml = re.sub(r"(?m)^  versionName:.*$", "  versionName: 1.95-wave.21-ota-fixes", yaml)
     yaml_path.write_text(yaml, encoding="utf-8")
     patch_ble_mode(decoded)
     patch_weather_pressure(decoded)
@@ -273,17 +291,14 @@ def main():
     replace_ota_dex(unsigned, dex / "classes.dex")
     aligned = work / "aligned.apk"
     run([sdk / "zipalign.exe", "-f", "-p", "4", unsigned, aligned], work)
-    keystore = work / "ota-signing.p12"
     if not keystore.exists():
-        run([keytool, "-genkeypair", "-keystore", keystore, "-storetype", "PKCS12", "-alias", "ota",
-             "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000", "-storepass", "android",
-             "-keypass", "android", "-dname", "CN=F411 Watch OTA,O=Mangta,C=CN"], work)
+        run([keytool, "-genkeypair", "-keystore", keystore, "-storetype", "PKCS12", "-alias", args.key_alias,
+             "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000", "-storepass:env", "F411_OTA_KEYSTORE_PASSWORD",
+             "-keypass:env", "F411_OTA_KEYSTORE_PASSWORD", "-dname", "CN=F411 Watch OTA,O=Mangta,C=CN"], work)
     output = args.output.resolve()
-    if output == args.base_apk.resolve():
-        raise ValueError("Output must not overwrite the original APK")
     output.parent.mkdir(parents=True, exist_ok=True)
-    run([java, "-jar", sdk / "lib/apksigner.jar", "sign", "--ks", keystore, "--ks-key-alias", "ota",
-         "--ks-pass", "pass:android", "--out", output, aligned], work)
+    run([java, "-jar", sdk / "lib/apksigner.jar", "sign", "--ks", keystore, "--ks-key-alias", args.key_alias,
+         "--ks-pass", "env:F411_OTA_KEYSTORE_PASSWORD", "--out", output, aligned], work)
     run([java, "-jar", sdk / "lib/apksigner.jar", "verify", "--verbose", output], work)
     run([sdk / "zipalign.exe", "-c", "-p", "4", output], work)
     print("APK:", output)

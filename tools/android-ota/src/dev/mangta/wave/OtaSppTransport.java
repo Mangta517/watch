@@ -7,7 +7,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.SocketTimeoutException;
+import java.util.ArrayDeque;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 独立SPP通道：用系统给定的手表BluetoothDevice建立安全RFCOMM连接。
@@ -19,15 +21,16 @@ public final class OtaSppTransport implements OtaUpgrade.Connection
     private static final UUID SPP = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb");
 
     private static final int MAX_LINE = 256;
+    private static final int MAX_QUEUED_LINES = 32;
     private static final int WAIT_SLICE_MS = 10;
     private static final int WRITE_TIMEOUT_MS = 10000;
 
     private final Object lock = new Object();
     private final BluetoothDevice device;
-    private final StringBuilder partial = new StringBuilder();
+    private final ArrayDeque<String> lines = new ArrayDeque<>();
+    private IOException readFailure;
 
     private BluetoothSocket socket;
-    private InputStream input;
     private OutputStream output;
     private Thread watchdog;
     private long watchdogDeadline;
@@ -40,6 +43,14 @@ public final class OtaSppTransport implements OtaUpgrade.Connection
     public OtaSppTransport(BluetoothDevice device)
     {
         this.device = device;
+    }
+
+    boolean isConnecting()
+    {
+        synchronized (lock)
+        {
+            return socket != null && !opened && !closed;
+        }
     }
 
     /** 在timeoutMs内完成RFCOMM连接；看门狗在截止点关闭本次socket以解除connect阻塞。 */
@@ -166,9 +177,11 @@ public final class OtaSppTransport implements OtaUpgrade.Connection
                     closeQuietly(created);
                     throw new IOException("SPP连接已取消");
                 }
-                input = activeInput;
                 output = activeOutput;
                 opened = true;
+                Thread reader = new Thread(() -> readReplies(activeInput), "ota-spp-reader");
+                reader.setDaemon(true);
+                reader.start();
             }
         }
         catch (RuntimeException unexpected)
@@ -233,81 +246,97 @@ public final class OtaSppTransport implements OtaUpgrade.Connection
         }
     }
 
-    /** 每次调用返回一行；跨调用保留未完成文本，单行上限256字节，读超时抛SocketTimeoutException。 */
+    /** 在截止时间内取出下一行；远端断开时先交付已收齐的回执。 */
     public String readLine(int timeoutMs) throws IOException
     {
         long deadline = System.nanoTime() + timeoutMs * 1000000L;
-        while (true)
+        IOException failure;
+        synchronized (lock)
         {
-            InputStream active;
-            synchronized (lock)
+            while (true)
             {
                 checkReadyLocked();
-                active = input;
-            }
-            int available = 0;
-            try
-            {
-                available = active.available();
-            }
-            catch (IOException failure)
-            {
-                fail(failure.getMessage());
-                throw failure;
-            }
-            if (available > 0)
-            {
-                int value;
-                try
+                if (!lines.isEmpty())
                 {
-                    value = active.read();
-                }
-                catch (IOException failure)
-                {
-                    fail(failure.getMessage());
-                    throw failure;
-                }
-                if (value == -1)
-                {
-                    fail("设备连接已断开");
-                    throw new IOException("设备连接已断开");
-                }
-                char item = (char)(value & 255);
-                if (item == '\n')
-                {
-                    String line;
-                    synchronized (lock)
-                    {
-                        line = partial.toString();
-                        partial.setLength(0);
-                    }
+                    String line = lines.removeFirst();
+                    lock.notifyAll();
                     return line;
                 }
-                synchronized (lock)
+                if (readFailure != null)
                 {
-                    if (partial.length() >= MAX_LINE)
+                    failure = readFailure;
+                    break;
+                }
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0)
+                {
+                    throw new SocketTimeoutException("等待设备回执超时");
+                }
+                try
+                {
+                    TimeUnit.NANOSECONDS.timedWait(lock, remaining);
+                }
+                catch (InterruptedException interrupted)
+                {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("等待设备回执被中断", interrupted);
+                }
+            }
+        }
+        fail(failure.getMessage());
+        throw failure;
+    }
+
+    /** 阻塞读取能立即发现EOF；最多缓存32行及当前未完成的一行。 */
+    private void readReplies(InputStream stream)
+    {
+        StringBuilder line = new StringBuilder();
+        try
+        {
+            while (true)
+            {
+                int value = stream.read();
+                if (value < 0)
+                {
+                    throw new IOException("设备连接已断开");
+                }
+                if (value == '\n')
+                {
+                    synchronized (lock)
                     {
-                        fail("设备回执单行超过256字节");
+                        while (!closed && lines.size() == MAX_QUEUED_LINES)
+                        {
+                            lock.wait();
+                        }
+                        if (closed)
+                        {
+                            return;
+                        }
+                        lines.addLast(line.toString());
+                        lock.notifyAll();
+                    }
+                    line.setLength(0);
+                }
+                else
+                {
+                    if (line.length() >= MAX_LINE)
+                    {
                         throw new IOException("设备回执单行超过256字节");
                     }
-                    partial.append(item);
+                    line.append((char)(value & 255));
                 }
-                continue;
             }
-            long remaining = (deadline - System.nanoTime()) / 1000000L;
-            if (remaining <= 0)
+        }
+        catch (InterruptedException interrupted)
+        {
+            Thread.currentThread().interrupt();
+        }
+        catch (IOException failure)
+        {
+            synchronized (lock)
             {
-                throw new SocketTimeoutException("等待设备回执超时");
-            }
-            int slice = (int)Math.min(WAIT_SLICE_MS, remaining);
-            try
-            {
-                Thread.sleep(slice);
-            }
-            catch (InterruptedException interrupted)
-            {
-                Thread.currentThread().interrupt();
-                throw new IOException("等待设备回执被中断", interrupted);
+                readFailure = failure;
+                lock.notifyAll();
             }
         }
     }
@@ -357,7 +386,6 @@ public final class OtaSppTransport implements OtaUpgrade.Connection
                 closed = true;
                 opened = false;
                 active = socket;
-                input = null;
                 output = null;
                 socket = null;
                 lock.notifyAll();
@@ -544,7 +572,6 @@ public final class OtaSppTransport implements OtaUpgrade.Connection
             opened = false;
             active = socket;
             socket = null;
-            input = null;
             output = null;
             watchdogDeadline = 0;
             watchdog = null;
@@ -570,7 +597,6 @@ public final class OtaSppTransport implements OtaUpgrade.Connection
             opened = false;
             active = socket;
             socket = null;
-            input = null;
             output = null;
             watchdogDeadline = 0;
             lock.notifyAll();

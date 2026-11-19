@@ -7,8 +7,8 @@
  *   MY_I2C_BUS_SENSOR : SCL = PB14 (SENSOR_SCL)  SDA = PB13 (SENSOR_SDA)  → MPU6050 等传感器
  *   MY_I2C_BUS_TP     : SCL = PB6  (TP_SCL)      SDA = PB4  (TP_SDA)      → 触摸屏
  *   MY_I2C_BUS_EEPROM : SCL = PA12 (EEPROM_SCL) SDA = PA11 (EEPROM_SDA) → BL24C02F
- * 模式：SENSOR/EEPROM 的 SCL/SDA 开漏输出，需外部上拉到 3.3V。
- *       TP 保留原推挽发送方式；读 ACK/数据、发送 NACK 时 SDA 切换为输入释放。
+ * 模式：三条总线的SCL/SDA均为开漏输出，需外部上拉到3.3V。
+ *       TP的4.7k上拉见Core原理图R4；读ACK/数据、发送NACK时SDA切为输入释放。
  *       SENSOR 外部上拉参考 2～4.7kΩ；内部上拉不能替代外部上拉。
  * 节拍：SENSOR 位延时为原值两倍，TP/EEPROM 保持原值；实际频率需实测。
  * 并发：SDA 方向切换走 GPIOB 非原子 RMW, 已在内部用 PRIMASK 临界区保护,
@@ -48,7 +48,7 @@ extern "C"
     /* 释放SDA，最多9个时钟+STOP；每次等待SCL拉高均有界。TP调用前后失效方向缓存。 */
     uint8_t my_i2c_recover(my_i2c_bus_t bus);
     void my_i2c_start(my_i2c_bus_t bus);                     /* 起始信号：SCL 高期间 SDA 下降沿 */
-    void my_i2c_stop(my_i2c_bus_t bus);                      /* 停止信号：SCL 高期间 SDA 上升沿 */
+    uint8_t my_i2c_stop(my_i2c_bus_t bus);                  /* 0正常结束，1本次事务出现SCL超时。 */
     uint8_t my_i2c_wait_ack(my_i2c_bus_t bus);               /* 等 slave ACK：0=ACK, 1=NACK；返回时 SDA 保持输入释放 */
     void my_i2c_send_ack(my_i2c_bus_t bus, uint8_t ack);     /* 主机发应答：0=拉低ACK, 1=释放SDA发送NACK */
     void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat);   /* MSB first */

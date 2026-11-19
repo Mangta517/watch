@@ -12,6 +12,8 @@
 #include <setjmp.h>
 #include <windows.h>
 
+Host_PVD_TypeDef host_pvd;
+
 uint32_t test_dma_remaining;
 uint32_t test_dma_tc;
 static uint8_t *test_dma_data;
@@ -210,7 +212,7 @@ static void make_image(uint8_t *image, uint32_t size)
 {
     uint32_t i;
     uint32_t stack = 0x20020000;
-    uint32_t reset = APP_START_ADDR + 9;
+    uint32_t reset = APP_START_ADDR + BOOT_VECTOR_BYTES + 1;
     for (i = 0; i < size; ++i)
     {
         image[i] = (uint8_t)(i * 37 + 11);
@@ -229,6 +231,12 @@ static void erase_tests(void)
     assert(int_bootloader_erase(7) == 1);
     assert(int_bootloader_erase(APP_MAX_SIZE + 1) == 1);
     assert(int_bootloader_erase(UINT32_MAX) == 1);
+    host_pvd.CSR = PWR_CSR_PVDO;
+    boundary = flash_erases;
+    length = eeprom_writes;
+    assert(int_bootloader_erase(410) == 1 && flash_erases == boundary && eeprom_writes == length);
+    assert(*(const uint8_t *)(uintptr_t)APP_START_ADDR == 0x5A && flash_locked);
+    host_pvd.CSR = 0;
     for (i = 5; i <= 7; ++i)
     {
         boundary = sector_addresses[i];
@@ -246,7 +254,7 @@ static void erase_tests(void)
         assert(*(uint8_t *)(uintptr_t)(FLASH_BASE + i) == 0x5A);
     }
     erase_fail = 1;
-    assert(int_bootloader_erase(100) == 1 && flash_locked);
+    assert(int_bootloader_erase(410) == 1 && flash_locked);
     erase_fail = 0;
     puts("PASS: 64/128 KiB APP erase boundaries, exact end, maximum image, selector and independent recovery protection");
 }
@@ -258,9 +266,9 @@ static void selection_tests(void)
     volatile uint32_t *app = (volatile uint32_t *)(uintptr_t)APP_START_ADDR;
 
     recovery[0] = 0x20020000;
-    recovery[1] = RECOVERY_START_ADDR + 9;
+    recovery[1] = RECOVERY_START_ADDR + BOOT_VECTOR_BYTES + 1;
     app[0] = 0x20020000;
-    app[1] = APP_START_ADDR + 9;
+    app[1] = APP_START_ADDR + BOOT_VECTOR_BYTES + 1;
     /* 空白FF：首装SWD已下APP，向量有效即允许启动。 */
     memset(flag, 0xFF, 4);
     assert(app_boot_select_target(0) == APP_START_ADDR);
@@ -288,16 +296,16 @@ static void selection_tests(void)
     eeprom_read_fail = 1;
     assert(app_boot_select_target(0) == RECOVERY_START_ADDR);
     eeprom_read_fail = 0;
-    app[1] = RECOVERY_START_ADDR + 9; /* 拒绝旧0x08008000镜像的启动向量。 */
+    app[1] = RECOVERY_START_ADDR + BOOT_VECTOR_BYTES + 1; /* 拒绝旧0x08008000镜像的启动向量。 */
     assert(app_boot_select_target(0) == RECOVERY_START_ADDR);
-    recovery[1] = APP_START_ADDR + 9;
+    recovery[1] = APP_START_ADDR + BOOT_VECTOR_BYTES + 1;
     assert(app_boot_select_target(0) == 0);
-    app[1] = APP_START_ADDR + 9;
+    app[1] = APP_START_ADDR + BOOT_VECTOR_BYTES + 1;
     /* APP向量合法且标志空白：仍跳APP，即便保底此刻损坏。 */
     memset(flag, 0xFF, 4);
     assert(app_boot_select_target(0) == APP_START_ADDR);
     assert(app_boot_select_target(1) == 0); /* 按键强制但保底损坏：停留返回0。 */
-    recovery[1] = RECOVERY_START_ADDR + 9;
+    recovery[1] = RECOVERY_START_ADDR + BOOT_VECTOR_BYTES + 1;
     recovery[0] = 0x20020001;
     assert(app_boot_select_target(1) == 0);
     memset(eeprom, 0x3C, sizeof(eeprom));
@@ -339,7 +347,7 @@ static void transfer_test(uint32_t length, uint32_t chunk, uint32_t crc)
 
 static void eeprom_flag_tests(void)
 {
-    uint8_t image[101];
+    uint8_t image[411];
     uint8_t *flag = eeprom + BOOTLOADER_EEPROM_FLAG_ADDR;
     const uint8_t valid[4] = {0x42, 0x4C, 0xA5, 0x5A};
     uint32_t before = eeprom_writes;
@@ -406,7 +414,7 @@ static void eeprom_flag_tests(void)
     {
         assert(int_bootloader_erase(sizeof(image)) == 0);
         assert(bootloader_start_dma(sizeof(image)) == 0);
-        int_bootloader_expect_crc(TEST_CRC_101);
+        int_bootloader_expect_crc(TEST_CRC_411);
         dma_feed(image, sizeof(image), 0);
         drain();
         if (i == 0)
@@ -426,7 +434,7 @@ static void eeprom_flag_tests(void)
         assert(memcmp((void *)(uintptr_t)APP_START_ADDR, image, sizeof(image)) == 0);
         assert(!int_bootloader_app_is_valid() && eeprom_active == 0);
     }
-    transfer_test(sizeof(image), 51, TEST_CRC_101);
+    transfer_test(sizeof(image), 51, TEST_CRC_411);
     assert(memcmp(flag, valid, 4) == 0 && int_bootloader_app_is_valid());
     puts("PASS: EEPROM boot flags, blank/corrupt/read failure, bounded timeout/wrap, erase ordering, torn writes, final commit failure and retry");
 }
@@ -442,21 +450,21 @@ static void receive_error_tests(void)
     before = program_count;
     assert(int_bootloader_process() == 1 && uart1_rx_overflow_count != 0 && program_count == before);
 
-    assert(bootloader_start_dma(100) == 0);
-    dma_feed(image, 101, 0);
+    assert(bootloader_start_dma(410) == 0);
+    dma_feed(image, 411, 0);
     assert(int_bootloader_process() == 1);
-    assert(bootloader_start_dma(100) == 0);
-    dma_feed(image, 99, 0);
+    assert(bootloader_start_dma(410) == 0);
+    dma_feed(image, 409, 0);
     drain();
     assert(int_bootloader_finish() == 1 && !int_bootloader_app_is_valid());
 
-    assert(int_bootloader_erase(100) == 0);
-    assert(bootloader_start_dma(100) == 0);
+    assert(int_bootloader_erase(410) == 0);
+    assert(bootloader_start_dma(410) == 0);
     HAL_UART_ErrorCallback(&huart1);
     assert(uart1_rx_error_count == 1 && int_bootloader_process() == 1 && !rx_armed);
 
-    assert(bootloader_start_dma(100) == 0);
-    dma_feed(image, 100, 0);
+    assert(bootloader_start_dma(410) == 0);
+    dma_feed(image, 410, 0);
     tick += 20;
     assert(int_bootloader_process() == 0);
     program_fail = 1;
@@ -464,9 +472,22 @@ static void receive_error_tests(void)
     assert(int_bootloader_process() == 1);
     program_fail = 0;
 
-    assert(int_bootloader_erase(100) == 0);
-    assert(bootloader_start_dma(100) == 0);
-    dma_feed(image, 100, 0);
+    assert(int_bootloader_erase(410) == 0);
+    assert(bootloader_start_dma(410) == 0);
+    dma_feed(image, 410, 0);
+    tick += 20;
+    assert(int_bootloader_process() == 0);
+    before = program_count;
+    host_pvd.CSR = PWR_CSR_PVDO;
+    tick += 20;
+    assert(int_bootloader_process() == 1 && program_count == before && flash_locked);
+    assert(!int_bootloader_app_is_valid());
+    host_pvd.CSR = 0;
+    puts("PASS: PVD rejects APP erase before changing the boot flag and rejects programming without committing vectors.");
+
+    assert(int_bootloader_erase(410) == 0);
+    assert(bootloader_start_dma(410) == 0);
+    dma_feed(image, 410, 0);
     tick += 20;
     assert(int_bootloader_process() == 0);
     corrupt_write = 1;
@@ -487,7 +508,7 @@ static void receive_error_tests(void)
 
     for (dma_fail = HAL_ERROR; dma_fail <= HAL_TIMEOUT; ++dma_fail)
     {
-        assert(bootloader_start_dma(100) == 1 && !int_bootloader_rx_dma_active());
+        assert(bootloader_start_dma(410) == 1 && !int_bootloader_rx_dma_active());
         {
             uint32_t errors_before = uart1_rx_error_count;
             HAL_UART_ErrorCallback(&huart1);
@@ -509,7 +530,7 @@ static void command_feed(const char *text)
 
 static void state_machine_tests(void)
 {
-    uint8_t image[101];
+    uint8_t image[411];
     uint32_t i;
     uint32_t erase_before_info;
     int_bootloader_stop();
@@ -518,22 +539,31 @@ static void state_machine_tests(void)
     assert(kt6368a_init() == HAL_OK);
     fixed_tick = 1;
     connected = 1;
+    tick = UINT32_MAX - 50;
     app_bootloader_init();
+    tick += 179999;
+    assert(!app_bootloader_idle_expired());
+    ++tick;
+    assert(app_bootloader_idle_expired());
     erase_before_info = flash_erases;
     command_feed("OTA,INFO\n");
     assert(boot_state == BOOTLOADER_STATE_INIT && flash_erases == erase_before_info);
     assert(strstr(last_uart_message, "OTA,LAYOUT,08010000,00050000") != NULL);
+    assert(!app_bootloader_idle_expired());
     command_feed("start:999999999999999999999\n");
     assert(boot_state == BOOTLOADER_STATE_INIT && rx_armed);
     command_feed("start:-1\n");
     assert(boot_state == BOOTLOADER_STATE_INIT);
+    command_feed("start:411\n");
+    assert(boot_state == BOOTLOADER_STATE_INIT && flash_erases == erase_before_info);
+    assert(strstr(last_uart_message, "Invalid") != NULL);
     command_feed("sta");
-    command_feed("rt:101");
+    command_feed("rt:411:9cff60a7");
     /* 分片间隔在命令静默阈值之内：半条命令不能被提前结算，更不能提前擦除。 */
     tick += BOOTLOADER_COMMAND_IDLE_MS - 1;
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_INIT && flash_erases == erase_before_info);
-    /* 满 BOOTLOADER_COMMAND_IDLE_MS 后按完整一行解析，保留旧主机不带换行的兼容路径。 */
+    /* 满 BOOTLOADER_COMMAND_IDLE_MS 后按完整一行解析，保留带CRC但不带换行的调试路径。 */
     ++tick;
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_RUN);
@@ -546,7 +576,7 @@ static void state_machine_tests(void)
     tick += 20;
     app_bootloader_work();
     assert(uart1_rx_idle);
-    dma_feed(image + 51, 50, 0);
+    dma_feed(image + 51, sizeof(image) - 51, 0);
     app_bootloader_work();
     assert(!uart1_rx_idle);
     tick += 20;
@@ -581,9 +611,9 @@ static void state_machine_tests(void)
     fixed_tick = 1;
     connected = 1;
     app_bootloader_init();
-    command_feed("start:101\n");
+    command_feed("start:411:9cff60a7\n");
     app_bootloader_work();
-    dma_feed(image, 100, 0);
+    dma_feed(image, 410, 0);
     app_bootloader_work();
     tick += 20;
     app_bootloader_work();
@@ -600,12 +630,12 @@ static void state_machine_tests(void)
     }
     reset_expected = 0;
     assert(!int_bootloader_app_is_valid());
-    puts("PASS: legacy command, malformed length, erase-before-DMA, length completion, tick wrap, BLE reply window and partial transfer timeout");
+    puts("PASS: CRC-required command, malformed length, erase-before-DMA, length completion, tick wrap, BLE reply window and partial transfer timeout");
 }
 
 static void crc_error_tests(void)
 {
-    uint8_t image[101];
+    uint8_t image[411];
     unsigned i;
     const unsigned positions[] = {4, 50, 100};
     for (i = 0; i < sizeof(positions) / sizeof(positions[0]); ++i)
@@ -614,7 +644,7 @@ static void crc_error_tests(void)
         image[positions[i]] ^= 0x10;
         assert(int_bootloader_erase(sizeof(image)) == 0);
         assert(bootloader_start_dma(sizeof(image)) == 0);
-        int_bootloader_expect_crc(TEST_CRC_101);
+        int_bootloader_expect_crc(TEST_CRC_411);
         dma_feed(image, sizeof(image), 0);
         drain();
         assert(int_bootloader_finish() == 1);
@@ -647,13 +677,13 @@ static void start_command(const char *text)
 
 static void crc_command_tests(void)
 {
-    uint8_t image[101];
+    uint8_t image[411];
     char text[64];
     unsigned i;
     const char *invalid[] =
         {
-            "start:101:\n", "start:101:1234567\n", "start:101:123456789\n",
-            "start:101:1234567g\n", "start::12345678\n", "start:101:12345678:x\n"};
+            "start:411:\n", "start:411:1234567\n", "start:411:123456789\n",
+            "start:411:1234567g\n", "start::12345678\n", "start:411:12345678:x\n"};
     int_bootloader_stop();
     connected = 0;
     fixed_tick = 0;
@@ -670,11 +700,11 @@ static void crc_command_tests(void)
     {
         if (i == 0)
         {
-            snprintf(text, sizeof(text), "start:101:%08lx\n", (unsigned long)TEST_CRC_101);
+            snprintf(text, sizeof(text), "start:411:%08lx\n", (unsigned long)TEST_CRC_411);
         }
         else
         {
-            snprintf(text, sizeof(text), "start:101:%08lX\n", (unsigned long)TEST_CRC_101);
+            snprintf(text, sizeof(text), "start:411:%08lX\n", (unsigned long)TEST_CRC_411);
         }
         start_command(text);
         make_image(image, sizeof(image));
@@ -692,7 +722,7 @@ static void crc_command_tests(void)
         assert(boot_state == BOOTLOADER_STATE_JUMP_TO_APP && int_bootloader_app_is_valid());
     }
     /* 全零CRC是有效字段，不能被误判成关闭CRC。 */
-    start_command("start:101:00000000\n");
+    start_command("start:411:00000000\n");
     make_image(image, sizeof(image));
     dma_feed(image, sizeof(image), 0);
     drain();
@@ -703,14 +733,14 @@ static void crc_command_tests(void)
 /* 默认MTU 23下手机单次BLE写入的有效载荷为20字节，本例22字节的CRC start命令拆成20+2到达，
  * 本用例在片间模拟50ms间隔：命令在LF之前必须保持INIT且不擦除，
  * 无换行兜底只能按 BOOTLOADER_COMMAND_IDLE_MS(1000ms) 结算，不能被数据的10ms空闲阈值截断。
- * 文本按'start:000101:...'补齐到22字节，长度与前20字节的分片位置均由断言固定。 */
+ * 文本按'start:000411:...'补齐到22字节，长度与前20字节的分片位置均由断言固定。 */
 static void fragmented_command_tests(void)
 {
     char text[32];
     uint32_t erase_before;
     uint32_t i;
 
-    snprintf(text, sizeof(text), "start:000101:%08lx\n", (unsigned long)TEST_CRC_101);
+    snprintf(text, sizeof(text), "start:000411:%08lx\n", (unsigned long)TEST_CRC_411);
     assert(strlen(text) == 22);
     command_start_fresh();
     erase_before = flash_erases;
@@ -740,9 +770,9 @@ static void fragmented_command_tests(void)
 
 static void timeout_and_pause_tests(void)
 {
-    uint8_t image[101];
+    uint8_t image[411];
     make_image(image, sizeof(image));
-    start_command("start:101\n");
+    start_command("start:411:9cff60a7\n");
     /* 没有收到首字节时同样计时，且跨tick回绕仍能复位。 */
     tick = UINT32_MAX - 1000;
     assert(bootloader_start_dma(sizeof(image)) == 0);
@@ -759,14 +789,14 @@ static void timeout_and_pause_tests(void)
     reset_expected = 0;
     assert(!int_bootloader_app_is_valid());
 
-    start_command("start:101\n");
+    start_command("start:411:9cff60a7\n");
     dma_feed(image, 51, 0);
     app_bootloader_work();
     tick += 2500;
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_REC_DATA && uart1_rx_idle);
     tick += BOOTLOADER_TRANSFER_TIMEOUT_MS - 2501;
-    dma_feed(image + 51, 50, 0);
+    dma_feed(image + 51, sizeof(image) - 51, 0);
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_REC_DATA && !uart1_rx_idle);
     tick += BOOTLOADER_RX_IDLE_MS;
@@ -776,7 +806,7 @@ static void timeout_and_pause_tests(void)
     app_bootloader_work();
     assert(boot_state == BOOTLOADER_STATE_JUMP_TO_APP && int_bootloader_app_is_valid());
 
-    start_command("start:101\n");
+    start_command("start:411:9cff60a7\n");
     dma_feed(image, sizeof(image), 0);
     drain();
     tick += BOOTLOADER_COMPLETE_IDLE_MS - 1;
@@ -805,13 +835,13 @@ int main(void)
     memset(eeprom, 0x3C, sizeof(eeprom));
     selection_tests();
     erase_tests();
-    transfer_test(101, 1, TEST_CRC_101);
+    transfer_test(411, 1, TEST_CRC_411);
     transfer_test(512, 127, TEST_CRC_512);
     transfer_test(10001, 4096, TEST_CRC_10001);
     transfer_test(APP_MAX_SIZE, 4001, TEST_CRC_327680);
     /* 默认20字节写入与主机模拟的244字节大块：分片粒度不得影响字节一致性、CRC和向量提交。
      * 真实Android BLE传输固定按20字节写入，244字节仅为主机侧加大分片以覆盖更大块长。 */
-    transfer_test(101, 20, TEST_CRC_101);
+    transfer_test(411, 20, TEST_CRC_411);
     transfer_test(512, 244, TEST_CRC_512);
     for (uint32_t address = FLASH_BASE; address < APP_START_ADDR; ++address)
     {

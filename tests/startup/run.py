@@ -43,9 +43,12 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
         "tests/startup/startup_harness.c", "application/app_uptime.c", "application/app_weather.c",
         "application/app_weather_store.c", "tests/diagnostics/diag_stub.c", "-o", exe,
     ], cwd=root, check=True)
-    for mode in ["ok", "devices_failed", "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
+    for mode in ["mpu_cooldown", "mpu_cooldown_wrap", "mpu_cooldown_window", "mpu_cooldown_window_wrap",
+                 "late_lse", "activity_cadence", "activity_cadence_wrap", "sample_retry", "sample_retry_sleep",
+                 "sample_retry_success", "sample_retry_success_sleep", "sample_retry_wrap", "ok", "devices_failed",
+                 "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
                  "cal_success", "cal_failed", "save_error", "manual_cal", "watchdog_progress", "watchdog_wrap",
-                 "watchdog_startup", "watchdog_startup_wrap", "watchdog_stop", "watchdog_stop_wrap",
+                 "watchdog_startup", "watchdog_startup_wrap", "watchdog_sleep_stall", "watchdog_sleep_stall_wrap",
                  "first_frame_stall", "first_frame_slow",
                  "first_frame_deadline", "first_frame_sparse", "runtime_slow", "runtime_sparse",
                  "runtime_sensor_stalled", "runtime_deadline", "baro_cadence", "baro_calibration", "baro_calibration_boundary", "baro_calibration_boundary_wrap",
@@ -55,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
                  "sleep_cycle", "sleep_wrap", "sleep_calibration", "sleep_heart_early", "sleep_heart_offset",
                  "sleep_stationary", "sleep_stationary_wrap", "sleep_stationary_recovery", "sleep_stationary_wake", "sleep_stationary_heart",
                  "sleep_recovery", "sleep_recovery_wrap",
-                 "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime", "sport_weather", "touch_sleep", "touch_sleep_early",
+                 "bluetooth_resume", "sport_cycle", "sport_save", "sport_uptime", "sport_weather", "sport_heart", "touch_sleep", "touch_sleep_early",
                  "background_cycle", "background_wrap", "background_calibration", "lvgl_wake",
                  "sensor_timing", "sensor_timing_overload", "sensor_timing_wrap", "sensor_timing_exact"]:
         subprocess.run([exe, mode], cwd=root, check=True)

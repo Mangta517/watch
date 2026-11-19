@@ -479,8 +479,9 @@ uint8_t spl006_process_pressure(int32_t pressure_raw, int32_t temperature_raw, i
     /* 按过采样倍率归一化后的压力、温度值。 */
     float p_sc, t_sc;
 
-    /* 系数未就绪时补偿结果不可信，返回失败。 */
-    if (spl006_coef_ready == 0)
+    /* 只接受芯片输出的有符号24位原始数据。 */
+    if (spl006_coef_ready == 0 || compensated_pressure == NULL ||
+        pressure_raw < -8388608 || pressure_raw > 8388607 || temperature_raw < -8388608 || temperature_raw > 8388607)
     {
         return 1; /* 系数未就绪, 输出不可信 */
     }
@@ -489,9 +490,13 @@ uint8_t spl006_process_pressure(int32_t pressure_raw, int32_t temperature_raw, i
     p_sc = (float)pressure_raw / SPL06_SCALE_FACTOR_16X;
     t_sc = (float)temperature_raw / SPL06_SCALE_FACTOR_16X;
 
-    /* 按手册多项式计算：压力三次项 + 温度一次项 + 温压交叉项，最后取整。 */
-    *compensated_pressure =
-        (int32_t)((float)spl006_c00 + p_sc * ((float)spl006_c10 + p_sc * ((float)spl006_c20 + p_sc * (float)spl006_c30)) +
-                  t_sc * (float)spl006_c01 + t_sc * p_sc * ((float)spl006_c11 + p_sc * (float)spl006_c21));
+    /* 按手册多项式计算，超出芯片测量范围的结果不发布。 */
+    float pressure_pa = (float)spl006_c00 + p_sc * ((float)spl006_c10 + p_sc * ((float)spl006_c20 + p_sc * (float)spl006_c30)) +
+                        t_sc * (float)spl006_c01 + t_sc * p_sc * ((float)spl006_c11 + p_sc * (float)spl006_c21);
+    if (pressure_pa < 30000.0f || pressure_pa > 110000.0f)
+    {
+        return 1;
+    }
+    *compensated_pressure = (int32_t)pressure_pa;
     return 0;
 }

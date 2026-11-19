@@ -29,7 +29,11 @@
 ;   <o> Stack Size (in Bytes) <0x0-0xFFFFFFFF:8>
 ; </h>
 
-Stack_Size		EQU     0x400
+                IF      :DEF:RECOVERY_IMAGE
+Stack_Size      EQU     0x800
+                ELSE
+Stack_Size      EQU     0x400
+                ENDIF
 
                 AREA    STACK, NOINIT, READWRITE, ALIGN=3
 Stack_Mem       SPACE   Stack_Size

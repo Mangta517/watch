@@ -59,8 +59,8 @@ with tempfile.TemporaryDirectory(prefix="watch-bootloader-") as output:
     (output / "main.h").write_text(header, encoding="utf-8")
     shutil.copyfile(root / "tests/ble/host/usart.h", output / "usart.h")
     crc_defines = []
-    for size in [101, 512, 10001, 327680]:
-        image = struct.pack("<II", 0x20020000, 0x08010009) + bytes((i * 37 + 11) & 255 for i in range(8, size))
+    for size in [411, 512, 10001, 327680]:
+        image = struct.pack("<II", 0x20020000, 0x08010199) + bytes((i * 37 + 11) & 255 for i in range(8, size))
         crc_defines.append(f"#define TEST_CRC_{size} 0x{zlib.crc32(image):08X}U\n")
     (output / "crc_vectors.h").write_text("".join(crc_defines), encoding="ascii")
     executable = output / "bootloader.exe"

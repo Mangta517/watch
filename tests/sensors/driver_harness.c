@@ -47,6 +47,7 @@ static int spi_fail_after = -1;
 static HAL_StatusTypeDef spi_error;
 static unsigned spi_payload_calls, spi_payload_bytes;
 static uint16_t spi_expected_color = 0x1234;
+uint32_t SystemCoreClock = 84000000;
 static int spi_command_fail_after = -1;
 static GPIO_PinState lcd_dc_state = GPIO_PIN_SET;
 static uint8_t spi_lcd_command, spi_address_capture;
@@ -57,8 +58,14 @@ static unsigned spi_calls, spi_address_calls, spi_address_length;
 static HAL_StatusTypeDef dma_start_result = HAL_OK;
 static unsigned dma_starts, dma_stops, spi_aborts, flush_completions;
 static uint8_t dma_stuck;
+static uint32_t lcd_bus_mode = GPIO_MODE_AF_PP;
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *spi);
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *spi);
+
+uint8_t host_lcd_spi_clock_disabled(void)
+{
+    return (lcd_clock_mask & HOST_LCD_CLOCK_SPI) == 0;
+}
 
 void host_lcd_clock_set(uint32_t clock, uint8_t enabled)
 {
@@ -70,6 +77,7 @@ void host_lcd_clock_set(uint32_t clock, uint8_t enabled)
     {
         assert(host_dma_stream.CR == 0 && (host_spi.SR & SPI_SR_BSY) == 0);
         assert(htim3.compare == 0 && (host_tim3.CR1 & TIM_CR1_CEN) == 0);
+        assert(lcd_bus_mode == GPIO_MODE_ANALOG);
         lcd_clock_mask &= ~clock;
     }
 }
@@ -112,8 +120,21 @@ void Error_Handler(void)
 }
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
+    if (port == GPIOB && config->Pin == (LCD_CLK_Pin | LCD_SDA_Pin))
+    {
+        assert(primask == 1 && config->Pull == GPIO_NOPULL);
+        assert(config->Mode == GPIO_MODE_ANALOG || config->Mode == GPIO_MODE_AF_PP);
+        if (config->Mode == GPIO_MODE_AF_PP)
+        {
+            assert(config->Alternate == GPIO_AF5_SPI1 && config->Speed == GPIO_SPEED_FREQ_VERY_HIGH);
+        }
+        lcd_bus_mode = config->Mode;
+        return;
+    }
     assert(primask && port == TP_SDA_GPIO_Port && config->Pin == TP_SDA_Pin);
-    if (handoff_active != 0 && config->Mode == GPIO_MODE_OUTPUT_PP)
+    assert(config->Mode == GPIO_MODE_INPUT || config->Mode == GPIO_MODE_OUTPUT_OD);
+    assert(config->Pull == GPIO_NOPULL);
+    if (handoff_active != 0 && config->Mode == GPIO_MODE_OUTPUT_OD)
     {
         assert(handoff_clocks % 9 == 8 && sda_latch == GPIO_PIN_RESET);
     }
@@ -133,7 +154,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
                 }
                 else
                 {
-                    assert(sda_mode == GPIO_MODE_OUTPUT_PP && sda_latch == GPIO_PIN_RESET);
+                    assert(sda_mode == GPIO_MODE_OUTPUT_OD && sda_latch == GPIO_PIN_RESET);
                 }
                 ++handoff_clocks;
             }
@@ -152,7 +173,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
     }
     else if (port == TP_SDA_GPIO_Port && pin == TP_SDA_Pin)
     {
-        if (handoff_active != 0 && sda_mode == GPIO_MODE_OUTPUT_PP)
+        if (handoff_active != 0 && sda_mode == GPIO_MODE_OUTPUT_OD)
         {
             assert(state == GPIO_PIN_RESET); /* 连两拍间的短暂推挽高电平也不可接受。 */
         }
@@ -343,6 +364,28 @@ static void queue_write(void)
         queue_bit(GPIO_PIN_RESET);
     }
 }
+static void queue_point(uint16_t x, uint16_t y)
+{
+    uint8_t data[3] = {(uint8_t)x, (uint8_t)(y >> 8), (uint8_t)y};
+    unsigned byte, bit;
+
+    queue_read(1);
+    queue_read((uint8_t)(x >> 8));
+    for (byte = 0; byte < sizeof(data); ++byte)
+    {
+        for (bit = 0; bit < 8; ++bit)
+        {
+            if ((data[byte] & (0x80 >> bit)) != 0)
+            {
+                queue_bit(GPIO_PIN_SET);
+            }
+            else
+            {
+                queue_bit(GPIO_PIN_RESET);
+            }
+        }
+    }
+}
 static void reset_observations(int state)
 {
     assert(reply_pos == reply_count && !primask);
@@ -421,8 +464,8 @@ static void touch_recovery_tests(void)
     queue_write();
     start = elapsed_ms;
     Touch_Wakeup();
-    assert(tp_resets == 1 && g_tp_chip_id == 0xB7 && elapsed_ms - start >= 410);
-    assert(reply_pos == reply_count && hal_waits == 0 && task_waits == 3);
+    assert(tp_resets == 1 && g_tp_chip_id == 0xB7 && elapsed_ms - start >= 310 && elapsed_ms - start < 410);
+    assert(reply_pos == reply_count && hal_waits == 0 && task_waits == 2);
     /* Nine real rising edges before reset, with SDA released throughout. */
     assert(edges_at_reset == 10 && released_at_reset == 9);
 
@@ -445,9 +488,9 @@ static void touch_recovery_tests(void)
     start = elapsed_ms;
     assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && elapsed_ms == start);
     elapsed_ms += 9;
-    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    assert(Touch_Sleep() == 1);
     ++elapsed_ms;
-    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR);
+    assert(Touch_Sleep() == 1 && tp_ready_at == elapsed_ms + 300);
     elapsed_ms += 299;
     assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && g_tp_chip_id == 0);
     ++elapsed_ms;
@@ -470,15 +513,20 @@ static void touch_recovery_tests(void)
     reset_observations(taskSCHEDULER_RUNNING);
     start = elapsed_ms;
     assert(Touch_Init() == 0); /* Both candidate addresses remain absent. */
-    assert(tp_resets == 1 && elapsed_ms - start >= 1312);
-    assert(hal_waits == 0 && task_waits == 13);
+    assert(tp_resets == 1 && elapsed_ms - start >= 1112 && elapsed_ms - start < 1312);
+    assert(hal_waits == 0 && task_waits == 11);
     reset_observations(taskSCHEDULER_RUNNING);
     start = elapsed_ms;
     Touch_Wakeup();
-    assert(g_tp_chip_id == 0 && tp_resets == 1 && elapsed_ms - start >= 510);
-    assert(hal_waits == 0 && task_waits == 4);
+    assert(g_tp_chip_id == 0 && tp_resets == 1 && elapsed_ms - start >= 310 && elapsed_ms - start < 410);
+    assert(hal_waits == 0 && task_waits == 2);
     queue_write();
-    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && reply_pos == reply_count);
+    assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && reply_pos == 0);
+    reply_count = reply_pos = 0;
+    queue_read(0xB5);
+    queue_write();
+    Touch_Wakeup();
+    assert(g_tp_chip_id == 0xB5 && reply_pos == reply_count);
 }
 
 static void lcd_address_tests(void)
@@ -616,7 +664,14 @@ static void lcd_dma_error_tests(void)
     HAL_SPI_ErrorCallback(&hspi1);
     assert(spi_aborts == starts && flush_completions == before);
     dma_stuck = 1;
-    assert(LCD_Flush_Service() == 0 && flush_completions == before);
+    error_expected = 1;
+    if (setjmp(error_jump) == 0)
+    {
+        (void)LCD_Flush_Service();
+        assert(0 && "stuck DMA must enter Error_Handler");
+    }
+    error_expected = 0;
+    assert(flush_completions == before && (host_dma_stream.CR & DMA_SxCR_EN) != 0);
     dma_stuck = 0;
     assert(LCD_Flush_Service() == 1 && flush_completions == before + 1);
     HAL_SPI_ErrorCallback(&hspi1);
@@ -649,7 +704,8 @@ static void lcd_dma_error_tests(void)
 static void lcd_dma_timeout_tests(void)
 {
     static uint16_t pixels[4];
-    unsigned int before, stops, wrap;
+    unsigned int before, stops;
+    volatile unsigned int wrap;
     for (wrap = 0; wrap < 2; ++wrap)
     {
         elapsed_ms = 1000;
@@ -664,7 +720,14 @@ static void lcd_dma_timeout_tests(void)
         assert(LCD_Flush_Service() == 0 && dma_stops == stops);
         ++elapsed_ms;
         dma_stuck = 1;
-        assert(LCD_Flush_Service() == 0 && flush_completions == before);
+        error_expected = 1;
+        if (setjmp(error_jump) == 0)
+        {
+            (void)LCD_Flush_Service();
+            assert(0 && "stuck DMA must enter Error_Handler");
+        }
+        error_expected = 0;
+        assert(flush_completions == before && (host_dma_stream.CR & DMA_SxCR_EN) != 0);
         dma_stuck = 0;
         assert(LCD_Flush_Service() == 1 && flush_completions == before + 1);
         HAL_SPI_TxCpltCallback(&hspi1);
@@ -681,9 +744,31 @@ static void lcd_dma_timeout_tests(void)
 
 static void touch_coordinate_failure_tests(void)
 {
+    static const uint16_t points[][2] = {
+        {0, 0}, {239, 279}, {239, 0}, {0, 279}, {120, 140},
+        {240, 0}, {0, 280}, {4095, 4095}};
     uint16_t x = 123, y = 456;
     uint32_t i, start;
 
+    for (i = 0; i < sizeof(points) / sizeof(points[0]); ++i)
+    {
+        reset_observations(taskSCHEDULER_RUNNING);
+        x = 123;
+        y = 456;
+        queue_point(points[i][0], points[i][1]);
+        if (i < 5)
+        {
+            assert(Touch_GetPoint(&x, &y) == 1);
+            assert(x == 239 - points[i][0] && y == 279 - points[i][1]);
+        }
+        else
+        {
+            assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123 && y == 456);
+        }
+        assert(reply_pos == reply_count && tp_resets == 0);
+    }
+    x = 123;
+    y = 456;
     reset_observations(taskSCHEDULER_RUNNING);
     queue_read(0);
     assert(Touch_GetPoint(&x, &y) == 0);
@@ -704,8 +789,15 @@ static void touch_coordinate_failure_tests(void)
     for (i = 0; i < 200; ++i)
     {
         reply_count = reply_pos = 0;
-        queue_read(1);
-        queue_bit(GPIO_PIN_SET);
+        if (i % 2 == 0)
+        {
+            queue_point(240, 280);
+        }
+        else
+        {
+            queue_read(1);
+            queue_bit(GPIO_PIN_SET);
+        }
         assert(Touch_GetPoint(&x, &y) == TOUCH_READ_ERROR && x == 123U && y == 456U);
         if (i < 199)
         {
@@ -735,7 +827,7 @@ static void touch_coordinate_failure_tests(void)
     }
     assert(Touch_GetPoint(&x, &y) == 1 && x == 239U && y == 279U);
     assert(reply_pos == reply_count && tp_resets == 1);
-    puts("PASS: coordinate-only NACKs trigger bounded deferred recovery; no-finger success resets the streak.");
+    puts("PASS: touch mirrors valid corners, rejects out-of-range coordinates without publishing them, and recovers from mixed coordinate/NACK failures.");
 }
 
 static void touch_sda_handoff_tests(void)
@@ -876,27 +968,7 @@ static void touch_async_absent_tests(void)
 
 int main(void)
 {
-    htim3.compare = 0;
-    host_spi.SR = 0;
-    host_dma_stream.CR = 0;
-    assert(lcd_is_stop_idle() != 0);
-    htim3.compare = 1;
-    assert(lcd_is_stop_idle() == 0);
-    htim3.compare = 0;
-    host_spi.SR = SPI_SR_BSY;
-    assert(lcd_is_stop_idle() == 0);
-    host_spi.SR = 0;
-    host_dma_stream.CR = DMA_SxCR_EN;
-    assert(lcd_is_stop_idle() == 0);
-    host_dma_stream.CR = 0;
-    assert(lcd_is_stop_idle() != 0);
-    hspi1.hdmatx = NULL;
-    assert(lcd_is_stop_idle() != 0);
-    host_dma_stream.CR = DMA_SxCR_EN;
-    assert(lcd_is_stop_idle() == 0);
-    host_dma_stream.CR = 0;
-    hspi1.hdmatx = &host_dma;
-    puts("PASS: real LCD STOP query independently vetoes backlight, SPI busy and enabled TX DMA.");
+    assert(lcd_is_stop_idle() == 0); /* 外设空闲但总线尚未挂起。 */
     lcd_address_tests();
     lcd_fill_tests();
     lcd_dma_error_tests();
@@ -922,10 +994,17 @@ int main(void)
             assert(LCD_ST7789_SleepIn() == 1);
             assert((lcd_clock_mask & HOST_LCD_CLOCK_SPI) != 0 && htim3.compare == 0);
             assert(LCD_ST7789_SleepIn() == 0);
-            assert(lcd_clock_mask == 0);
+            assert(lcd_clock_mask == 0 && lcd_is_stop_idle() != 0);
+            uint32_t wake_started = elapsed_ms;
             spi_command_fail_after = 0;
             assert(LCD_ST7789_SleepOut() == 1 && htim3.compare == 0);
-            assert(LCD_ST7789_SleepOut() == 0);
+            assert(elapsed_ms - wake_started >= 120);
+            assert(lcd_clock_mask == 0 && lcd_bus_mode == GPIO_MODE_ANALOG);
+            spi_command_fail_after = 0;
+            assert(LCD_ST7789_SleepIn() == 1);
+            assert(lcd_clock_mask == 0 && lcd_bus_mode == GPIO_MODE_ANALOG);
+            assert(LCD_ST7789_SleepIn() == 0 && spi_lcd_command == 0x10 && lcd_clock_mask == 0);
+            assert(LCD_ST7789_SleepOut() == 0 && lcd_clock_mask == 7 && lcd_is_stop_idle() == 0);
         }
         puts("PASS: LCD power commands return BUSY/ERROR/TIMEOUT, keep the backlight dark and succeed on the next attempt.");
     }

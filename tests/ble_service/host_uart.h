@@ -138,6 +138,8 @@ uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct
     uint16_t count = 0;
     info->received_ms = host_bt_activity_ms;
     info->sampled_ms = HAL_GetTick();
+    info->dropped = host_bt_dropped;
+    info->errors = host_bt_errors;
     info->flags = 0;
     if (host_bt_rx_pos == host_bt_rx_size)
     {

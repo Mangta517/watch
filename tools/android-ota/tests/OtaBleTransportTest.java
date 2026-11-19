@@ -76,7 +76,7 @@ public final class OtaBleTransportTest
         {
             data[i] = (byte)(i * 37 + 11);
         }
-        byte[] vectors = {0, 0, 2, 0x20, 9, 0, 1, 8};
+        byte[] vectors = {0, 0, 2, 0x20, (byte)0x99, 1, 1, 8};
         System.arraycopy(vectors, 0, data, 0, 8);
         return data;
     }

@@ -1,10 +1,10 @@
 /**
   ******************************************************************************
   * @file    app_imu.h
-  * @brief   应用层-MPU6050 + LSM303DLHC (周期采样 + 姿态解算 + 最新数据快照)
+  * @brief   应用层-MPU6050 + LSM303DLHC (加速度活动检测 + 独立指南针 + 一致快照)
   *          分层: application(app_task 建 sensor 任务 → 本层提供任务体调用的服务)。
   *          注意: 任务的创建与调度器启动不在本层 (见 app_task.h)。
-  *          解算: 姿态角由 common_imu 四元数互补融合得出 (纯数学在公共层)。
+  *          解算由公共层处理，指南针只使用LSM303自身的加速度和磁场。
   *          总线约定: SENSOR 总线任务级唯一 owner 是 sensor 任务, 其他模块
   *          要取 IMU 数据一律走 App_IMU_GetSnapshot(), 不得直调 my_mpu6050_get_*
   *          EXTI ISR 只记事件，sensor 任务读 0x3A 释放器件锁存。
@@ -28,16 +28,15 @@ extern "C"
         APP_MAG_CAL_FAILED
     } app_mag_cal_state;
 
-    /* 本轮磁参考使用状态；区分读到数据与实际参与航向修正。 */
     typedef enum
     {
-        APP_MAG_FUSION_NO_DATA,
-        APP_MAG_FUSION_CALIBRATING,
-        APP_MAG_FUSION_FIELD_RANGE,
-        APP_MAG_FUSION_HORIZONTAL_WEAK,
-        APP_MAG_FUSION_IMU_NO_DATA,
-        APP_MAG_FUSION_ACTIVE
-    } app_mag_fusion_state;
+        APP_COMPASS_NO_MAG_DATA,
+        APP_COMPASS_CALIBRATING,
+        APP_COMPASS_FIELD_RANGE,
+        APP_COMPASS_ACCEL_INVALID,
+        APP_COMPASS_HORIZONTAL_WEAK,
+        APP_COMPASS_READY
+    } app_compass_state;
 
     typedef enum
     {
@@ -49,23 +48,21 @@ extern "C"
         APP_MAG_PERSIST_LOAD_FAILED
     } app_mag_persist_state;
 
-    /* IMU 快照: 原始 LSB + 融合姿态角 + 同一轮服务的磁参考状态 */
+    /* 加速度、活动与独立指南针快照；MPU与LSM303的在线状态分别报告。 */
     typedef struct
     {
-        uint32_t steps;                /* 本次开机累计步数；不写EEPROM。 */
+        uint32_t steps;                /* 当日累计步数；片内Flash节流保存。 */
         uint32_t wrist_raise_sequence; /* 仅在放下后抬起时递增，供UI消费。 */
         uint32_t wrist_raise_ms;       /* 最近抬腕事件的HAL时间，避免陈旧事件亮屏。 */
-        Accel_Gyro_struct raw;     /* 原始读数 (已减零偏; 加速度 ±4g, 陀螺仪 ±1000°/s) */
-        float pitch_deg;           /* 俯仰角 (°), 四元数融合 */
-        float roll_deg;            /* 横滚角 (°), 四元数融合 */
-        float yaw_deg;             /* 偏航角 (-180..180°)，磁北参考；失效时六轴相对递推 */
+        Accel_Gyro_struct raw;     /* MPU加速度±4g；Gyro字段固定为0。 */
+        float compass_deg;         /* OV-Watch直接磁方位角[0,360)°，LSM303加速度倾斜补偿。 */
+        app_compass_state compass_state;
+        uint8_t compass_valid;     /* 当前加速度与磁场可用于直接指南针。 */
         lsm303dlhc_mag_struct mag; /* 芯片坐标下磁场，未做安装校准 */
-        float mag_body_uT[3];      /* 校准并映射到 MPU6050 机体坐标后的磁场 */
+        float mag_body_uT[3];      /* 安装校准后的表盘坐标磁场。 */
         uint8_t mag_online;        /* 有当前档位新鲜度窗口内的有效磁场帧。 */
-        uint8_t mag_fused;         /* 本轮磁场参与航向修正 */
         uint8_t mag_calibrated;    /* 已校准，或已从EEPROM恢复有效校准 */
         app_mag_cal_state mag_cal_state;
-        app_mag_fusion_state mag_fusion_state;
         uint16_t mag_cal_samples;                /* 校准采集帧数；点击完成不等于校准成功 */
         float mag_cal_span_uT[3];                /* 当前校准窗口各轴max-min，验收要求均≥20μT */
         app_mag_persist_state mag_persist_state; /* RAM校准与掉电保存分别报告 */
@@ -76,6 +73,7 @@ extern "C"
     void app_imu_init_mag_hw(void);
     uint8_t app_imu_recover_step(uint32_t now_ms);
     void app_imu_mag_recover_step(uint32_t now_ms);
+    /* 旧维护入口；当前启动和日常服务均不调用六轴校准。 */
     void app_imu_calibration_begin(uint32_t now_ms);
     mpu6050_cal_state app_imu_calibration_progress(uint16_t *stable, uint16_t *average);
     void app_imu_restore_offset(const mpu6050_offset_struct *offset);
@@ -87,28 +85,32 @@ extern "C"
     void App_IMU_Init(void);
 
     /**
- * @brief 周期服务一轮: 磁场轮询 + MPU突发读 → 姿态融合 → 一致快照
- *        仅sensor调用；read_mag=0时只延后本轮磁事务，命令和新鲜度检查仍执行。
+ * @brief 仅sensor调用，MPU突发读后更新活动与PPG参考，返回驱动读帧结果。
+ *        指南针由独立服务调度；read_mag参数保留旧调用签名。
  */
-    void App_IMU_Service(uint8_t read_mag);
-    /* 仅sensor任务：后台200ms为加速度低功耗，运动10ms，姿态/校准20ms。 */
+    uint8_t App_IMU_Service(uint8_t read_mag);
+    /* 每轮sensor独立调用，active=指南针页或磁校准；返回1表示电源/恢复尚未完成。 */
+    uint8_t app_imu_compass_service(uint8_t active, uint8_t read_sensors);
+    /* LVGL发布RTC日历，sensor执行跨天清零及Flash保存。day=0表示未校时。 */
+    void app_imu_set_day(uint16_t day, uint8_t calendar_restored);
+    void app_imu_activity_service(void);
+    /* 仅sensor任务：后台25ms低功耗，心率/SPORT 10ms连续加速度。 */
     uint32_t app_imu_set_sample_period(uint32_t period_ms);
+    /* 仅sensor任务读取自有活动状态，用于新抬腕事件立即通知LVGL。 */
+    uint32_t app_imu_wrist_sequence(void);
     /* 仅sensor任务：先设置请求，再调用set_sample_period；心率参考不启动姿态/磁融合。 */
     void app_imu_set_accel_reference(uint8_t enabled);
-    /* 兼容器件完全休眠接口；唤醒只丢弃旧时间/磁参考，保留四元数。 */
+    /* 兼容MPU完全休眠接口，唤醒后等待新的加速度帧。 */
     void app_imu_set_sleep(uint8_t sleeping);
     /* 校准命令、采集或校准记录保存尚未完成时返回1。 */
     uint8_t app_imu_is_calibrating(void);
-    /* 仅sensor任务：后台新鲜加速度连续约10秒稳定时返回1，供放宽读取节拍；
-     * 无有效帧、样本过期(超过活动最大间隔)或读失败后未重新稳定均返回0。 */
-    uint8_t app_imu_is_stationary(void);
-    /* 仅sensor任务调用；与MPU零偏保存串行，返回1表示磁记录仍在保存。 */
+    /* 仅sensor任务调用；与其他EEPROM使用者串行，返回1表示磁记录仍在保存。 */
     uint8_t App_IMU_SaveService(void);
 
     /**
  * @brief 取最新数据的一致快照 (加锁, 防多字段撕裂)
  * @param imu 输出快照, 不可为 NULL
- * @return 1=快照有效; 0=器件离线或首帧未完成
+ * @return 1=MPU加速度在线；指南针独立读取compass_valid和mag_online。
  */
     uint8_t App_IMU_GetSnapshot(app_imu_struct *imu);
 

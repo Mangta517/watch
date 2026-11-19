@@ -61,8 +61,9 @@ void app_diag_boot_set(uint8_t field, uint32_t value)
     (void)field;
     (void)value;
 }
-void app_diag_service(void)
+void app_diag_service(uint8_t allow_tx)
 {
+    (void)allow_tx;
 }
 
 uint32_t host_imu_save_diag[4];

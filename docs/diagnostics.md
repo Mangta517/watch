@@ -18,9 +18,9 @@
 
 ## 当前测试方式（2026-10-28）
 
-普通APP和升级APP使用64MHz、Scale3、Flash 2等待周期，APB1=32MHz、APB2=64MHz、SPI1=32MHz。Tickless默认启用STOP；BLE开启时仍使用Sleep保证UART接收，SPORT熄屏且外设空闲时可进入STOP，醒后恢复64MHz并补齐HAL/RTOS/TIM2时间。TIM3仍以1MHz计数，屏幕睡眠后停止计数并关闭TIM3/SPI1/DMA2时钟，亮屏恢复；软件I2C/触摸按64MHz缩放位延时。`app_tickless.h`的`APP_TICKLESS_ENABLE_STOP`默认为1。此前84MHz/Sleep采集记录保留为历史数据，不能直接用于当前配置的功耗或业务耗时结论。
+该段所述64MHz为2026-10-28历史配置。当前APP使用84MHz、Scale2、Flash 2等待周期，APB1为42MHz，APB2和SPI1分别为84MHz及42MHz。STOP要求显示总线已挂起、蓝牙断电且ADC空闲，恢复PLL及稳压档位后补齐HAL、RTOS与TIM2时间。
 
-默认`APP_DEBUG_TELEMETRY=0`：启动不发送诊断、心率波形或SEND TEST。现在手机`DIAG,1`加实际换行可以单独开启WDG1，`DIAG,0`加换行关闭，无需打开波形编译开关。现有配套App的“FreeRTOS / 传感器诊断”页及CSV继续使用原协议；普通熄屏仍能采集，SPORT按原策略关闭蓝牙，需退出后再连接。
+默认`APP_DEBUG_TELEMETRY=0`：启动不发送诊断、心率波形或SEND TEST。现在手机`DIAG,1`加实际换行可以单独开启WDG1，`DIAG,0`加换行关闭，无需打开波形编译开关。现有配套App的“FreeRTOS / 传感器诊断”页及CSV继续使用原协议；ECO熄屏时暂停发送WDG1，设备继续采集诊断数据。管理命令占用发送通道时，WDG1也暂停发送。SPORT关闭蓝牙。
 
 任务ID保持0=lvgl、1=sensor、2=IDLE、3=touch。四个任务报告优先级、状态、栈总量/历史最小余量和CPU占比；lvgl、sensor、touch增加或保留循环次数、周期、处理耗时、超预算及目标周期。touch熄屏后阻塞，唤醒后的周期可能包含整段休眠，驱动恢复等待也计入处理耗时；IDLE不提供业务循环指标。旧手机可能把ID3显示为other，仍对应touch。
 
@@ -96,14 +96,13 @@ FreeRTOS 开启 configUSE_TRACE_FACILITY 和 configGENERATE_RUN_TIME_STATS，保
 ## 启动阶段
 
 新版在首帧提交后立即创建sensor任务，RTC的LSE等待与蓝牙启动通过LVGL循环分步推进。
-MPU有有效EEPROM记录时恢复六轴零偏并跳过静止校准；没有有效记录时使用正常采集帧校准，保留100帧静止和100帧平均。
-校准成功才保存到EEPROM 0x60..0x9F，不覆盖原磁力计记录。手机可点击「MPU重新校准并保存」，发送IMU,CAL加换行。
-手机诊断顶部显示首帧提交、传感器初始化/正常采集开始、RTC/蓝牙结束与HAL结果、校准状态/帧数/结束时间。
+LSE等待满5秒时报告超时，其他功能继续运行。晚起振时任务继续完成有界RTC配置并更新结果。读取日历时验证两次SSR一致性。
+MPU6050上电后进入加速度采样。六轴零偏校准已停用，旧手机发来的 `IMU,CAL` 会报告空闲状态和失败结果。
+指南针使用LSM303DLHC的加速度与磁场。磁校准在手表的 `COMPASS` 页进行，点击 `CALIBRATE MAG`，绕三个轴缓慢转动，再点击 `FINISH CALIBRATION`。显示 `CAL SAVED` 时，磁校准系数已写入EEPROM并通过读回检查。覆盖要求见[指南针与磁校准](magnetometer.md)。
+手机诊断顶部显示首帧提交、传感器初始化与正常采集起点、RTC和蓝牙的结束时间及HAL结果。
 各时间为HAL毫秒计数从0开始后的时刻，不是手机收到消息的时刻；首帧提交不等于屏幕DMA完成。
-校准成功前IMU已发布未完成本次零偏修正的数据；静止平放直到完成后再判断姿态和漂移。
-未发生的阶段用0xFFFFFFFF表示；校准结果0成功、1校准失败、2校准成功但保存失败；校准状态5表示EEPROM恢复且跳过本次校准。HAL结果0成功、1错误、2忙、3超时。
-校准稳定等待3秒、平均阶段2秒按实际经过时间判断超时，失败不提交部分偏移并继续正常采集。
-启动测量见startup-optimization.md；当前EEPROM流程和操作步骤见imu-eeprom.md。
+未发生的阶段用 `0xFFFFFFFF` 表示。HAL结果中，0表示成功，1表示错误，2表示忙，3表示超时。
+历史启动测量见[startup-optimization.md](startup-optimization.md)，旧六轴校准字段及EEPROM布局见[imu-eeprom.md](imu-eeprom.md)。
 
 ## 指标含义
 

@@ -8,9 +8,11 @@ root = Path(__file__).resolve().parents[2]
 gcc = shutil.which("gcc")
 if not gcc:
     raise SystemExit("Desktop GCC is required")
-fixture = Path(sys.argv[1]).resolve()
-fixture.parent.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix="watch-diag-") as temporary:
+    fixture = Path(temporary) / "diagnostics.bin"
+    if len(sys.argv) > 1:
+        fixture = Path(sys.argv[1]).resolve()
+    fixture.parent.mkdir(parents=True, exist_ok=True)
     executable = str(Path(temporary) / "diagnostics.exe")
     for enabled in (1, 0):
         subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",

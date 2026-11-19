@@ -16,14 +16,19 @@
 #include <setjmp.h>
 #include <windows.h>
 
+Host_PVD_TypeDef host_pvd;
+
 FLASH_TypeDef host_flash;
+Host_Erase_Type host_erase_cycles, host_erase_gpio;
+uint32_t SystemCoreClock = 84000000;
 USART_TypeDef host_log_uart;
 static unsigned flash_poll_count, polled_bytes;
 static uint8_t receive_during_flash;
 static uint8_t mutex_locked, allocation_failed, flash_locked = 1, irq_mask;
-static uint8_t tps_disabled, erase_failed, unlock_failed, corrupt_write;
+static uint8_t tps_enabled, erase_failed, unlock_failed, corrupt_write;
 static int program_remaining = -1;
 static unsigned programs, erases, cache_resets;
+static unsigned watchdog_feeds;
 static app_battery_struct battery = {3900, 0, HAL_OK, 1, 70};
 static jmp_buf reset_target;
 static uint8_t reset_expected;
@@ -35,6 +40,13 @@ static char tx_copy[128], output[32768];
 static uint32_t tick;
 static unsigned tx_count;
 static app_reset_info_struct reset_info;
+static uint8_t erase_reported;
+
+void app_reset_capture_stop(uint32_t kind, uint32_t pc, uint32_t task_tag)
+{
+    assert(kind == APP_RESET_ERROR_HANDLER && pc == 0 && task_tag == 0x53415245);
+    erase_reported = 1;
+}
 
 void app_reset_get_info(app_reset_info_struct *info)
 {
@@ -107,13 +119,19 @@ void host_cache_reset(void)
     assert((FLASH->ACR & FLASH_ACR_DCEN) == 0);
     ++cache_resets;
 }
-void tps3823_disable(void)
+void tps3823_enable(void)
 {
-    tps_disabled = 1;
+    tps_enabled = 1;
+}
+void tps3823_feed(void)
+{
+    assert(tps_enabled && irq_mask);
+    ++watchdog_feeds;
 }
 void NVIC_SystemReset(void)
 {
-    assert(reset_expected && tps_disabled && irq_mask && flash_locked);
+    assert(reset_expected && tps_enabled && irq_mask);
+    assert(flash_locked || erase_failed >= 2);
     longjmp(reset_target, 1);
 }
 HAL_StatusTypeDef HAL_FLASH_Unlock(void)
@@ -176,6 +194,36 @@ void host_log_program(uint32_t address, uint16_t value)
 uint32_t host_log_poll(void)
 {
     assert(irq_mask != 0);
+    if ((FLASH->CR & FLASH_CR_SER) != 0)
+    {
+        ++flash_poll_count;
+        if (erase_failed != 3)
+        {
+            DWT->CYCCNT += SystemCoreClock / 10;
+        }
+        else if (flash_poll_count >= 10)
+        {
+            /* DWT故障时SRAM不再喂狗，模型模拟外部TPS3823到期。 */
+            NVIC_SystemReset();
+        }
+        if (flash_poll_count > 1 && erase_failed != 3)
+        {
+            assert(WDI_GPIO_Port->BSRR == (uint32_t)WDI_Pin << 16);
+        }
+        if (erase_failed < 2 && flash_poll_count >= 4)
+        {
+            FLASH->SR &= ~FLASH_SR_BSY;
+            if (erase_failed != 0)
+            {
+                FLASH->SR |= FLASH_FLAG_OPERR;
+            }
+            else
+            {
+                memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, BATTERY_LOG_END_ADDR - BATTERY_LOG_START_ADDR);
+            }
+        }
+        return FLASH->SR;
+    }
     host_log_uart.SR = 0;
     if (receive_during_flash != 0 && flash_poll_count < 3)
     {
@@ -189,18 +237,16 @@ uint32_t host_log_poll(void)
     return FLASH->SR;
 }
 
-HAL_StatusTypeDef HAL_FLASHEx_Erase(FLASH_EraseInitTypeDef *erase, uint32_t *error)
+void host_log_erase_begin(void)
 {
-    assert(tps_disabled && irq_mask && !flash_locked);
-    assert(erase->Sector == 7 && erase->NbSectors == 1 && erase->VoltageRange == 3);
+    assert(tps_enabled && irq_mask && !flash_locked);
+    assert(watchdog_feeds != 0);
+    assert((FLASH->CR & (FLASH_CR_SNB | FLASH_CR_PSIZE | FLASH_CR_SER | FLASH_CR_PG)) ==
+           ((7 << FLASH_CR_SNB_Pos) | FLASH_PSIZE_WORD | FLASH_CR_SER));
+    assert((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0);
     ++erases;
-    *error = UINT32_MAX;
-    if (erase_failed != 0)
-    {
-        return HAL_ERROR;
-    }
-    memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, BATTERY_LOG_END_ADDR - BATTERY_LOG_START_ADDR);
-    return HAL_OK;
+    flash_poll_count = 0;
+    FLASH->SR |= FLASH_SR_BSY;
 }
 uint8_t kt6368a_tx_is_busy(void)
 {
@@ -342,9 +388,9 @@ static void full_tests(void)
     app_battery_log_service(60);
     assert(programs == before && status().state == APP_BATTERY_LOG_FULL);
     uint8_t data[8] = {0};
-    assert(int_battery_log_write(BATTERY_LOG_CAPACITY, data) == 1);
+    assert(int_battery_log_write(BATTERY_LOG_LEGACY_CAPACITY, data) == 1);
     assert(int_battery_log_write(0, data) == 1);
-    puts("PASS: full 128 KiB capacity, stop without erase, reboot stays full, boundary and occupied-slot rejection.");
+    puts("PASS: 120 KiB battery capacity, stop without erase, reboot stays full, boundary and occupied-slot rejection.");
 }
 static void ble_tests(void)
 {
@@ -363,7 +409,10 @@ static void ble_tests(void)
     assert(tx_active);
     command("BATLOG,STATUS\n"); /* 在途缓冲保持不变；下一行优先处理状态。 */
     pump(4);
-    assert(strstr(output, "BATLOG,STATUS,2,3,16384,1\r\n"));
+    assert(strstr(output, "BATLOG,STATUS,2,3,15360,1\r\n"));
+    command("BATLOG,STEPS\n");
+    pump(3);
+    assert(strstr(output, "BATLOG,STEPS,0,1023\r\n"));
     output[0] = '\0';
     command("BATLOG,READ\n");
     pump(1);
@@ -416,11 +465,13 @@ static void clear_tests(void)
     app_battery_log_service(60);
     command("BATLOG,CLEAR\n");
     pump(1);
-    assert(tx_active && erases == 0 && !tps_disabled);
+    assert(tx_active && erases == 0 && !tps_enabled);
     tx_done = 1;
     tick += 100;
     app_battery_log_ble_service(1, tick);
     assert(strstr(output, "BATLOG,CLEARING_REBOOT") && erases == 0);
+    app_battery_log_ble_reset();
+    assert(app_battery_log_ble_service(0, tick + 299) != 0 && erases == 0);
     mutex_locked = 1;
     pump(4);
     assert(erases == 0);
@@ -432,11 +483,14 @@ static void clear_tests(void)
         assert(0);
     }
     assert(erases == 1);
+    assert(erase_reported == (erase_failed == 1));
     for (uint32_t address = 0x08000000; address < BATTERY_LOG_START_ADDR; ++address)
     {
         assert(*(const uint8_t *)(uintptr_t)address == 0x5A);
     }
     mutex_locked = irq_mask = 0;
+    flash_locked = 1;
+    FLASH->SR &= ~FLASH_SR_BSY;
     app_battery_log_init();
     if (erase_failed != 0)
     {
@@ -446,7 +500,7 @@ static void clear_tests(void)
     {
         assert(status().samples == 0 && status().slots == 0);
     }
-    puts("PASS: clear waits for UART completion and mutex, masks TPS3823, erases only sector 7, resets even after erase failure.");
+    puts("PASS: clear preserves TPS3823, feeds from RAM with frozen HAL ticks, erases only sector 7 and resets on failure/permanent BSY.");
 }
 static void history_command(const char *text)
 {
@@ -693,6 +747,134 @@ static void reset_history_tests(void)
     puts("PASS: history handles empty/unknown logs, bounded scans, snapshot limits, lock contention, malformed commands, 100ms pacing, UART errors and power abort without retries.");
 }
 
+static void steps_tests(void)
+{
+    uint16_t day;
+    uint32_t steps, before;
+    app_battery_log_init();
+    app_battery_log_steps_update(0, 99, 300000);
+    assert(programs == 0);
+    app_battery_log_steps_update(1, 100, 300000);
+    assert(programs == 8 && erases == 0);
+    app_battery_log_init();
+    app_battery_log_steps_load(&day, &steps);
+    assert(day == 1 && steps == 100 && status().slots == 0);
+    before = programs;
+    app_battery_log_steps_update(1, 199, 600000);
+    assert(programs == before);
+    app_battery_log_steps_update(1, 200, 600000);
+    assert(programs == before + 4);
+    app_battery_log_steps_update(2, 0, 600001);
+    app_battery_log_init();
+    app_battery_log_steps_load(&day, &steps);
+    assert(day == 2 && steps == 0);
+    app_battery_log_steps_update(2, 42, 600010);
+    reset_expected = 1;
+    if (setjmp(reset_target) == 0)
+    {
+        app_battery_log_clear_and_reset();
+        assert(0);
+    }
+    mutex_locked = irq_mask = 0;
+    app_battery_log_init();
+    app_battery_log_steps_load(&day, &steps);
+    assert(day == 2 && steps == 42 && status().slots == 0 && erases == 1);
+    puts("PASS: steps throttle, reboot restore, immediate midnight zero and BATLOG,CLEAR retains current unsaved steps.");
+}
+
+static void steps_torn_tests(void)
+{
+    uint16_t day;
+    uint32_t steps, i, before;
+    app_battery_log_init();
+    app_battery_log_steps_update(1, 100, 300000);
+    for (i = 0; i < 4; ++i)
+    {
+        program_remaining = (int)i;
+        app_battery_log_steps_update(2, 0, 600000);
+        before = programs;
+        app_battery_log_steps_update(2, 0, 600001);
+        assert(programs == before);
+        program_remaining = -1;
+        app_battery_log_init();
+        app_battery_log_steps_load(&day, &steps);
+        assert(day == 1 && steps == 100);
+    }
+    app_battery_log_steps_update(2, 0, 900000);
+    app_battery_log_init();
+    app_battery_log_steps_load(&day, &steps);
+    assert(day == 2 && steps == 0 && erases == 0);
+    puts("PASS: torn step records at every halfword fall back, consume bad slots and bound retry frequency.");
+}
+
+static void steps_header_torn_tests(uint8_t reboot)
+{
+    uint16_t day;
+    uint32_t steps;
+    unsigned failure;
+    for (failure = 0; failure < 4; ++failure)
+    {
+        memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, BATTERY_LOG_END_ADDR - BATTERY_LOG_START_ADDR);
+        app_battery_log_init();
+        program_remaining = (int)failure;
+        app_battery_log_steps_update(1, 100, 300000);
+        program_remaining = -1;
+        if (reboot != 0)
+        {
+            app_battery_log_init();
+        }
+        app_battery_log_steps_update(1, 100, 600000);
+        app_battery_log_init();
+        app_battery_log_steps_load(&day, &steps);
+        assert(day == 1 && steps == 100 && status().capacity == BATTERY_LOG_CAPACITY && erases == 0);
+    }
+    puts("PASS: torn layout header resumes identical halfwords with and without reboot, preserving partition boundaries.");
+}
+
+static void steps_full_tests(void)
+{
+    uint32_t i, before;
+    app_battery_log_init();
+    for (i = 1; i <= STEP_LOG_CAPACITY; ++i)
+    {
+        app_battery_log_steps_update(1, i * 100, i * 300000);
+    }
+    before = programs;
+    app_battery_log_steps_update(1, (i + 1) * 100, (i + 1) * 300000);
+    assert(programs == before && erases == 0);
+    app_battery_log_service(60);
+    assert(status().samples == 1 && status().capacity == BATTERY_LOG_CAPACITY);
+    puts("PASS: full step journal stops writing while battery log continues without sector erase.");
+}
+
+static void steps_legacy_tests(void)
+{
+    uint8_t old[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint16_t day;
+    uint32_t steps, before;
+    app_battery_log_init();
+    app_battery_log_service(60);
+    mutex_locked = 1;
+    assert(int_battery_log_write(STEP_LOG_FIRST_SLOT, old) == 0);
+    mutex_locked = 0;
+    app_battery_log_init();
+    before = programs;
+    app_battery_log_steps_update(1, 100, 300000);
+    assert(status().capacity == BATTERY_LOG_LEGACY_CAPACITY && status().samples == 1 && programs == before && erases == 0);
+    assert(memcmp((const void *)(uintptr_t)STEP_LOG_START_ADDR, old, sizeof(old)) == 0);
+    reset_expected = 1;
+    if (setjmp(reset_target) == 0)
+    {
+        app_battery_log_clear_and_reset();
+        assert(0);
+    }
+    mutex_locked = irq_mask = 0;
+    app_battery_log_init();
+    app_battery_log_steps_load(&day, &steps);
+    assert(day == 1 && steps == 100 && status().capacity == BATTERY_LOG_CAPACITY);
+    puts("PASS: legacy tail remains exportable and unmodified, explicit clear activates new layout and preserves current steps.");
+}
+
 int main(int argc, char **argv)
 {
     receive_during_flash = 1;
@@ -703,7 +885,40 @@ int main(int argc, char **argv)
     memset(mapped, 0x5A, 0x60000);
     memset((void *)(uintptr_t)BATTERY_LOG_START_ADDR, 0xFF, 0x20000);
     FLASH->ACR = FLASH_ACR_DCEN;
-    if (strcmp(argv[1], "reset_history") == 0)
+    if (strcmp(argv[1], "steps_header") == 0 || strcmp(argv[1], "steps_header_reboot") == 0)
+    {
+        steps_header_torn_tests(strcmp(argv[1], "steps_header_reboot") == 0);
+    }
+    else if (strcmp(argv[1], "steps") == 0)
+    {
+        steps_tests();
+    }
+    else if (strcmp(argv[1], "steps_torn") == 0)
+    {
+        steps_torn_tests();
+    }
+    else if (strcmp(argv[1], "steps_full") == 0)
+    {
+        steps_full_tests();
+    }
+    else if (strcmp(argv[1], "steps_legacy") == 0)
+    {
+        steps_legacy_tests();
+    }
+    else if (strcmp(argv[1], "low_voltage") == 0)
+    {
+        uint8_t record[BATTERY_LOG_RECORD_BYTES] = {0};
+        mutex_locked = 1;
+        host_pvd.CSR = PWR_CSR_PVDO;
+        assert(int_battery_log_write(0, record) == 1 && programs == 0 && flash_locked && irq_mask == 0);
+        assert(int_battery_log_erase() == 1 && erases == 0 && flash_locked);
+        assert(*(const uint8_t *)(uintptr_t)BATTERY_LOG_START_ADDR == 0xFF);
+        host_pvd.CSR = 0;
+        assert(int_battery_log_write(0, record) == 0 && programs == 4 && flash_locked);
+        mutex_locked = 0;
+        puts("PASS: PVD blocks log programming and erase without touching Flash; recovered supply permits the next write.");
+    }
+    else if (strcmp(argv[1], "reset_history") == 0)
     {
         reset_history_tests();
     }
@@ -776,18 +991,41 @@ int main(int argc, char **argv)
         assert(status().state == APP_BATTERY_LOG_ERROR && programs == 0);
         command("BATLOG,STATUS\n");
         pump(3);
-        assert(strstr(output, "BATLOG,STATUS,0,0,16384,4"));
+        assert(strstr(output, "BATLOG,STATUS,0,0,15360,4"));
         puts("PASS: mutex allocation error is visible and does not write Flash.");
     }
     else if (strcmp(argv[1], "ble") == 0)
     {
         ble_tests();
     }
+    else if (strcmp(argv[1], "ble_starting") == 0)
+    {
+        /* 已保存的开机标记1和第60秒3900mV电压槽。 */
+        const uint8_t saved[] = {0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x75, 0x12,
+                                 0x3C, 0x00, 0x00, 0x00, 0x3C, 0x0F, 0xF3, 0x75};
+        memcpy((void *)(uintptr_t)BATTERY_LOG_START_ADDR, saved, sizeof(saved));
+        assert(status().state == APP_BATTERY_LOG_STARTING);
+        command("BATLOG,READ\n");
+        pump(4);
+        assert(tx_count == 0);
+        app_battery_log_init();
+        pump(12);
+        assert(strcmp(output, "BATLOG,BEGIN,1,2\r\nBATLOG,DATA,1,1,60,3900\r\nBATLOG,END,1\r\n") == 0);
+        puts("PASS: READ issued before the Flash scan exports the stored sample once the scan completes.");
+    }
     else
     {
         if (strcmp(argv[1], "erase_error") == 0)
         {
             erase_failed = 1;
+        }
+        else if (strcmp(argv[1], "erase_stuck") == 0)
+        {
+            erase_failed = 2;
+        }
+        else if (strcmp(argv[1], "erase_dwt_stuck") == 0)
+        {
+            erase_failed = 3;
         }
         clear_tests();
     }

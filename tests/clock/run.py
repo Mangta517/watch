@@ -1,5 +1,6 @@
 """Test the real RTC wrapper and clock parser with a simulated hardware calendar."""
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import tempfile
@@ -15,9 +16,9 @@ with tempfile.TemporaryDirectory(prefix="watch-clock-") as out:
                     "tests/clock/clock_harness.c", "interface/watch_rtc.c",
                     "application/app_clock.c", "application/app_weather.c", "-o", exe], cwd=root, check=True)
     subprocess.run([exe], cwd=root, check=True)
-    phone_fixture = Path(r"C:\Users\27795\Downloads\bluetooth-wave-work\build\watch-sync-frames.txt")
-    if phone_fixture.exists():
-        subprocess.run([exe, str(phone_fixture)], cwd=root, check=True)
+    phone_fixture = os.environ.get("WATCH_SYNC_FRAMES_FIXTURE")
+    if phone_fixture:
+        subprocess.run([exe, str(Path(phone_fixture).resolve())], cwd=root, check=True)
     weather_exe = str(Path(out) / "weather.exe")
     subprocess.run([gcc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror", "-Iapplication",
                     "tests/clock/weather_harness.c", "application/app_weather.c", "-o", weather_exe], cwd=root, check=True)

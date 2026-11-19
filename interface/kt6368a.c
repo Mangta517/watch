@@ -31,6 +31,7 @@ typedef struct
     volatile uint8_t rx_have_byte;
     volatile uint8_t rx_loss_pending; /* 此前发生过队列丢字节或接收错误；空队列也要上报LOSS边界。 */
     volatile uint8_t powered;
+    uint8_t boot_ready;
     uint32_t power_on_tick;
 } kt6368a_t;
 
@@ -134,6 +135,8 @@ uint16_t kt6368a_read_timed(uint8_t *data, uint16_t size, kt6368a_rx_info_struct
     mask = __get_PRIMASK();
     /* 短临界区读取队列状态，防止ISR在判断head/tail之间插入新字节。 */
     __disable_irq();
+    info->dropped = ble.rx_dropped;
+    info->errors = ble.rx_errors;
     if (ble.rx_tail == ble.rx_head)
     {
         /* 队列为空：上报最近一次UART活动时刻，供调用方计算空闲超时。 */
@@ -242,6 +245,7 @@ void kt6368a_power_off(void)
     uint32_t mask = __get_PRIMASK();
     /* 清供电标志后，发送接口据此返回BUSY；read/read_timed仍返回已读字节数。 */
     ble.powered = 0;
+    ble.boot_ready = 0;
     __disable_irq();
     if (s_tx_state == 1)
     {
@@ -267,7 +271,10 @@ void kt6368a_power_off(void)
     /* 模拟模式断开复用功能，避免经引脚向已断电模块反向供电。 */
     gpio.Mode = GPIO_MODE_ANALOG;
     gpio.Pull = GPIO_NOPULL;
+    mask = __get_PRIMASK();
+    __disable_irq();
     HAL_GPIO_Init(GPIOA, &gpio);
+    __set_PRIMASK(mask);
     /* 拉低BL1551B使能脚，切断模块供电。 */
     HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_RESET);
     /* 丢弃断电前残留的接收数据。 */
@@ -281,6 +288,7 @@ static HAL_StatusTypeDef kt6368a_power_enable(void)
     GPIO_InitTypeDef gpio = {0};
     /* 保存HAL_UART_Init/Receive_IT的返回状态。 */
     HAL_StatusTypeDef status;
+    uint32_t mask;
     if (ble.powered)
     {
         /* 已上电则直接成功，不重复初始化外设。 */
@@ -308,7 +316,7 @@ static HAL_StatusTypeDef kt6368a_power_enable(void)
 #if !defined(F411_BOOTLOADER)
     if (s_rx_callback != NULL)
     {
-        /* MSP初始化把USART1设为0；通知任务前改为12，满足FreeRTOS的ISR优先级约束。 */
+        /* 与MSP初始化统一使用12，满足FreeRTOS的ISR优先级约束。 */
         HAL_NVIC_SetPriority(USART1_IRQn, 12, 0);
     }
 #endif
@@ -322,7 +330,10 @@ static HAL_StatusTypeDef kt6368a_power_enable(void)
     gpio.Pull = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     gpio.Alternate = GPIO_AF7_USART1;
+    mask = __get_PRIMASK();
+    __disable_irq();
     HAL_GPIO_Init(GPIOA, &gpio);
+    __set_PRIMASK(mask);
     /* 清除可能残留的溢出错误标志，避免刚开接收就进错误回调。 */
     __HAL_UART_CLEAR_OREFLAG(&huart1);
     /* 清空断电期间/引脚切换期间可能收到的无效数据。 */
@@ -359,6 +370,7 @@ HAL_StatusTypeDef kt6368a_power_on(void)
     {
         /* 上电成功后再等模块启动完成，之后才允许发AT命令。 */
         HAL_Delay(KT6368A_BOOT_DELAY_MS);
+        ble.boot_ready = 1;
     }
     /* 返回上电结果；失败时不额外延时。 */
     return status;
@@ -372,8 +384,7 @@ HAL_StatusTypeDef kt6368a_write(const uint8_t *data, uint16_t size, uint32_t tim
         /* 空指针、空数据或超过单次上限：直接返回错误。 */
         return HAL_ERROR;
     }
-    if (s_tx_state == 1 || s_start.phase != KT_START_OFF || !ble.powered ||
-        ((uint32_t)(HAL_GetTick() - ble.power_on_tick) < KT6368A_BOOT_DELAY_MS))
+    if (s_tx_state != 0 || s_start.phase != KT_START_OFF || !ble.powered || ble.boot_ready == 0)
     {
         /* 有异步发送在途、启动状态机占用UART、未供电或模块仍在启动等待期，均视为忙。 */
         return HAL_BUSY;
@@ -392,8 +403,7 @@ HAL_StatusTypeDef kt6368a_write_async(const uint8_t *data, uint16_t size, uint32
         /* 参数非法或没有超时值：返回错误，不启动发送。 */
         return HAL_ERROR;
     }
-    if (s_tx_state != 0 || s_start.phase != KT_START_OFF || !ble.powered ||
-        (uint32_t)(HAL_GetTick() - ble.power_on_tick) < KT6368A_BOOT_DELAY_MS)
+    if (s_tx_state != 0 || s_start.phase != KT_START_OFF || !ble.powered || ble.boot_ready == 0)
     {
         /* 发送中/结果未取、启动状态机占用、未供电或模块启动未完成：返回忙。 */
         return HAL_BUSY;
@@ -429,6 +439,10 @@ uint8_t kt6368a_take_tx_result(HAL_StatusTypeDef *result)
     uint32_t mask = __get_PRIMASK();
     /* 1表示本次已取到结果，0表示尚无结果。 */
     uint8_t ready = 0;
+    if (result == NULL)
+    {
+        return 0;
+    }
     __disable_irq();
     /* 只中止TX，保持原RX接收；保护完成中断与超时判定的交接。 */
     if (s_tx_state == 1 && (uint32_t)(now - s_tx_started_ms) >= s_tx_timeout_ms)
@@ -868,7 +882,8 @@ HAL_StatusTypeDef kt6368a_init_service(void)
     {
         if ((uint32_t)(now - ble.power_on_tick) >= KT6368A_BOOT_DELAY_MS)
         {
-            /* 上电已满启动等待时间：可以开始发AT查询。 */
+            /* 锁存启动状态，避免长时间运行后tick回绕重复等待。 */
+            ble.boot_ready = 1;
             s_start.phase = KT_START_QUERY;
         }
         /* 等待期间对调用方仍表示初始化进行中。 */

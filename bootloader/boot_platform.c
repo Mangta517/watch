@@ -1,6 +1,31 @@
 #include "main.h"
 #include "boot_platform.h"
 
+void NMI_Handler(void)
+{
+    NVIC_SystemReset();
+}
+
+void HardFault_Handler(void)
+{
+    NVIC_SystemReset();
+}
+
+void MemManage_Handler(void)
+{
+    NVIC_SystemReset();
+}
+
+void BusFault_Handler(void)
+{
+    NVIC_SystemReset();
+}
+
+void UsageFault_Handler(void)
+{
+    NVIC_SystemReset();
+}
+
 /* 主引导与独立保底共用的板级起步例程：保电、屏蔽外部看门狗、内部 HSI 时钟，
  * 以及把 CPU 完整交接到目标镜像复位入口的跳转流程。跳转前先清理本程序启用
  * 的中断与 SysTick，避免切到目标向量后仍跑在旧调度上。 */
@@ -21,8 +46,8 @@ void boot_platform_gpio_init(void)
     gpio.Pin = POWER_EN_Pin;
     /* PA3 设为推挽输出，用来驱动电源使能。 */
     gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    /* 输出脚内部下拉，未驱动时保持低电平。 */
-    gpio.Pull = GPIO_PULLDOWN;
+    /* 推挽驱动高电平维持自锁，关闭内部下拉以免持续分流。 */
+    gpio.Pull = GPIO_NOPULL;
     /* 电源使能是静态电平，低速档即可。 */
     gpio.Speed = GPIO_SPEED_FREQ_LOW;
     /* 按以上字段初始化 PA3。 */
@@ -64,7 +89,7 @@ void boot_platform_gpio_init(void)
 
 /* 引导阶段用内部 HSI 作 PLL 源（不依赖外部 HSE）：
  * 16MHz/8×100/2 = 100MHz 系统时钟，APB1 二分频，Flash 3 等待周期。
- * APP 运行时会自行重配为 64MHz，这里只为引导/保底提供一个确定时钟。 */
+ * APP 运行时会自行重配为 84MHz，这里只为引导/保底提供一个确定时钟。 */
 void boot_platform_clock_init(void)
 {
     /* 振荡器配置模板，先清零再逐项填写 HSI 与 PLL 参数。 */
@@ -135,6 +160,8 @@ __asm void boot_jump(uint32_t stack, uint32_t reset)
  * 向量有效并自行反初始化它额外启用的 UART/DMA。 */
 void boot_platform_jump(uint32_t address)
 {
+    RCC_ClkInitTypeDef clock = {0};
+    RCC_OscInitTypeDef oscillator = {0};
     /* 取目标向量表第 0 个字，作为目标镜像的初始主栈指针 MSP。 */
     uint32_t stack = *(volatile uint32_t *)address;
     /* 取目标向量表第 1 个字，作为目标镜像的复位处理函数入口。 */
@@ -142,9 +169,23 @@ void boot_platform_jump(uint32_t address)
     /* NVIC 使能/挂起寄存器的循环下标，共 8 组，覆盖全部中断线。 */
     uint32_t i;
 
-    /* 保留PA3供电，不调用会复位GPIO的HAL_DeInit。 */
-    /* 复位 HAL 维护的 RCC 状态，但不反初始化 GPIO，PA3 供电保持。 */
-    (void)HAL_RCC_DeInit();
+    /* 先切回16MHz HSI，再关闭PLL，目标镜像启动时可重新配置PLL。 */
+    clock.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clock.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+    clock.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    clock.APB1CLKDivider = RCC_HCLK_DIV1;
+    clock.APB2CLKDivider = RCC_HCLK_DIV1;
+    if (HAL_RCC_ClockConfig(&clock, FLASH_LATENCY_0) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    /* 仅关闭主PLL，保留PA3供电、RTC备份域和RCC复位标志，供APP读取。 */
+    oscillator.OscillatorType = RCC_OSCILLATORTYPE_NONE;
+    oscillator.PLL.PLLState = RCC_PLL_OFF;
+    if (HAL_RCC_OscConfig(&oscillator) != HAL_OK)
+    {
+        Error_Handler();
+    }
     /* 屏蔽可屏蔽中断，停止 SysTick 并清除 NVIC 使能/挂起及 PendSV 挂起，
      * 减少旧中断状态被带入目标镜像。 */
     /* 先关全局可屏蔽中断，避免清理过程中被中断打断。 */
@@ -167,6 +208,9 @@ void boot_platform_jump(uint32_t address)
     /* 关闭指令缓存并复位其状态，使目标镜像从 Flash 重新取指。 */
     __HAL_FLASH_INSTRUCTION_CACHE_DISABLE();
     __HAL_FLASH_INSTRUCTION_CACHE_RESET();
+    __HAL_FLASH_DATA_CACHE_DISABLE();
+    __HAL_FLASH_DATA_CACHE_RESET();
+    __HAL_FLASH_PREFETCH_BUFFER_DISABLE();
     /* 设置目标向量表基址，并用 DSB/ISB 同步该更新；随后通过目标复位地址跳转。 */
     /* 把 VTOR 指向目标镜像的向量表起址。 */
     SCB->VTOR = address;

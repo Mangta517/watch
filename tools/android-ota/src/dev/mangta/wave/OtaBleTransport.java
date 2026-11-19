@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
+import android.os.Build;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
 import java.util.ArrayDeque;
@@ -237,7 +238,14 @@ public final class OtaBleTransport implements OtaUpgrade.Connection
         BluetoothGatt created;
         try
         {
-            created = device.connectGatt(context, false, callback);
+            if (Build.VERSION.SDK_INT >= 23)
+            {
+                created = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE);
+            }
+            else
+            {
+                created = device.connectGatt(context, false, callback);
+            }
         }
         catch (SecurityException failure)
         {

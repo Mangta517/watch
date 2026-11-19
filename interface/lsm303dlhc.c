@@ -1,6 +1,6 @@
 /**
  * @file lsm303dlhc.c
- * @brief 仅启用磁力计：75Hz、±1.3gauss、温度关闭，连续转换。
+ * @brief 独立指南针：磁场±1.3gauss，加速度25Hz/±4g/HR/BDU，页外休眠。
  *        SENSOR 总线运行时由 sensor 任务串行访问，ISR 不操作总线。
  *        手册：https://www.st.com/resource/en/datasheet/lsm303dlhc.pdf
  */
@@ -40,7 +40,7 @@ static struct
     /* 阶段起点、故障起点、最近有效帧、进入休眠时刻，单位 ms。 */
     uint32_t phase_ms, fault_ms, sample_ms, sleep_ms;
     /* 当前阶段、连续读失败数、无新数据标志、休眠标志。 */
-    uint8_t phase, faults, no_data, sleeping;
+    uint8_t phase, faults, no_data, sleeping, discard;
 } mag_recovery;
 
 void lsm303dlhc_mag_recover_begin(void)
@@ -54,6 +54,7 @@ void lsm303dlhc_mag_recover_begin(void)
     mag_recovery.faults = 0;
     mag_recovery.no_data = 0;
     mag_recovery.sleeping = 0;
+    mag_recovery.discard = 0;
     /* 记录阶段起点，供失败后退避计时使用。 */
     mag_recovery.phase_ms = HAL_GetTick();
 }
@@ -90,8 +91,9 @@ uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
     if (s_ready != 0)
     {
         /* 长时间无新数据或连续读失败且已过 1s，都触发重新配置。 */
-        if ((mag_recovery.no_data != 0 && (uint32_t)(now_ms - mag_recovery.sample_ms) >= MAG_SAMPLE_TIMEOUT_MS) ||
-            (mag_recovery.faults >= 3 && (uint32_t)(now_ms - mag_recovery.fault_ms) >= 1000))
+        if (mag_recovery.sleeping == 0 &&
+            ((mag_recovery.no_data != 0 && (uint32_t)(now_ms - mag_recovery.sample_ms) >= MAG_SAMPLE_TIMEOUT_MS) ||
+             (mag_recovery.faults >= 3 && (uint32_t)(now_ms - mag_recovery.fault_ms) >= 1000)))
         {
             lsm303dlhc_mag_recover_begin();
             return 2;
@@ -159,6 +161,15 @@ uint8_t lsm303dlhc_mag_set_sleep(uint8_t sleeping)
     uint8_t mode = 0;
     /* 当前时刻、本次休眠持续时长，单位 ms。 */
     uint32_t now_ms, elapsed_ms;
+    sleeping = sleeping != 0;
+    if (s_ready == 0)
+    {
+        return 1;
+    }
+    if (mag_recovery.sleeping == sleeping)
+    {
+        return 0;
+    }
     /* 请求休眠时把模式值改为 0x03。 */
     if (sleeping != 0)
     {
@@ -189,6 +200,7 @@ uint8_t lsm303dlhc_mag_set_sleep(uint8_t sleeping)
             mag_recovery.fault_ms += elapsed_ms;
         }
         mag_recovery.sleeping = 0;
+        mag_recovery.discard = 1;
     }
     return 0;
 }
@@ -246,7 +258,7 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
     float sensitivity;
 
     /* 未就绪或输出指针为空时直接返回错误。 */
-    if (!s_ready || mag == NULL)
+    if (!s_ready || mag_recovery.sleeping != 0 || mag == NULL)
     {
         return LSM303DLHC_MAG_ERROR;
     }
@@ -304,10 +316,149 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
         /* 原始值乘 100 再除灵敏度，得到以 uT 为单位的磁场值。 */
         sample.field_uT[i] = sample.raw[i] * 100.0f / sensitivity;
     }
+    if (mag_recovery.discard != 0)
+    {
+        mag_recovery.discard = 0;
+        return LSM303DLHC_MAG_NOT_READY;
+    }
     /* 只有整帧读取和转换成功才发布，失败时保留调用方的上一帧。 */
     mag_recovery.faults = 0;
     mag_recovery.no_data = 0;
     mag_recovery.sample_ms = HAL_GetTick();
     *mag = sample;
+    return LSM303DLHC_MAG_OK;
+}
+
+static struct
+{
+    uint32_t sample_ms, retry_ms, wake_ms;
+    uint8_t phase, ready, sleeping, faults, discard;
+} s_accel;
+
+void lsm303dlhc_accel_recover_begin(void)
+{
+    s_accel.phase = 0;
+    s_accel.ready = 0;
+    s_accel.sleeping = 1;
+    s_accel.faults = 0;
+    s_accel.retry_ms = HAL_GetTick();
+}
+
+uint8_t lsm303dlhc_accel_recover_step(uint32_t now_ms)
+{
+    static const uint8_t regs[] = {0x20, 0x23};
+    /* 先关闭转换，再配置BDU/±4g/HR；唤醒由set_sleep显式完成。 */
+    static const uint8_t values[] = {0x00, 0x98};
+    if (s_accel.ready != 0)
+    {
+        if (s_accel.sleeping == 0 &&
+            (s_accel.faults >= 3 || (uint32_t)(now_ms - s_accel.sample_ms) >= 1000))
+        {
+            lsm303dlhc_accel_recover_begin();
+            return 2;
+        }
+        return 0;
+    }
+    if (s_accel.phase == 2)
+    {
+        if ((uint32_t)(now_ms - s_accel.retry_ms) < 1000)
+        {
+            return 1;
+        }
+        lsm303dlhc_accel_recover_begin();
+    }
+    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_ACCEL_ADDR, regs[s_accel.phase], &values[s_accel.phase], 1) != 0)
+    {
+        s_accel.phase = 2;
+        s_accel.retry_ms = now_ms;
+        return 1;
+    }
+    if (++s_accel.phase == 2)
+    {
+        s_accel.ready = 1;
+        s_accel.sample_ms = now_ms;
+        return 0;
+    }
+    return 2;
+}
+
+uint8_t lsm303dlhc_accel_set_sleep(uint8_t sleeping)
+{
+    uint8_t config = 0x37; /* 25Hz，XYZ启用，普通功耗高分辨率。 */
+    sleeping = sleeping != 0;
+    if (s_accel.ready == 0)
+    {
+        return 1;
+    }
+    if (s_accel.sleeping == sleeping)
+    {
+        return 0;
+    }
+    if (sleeping != 0)
+    {
+        config = 0;
+    }
+    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_ACCEL_ADDR, 0x20, &config, 1) != 0)
+    {
+        lsm303dlhc_accel_recover_begin();
+        return 1;
+    }
+    s_accel.sleeping = sleeping;
+    s_accel.sample_ms = HAL_GetTick();
+    s_accel.wake_ms = s_accel.sample_ms;
+    s_accel.discard = 1;
+    return 0;
+}
+
+lsm303dlhc_mag_result lsm303dlhc_accel_read(Accel_struct *accel)
+{
+    uint8_t status, bytes[6], axis;
+    int32_t counts[3], value;
+    if (accel == NULL || s_accel.ready == 0 || s_accel.sleeping != 0)
+    {
+        return LSM303DLHC_MAG_ERROR;
+    }
+    if (my_i2c_read_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_ACCEL_ADDR, 0x27, &status, 1) != 0)
+    {
+        ++s_accel.faults;
+        return LSM303DLHC_MAG_ERROR;
+    }
+    if ((status & 0x08) == 0)
+    {
+        return LSM303DLHC_MAG_NOT_READY;
+    }
+    /* 加速度连续读取必须设置SUB(7)，磁场寄存器不使用这个位。 */
+    if (my_i2c_read_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_ACCEL_ADDR, 0xA8, bytes, 6) != 0)
+    {
+        ++s_accel.faults;
+        return LSM303DLHC_MAG_ERROR;
+    }
+    s_accel.faults = 0;
+    /* HR滤波器唤醒需7/ODR=280ms；持续排空BDU，首个完整读不作为新样本。 */
+    if (s_accel.discard != 0 || (uint32_t)(HAL_GetTick() - s_accel.wake_ms) < 280)
+    {
+        s_accel.discard = 0;
+        return LSM303DLHC_MAG_NOT_READY;
+    }
+    for (axis = 0; axis < 3; ++axis)
+    {
+        value = (int16_t)((uint16_t)bytes[axis * 2] | ((uint16_t)bytes[axis * 2 + 1] << 8));
+        /* HR输出左对齐12位，±4g为2mg/LSB；换算到公共加速度单位。 */
+        value = value / 16 * MPU6050_ACCEL_LSB_PER_G / 500;
+        if (value > INT16_MAX)
+        {
+            value = INT16_MAX;
+        }
+        if (value < INT16_MIN)
+        {
+            value = INT16_MIN;
+        }
+        counts[axis] = value;
+    }
+    accel->Accel_x = (int16_t)counts[0];
+    accel->Accel_y = (int16_t)counts[1];
+    accel->Accel_z = (int16_t)counts[2];
+    s_accel.faults = 0;
+    s_accel.sample_ms = HAL_GetTick();
     return LSM303DLHC_MAG_OK;
 }

@@ -51,6 +51,17 @@ static void boot_dma_init(void)
     HAL_NVIC_EnableIRQ(DMA2_Stream5_IRQn);
 }
 
+static void recovery_stop_io(void)
+{
+    (void)int_bootloader_stop();
+    (void)HAL_UART_DeInit(&huart1);
+    HAL_NVIC_DisableIRQ(DMA2_Stream5_IRQn);
+    (void)HAL_DMA_DeInit(&hdma_usart1_rx);
+    HAL_NVIC_ClearPendingIRQ(DMA2_Stream5_IRQn);
+    __HAL_RCC_DMA2_CLK_DISABLE();
+    HAL_GPIO_WritePin(BLE_EN_GPIO_Port, BLE_EN_Pin, GPIO_PIN_RESET);
+}
+
 /* 升级成功后尝试跳转 APP，APP向量与EEPROM有效标志检查不通过则返回；
  * 跳转前先停 DMA、反初始化 UART/DMA 释放本程序启用的外设，再交给
  * boot_platform_jump 关其余中断并搬 MSP 后 BX 到 APP 复位入口。 */
@@ -62,12 +73,7 @@ void int_bootloader_jump_to_app(void)
         /* APP不满足启动条件，返回调用方，由其按跳转失败处理。 */
         return;
     }
-    /* 停止本程序启动的 UART 接收与 DMA 传输。 */
-    int_bootloader_stop();
-    /* 反初始化 USART1，撤销本程序对外设的配置。 */
-    (void)HAL_UART_DeInit(&huart1);
-    /* 反初始化 DMA2_Stream5，释放接收通道。 */
-    (void)HAL_DMA_DeInit(&hdma_usart1_rx);
+    recovery_stop_io();
     /* 切换到 APP 向量表并跳到 APP 复位入口，不再返回。 */
     boot_platform_jump(APP_START_ADDR);
 }
@@ -105,6 +111,18 @@ int main(void)
     {
         /* 每轮检查 DMA 进度、解析帧并按需写 Flash。 */
         app_bootloader_work();
+        if (app_bootloader_idle_expired() != 0)
+        {
+            int_bootloader_jump_to_app();
+            recovery_stop_io();
+            /* 无已确认APP可跳转时释放自锁，等待用户重新上电。 */
+            HAL_GPIO_WritePin(POWER_EN_GPIO_Port, POWER_EN_Pin, GPIO_PIN_RESET);
+            HAL_SuspendTick();
+            for (;;)
+            {
+                __WFI();
+            }
+        }
     }
 }
 

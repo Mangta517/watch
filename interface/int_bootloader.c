@@ -117,7 +117,7 @@ uint8_t int_bootloader_erase(uint32_t length)
     HAL_StatusTypeDef status;
 
     /* 长度不足以容纳向量表或超过APP区上限，直接判为参数错误。 */
-    if (length < sizeof(app_vectors) || length > APP_MAX_SIZE)
+    if (length < BOOT_APP_MIN_SIZE || length > APP_MAX_SIZE || (PWR->CSR & PWR_CSR_PVDO) != 0)
     {
         return 1;
     }
@@ -148,7 +148,14 @@ uint8_t int_bootloader_erase(uint32_t length)
     __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
                            FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
     /* 执行扇区擦除。 */
-    status = HAL_FLASHEx_Erase(&erase, &sector_error);
+    if ((PWR->CSR & PWR_CSR_PVDO) != 0)
+    {
+        status = HAL_ERROR;
+    }
+    else
+    {
+        status = HAL_FLASHEx_Erase(&erase, &sector_error);
+    }
     /* 无论擦除结果如何都要加锁；加锁失败同样记为失败。 */
     if (HAL_FLASH_Lock() != HAL_OK)
     {
@@ -218,7 +225,7 @@ uint8_t bootloader_start_dma(uint32_t length)
     /* HAL启动DMA接收的返回状态。 */
     HAL_StatusTypeDef status;
     /* 长度不足以容纳向量表或超过APP区上限，直接判为参数错误。 */
-    if (length < sizeof(app_vectors) || length > APP_MAX_SIZE)
+    if (length < BOOT_APP_MIN_SIZE || length > APP_MAX_SIZE)
     {
         return 1;
     }
@@ -309,7 +316,7 @@ static uint8_t int_bootloader_program(uint32_t offset, uint16_t value)
     /* 把APP区偏移换算成实际Flash地址。 */
     uint32_t address = APP_START_ADDR + offset;
     /* 偏移超出APP区或剩余空间不足一个半字，拒绝编程。 */
-    if (offset >= APP_MAX_SIZE || APP_MAX_SIZE - offset < 2)
+    if (offset >= APP_MAX_SIZE || APP_MAX_SIZE - offset < 2 || (PWR->CSR & PWR_CSR_PVDO) != 0)
     {
         return 1;
     }
@@ -382,7 +389,7 @@ static uint8_t int_bootloader_write(const uint8_t *data, uint16_t size)
 uint8_t int_bootloader_process(void)
 {
     /* 本次最多搬运512字节到栈上工作区，再交给写入函数。 */
-    uint8_t work[BOOTLOADER_WORK_SIZE];
+    static uint8_t work[BOOTLOADER_WORK_SIZE]; /* 保底主循环独占，避免占用异常栈。 */
     /* DMA累计已接收的绝对字节数。 */
     uint32_t received;
     /* 本次调用的毫秒时刻，供空闲与超时判断复用。 */
@@ -497,8 +504,8 @@ uint8_t int_bootloader_process(void)
 static uint8_t int_bootloader_vectors_valid(uint32_t stack, uint32_t reset, uint32_t end)
 {
     /* 栈顶需落在SRAM 0x20000000～0x20020000内且8字节对齐；复位向量需为Thumb地址并落在APP区。 */
-    return (stack > 0x20000000 && stack <= 0x20020000 && (stack & 7) == 0 &&
-            (reset & 1) != 0 && (reset & ~1U) >= APP_START_ADDR + 8 && (reset & ~1U) < end);
+    return stack >= BOOT_APP_MIN_MSP && stack <= BOOT_SRAM_END && (stack & 7) == 0 &&
+           (reset & 1) != 0 && (reset & ~1U) >= APP_START_ADDR + BOOT_VECTOR_BYTES && (reset & ~1U) < end;
 }
 
 uint8_t int_bootloader_app_is_valid(void)

@@ -10,6 +10,8 @@ import java.util.zip.CRC32;
 public final class OtaProtocol
 {
     public static final int MAX_IMAGE = 0x50000;
+    private static final int VECTOR_BYTES = 0x198;
+    private static final long APP_START = 0x08010000L;
     public static final String LAYOUT = "OTA,LAYOUT,08010000,00050000";
 
     /** OTA,INFO查询结果：保底布局或正在重启。普通APP以读超时表示。 */
@@ -56,14 +58,14 @@ public final class OtaProtocol
 
     public static String command(byte[] image) throws IOException
     {
-        if (image.length < 8 || image.length > MAX_IMAGE)
+        if (image.length < VECTOR_BYTES + 2 || image.length > MAX_IMAGE)
         {
-            throw new IOException("BIN长度必须为8～327680字节");
+            throw new IOException("BIN长度必须为410～327680字节");
         }
         long stack = word(image, 0);
         long reset = word(image, 4);
-        if (stack <= 0x20000000L || stack > 0x20020000L || (stack & 7) != 0 ||
-            (reset & 1) == 0 || (reset & ~1L) < 0x08010008L || (reset & ~1L) >= 0x08010000L + image.length)
+        if (stack < 0x20000400L || stack > 0x20020000L || (stack & 7) != 0 ||
+            (reset & 1) == 0 || (reset & ~1L) < APP_START + VECTOR_BYTES || (reset & ~1L) >= APP_START + image.length)
         {
             throw new IOException("请选择链接到0x08010000的升级APP BIN，不能使用普通APP/HEX/AXF");
         }

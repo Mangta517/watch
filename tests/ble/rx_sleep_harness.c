@@ -124,6 +124,7 @@ static void reset_receiver(void)
     wait_race = wake_key_active = 0;
     ble.powered = 1;
     s_lvgl_task_handle = &notifications;
+    s_lvgl_irq_ready = 1;
     s_power_state = APP_POWER_IDLE | APP_POWER_SCREEN_OFF;
     s_start.phase = KT_START_OFF;
     kt6368a_set_rx_callback(app_bluetooth_rx_from_isr);

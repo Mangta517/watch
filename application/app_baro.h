@@ -20,6 +20,7 @@ extern "C"
 #include <stdint.h>
 
 #define APP_BARO_HISTORY_POINTS    24      /* 高度柱状历史点数，最旧在左 */
+#define APP_BARO_SAMPLE_PERIOD_MS 300000   /* 常规测量每5分钟一帧。 */
 #define APP_BARO_HISTORY_PERIOD_MS 600000  /* 每柱间隔，毫秒(10分钟) */
 #define APP_BARO_HISTORY_NONE      INT16_MIN /* 缺测柱标记：该十分钟没有有效读数 */
 

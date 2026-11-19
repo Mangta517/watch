@@ -1,7 +1,7 @@
 /**
  * @file app_battery_log.h
  * @brief 每分钟追加一条滤波电压；追加与扫描由sensor在锁内更新，LVGL经带锁接口导出。
- *        日志区为内部Flash sector 7 (0x08060000起，16384条8字节记录)，只能整扇区擦除，
+ *        日志区为内部Flash sector 7，电压120KiB、步数8KiB，保留旧128KiB日志导出，只能整扇区擦除，
  *        因此记录只追加；显式清空由LVGL取得同一日志锁后执行并重启。
  */
 #ifndef APP_BATTERY_LOG_H
@@ -28,6 +28,8 @@ typedef struct
     uint32_t slots;   /* 已占用槽数(含掉电坏槽)，等于下一条写入位置。 */
     uint32_t samples; /* 扫描/写盘累计的有效分钟电压条数。 */
     uint32_t resets;  /* 完整复位现场组数(每组17槽)。 */
+    uint32_t capacity; /* 新布局15360槽；旧日志已进入尾部时保持16384槽可导出。 */
+    uint16_t step_slots, step_capacity; /* 0容量表示尚未启用步数持久化分区。 */
     app_battery_log_state state;
 } app_battery_log_status_struct;
 
@@ -41,6 +43,9 @@ typedef struct
 void app_battery_log_init(void);
 /* 仅sensor任务循环调用：跨入新分钟且电压有效时追加，开机后首次符合条件时保存复位现场。 */
 void app_battery_log_service(uint32_t seconds);
+/* sensor在初始化后读取当日记录，每轮更新RAM值；新增100步且间隔5分钟才追加，换日立即提交。 */
+void app_battery_log_steps_load(uint16_t *day, uint32_t *steps);
+void app_battery_log_steps_update(uint16_t day, uint32_t steps, uint32_t now_ms);
 /* 0=已取得状态快照，1=互斥锁忙。 */
 uint8_t app_battery_log_get_status(app_battery_log_status_struct *status);
 /* 0=读取成功，1=坏槽/越界，2=互斥锁忙；忙时导出不得跳过此槽。
@@ -48,7 +53,7 @@ uint8_t app_battery_log_get_status(app_battery_log_status_struct *status);
 uint8_t app_battery_log_read(uint32_t slot, uint32_t session, app_battery_log_record_struct *record);
 /* 0=已取得读取结果，1=日志锁忙/未初始化；complete=1时info为完整现场，0表示无完整记录。 */
 uint8_t app_battery_log_read_reset(uint32_t slot, uint32_t session, app_reset_info_struct *info, uint8_t *complete);
-/* LVGL显式清空电压与复位历史：屏蔽TPS3823、仅擦sector 7，成功失败均重启。 */
+/* LVGL显式清空电压与复位历史，启用TPS3823、擦sector 7并写回当前步数，随后重启。 */
 void app_battery_log_clear_and_reset(void);
 
 #endif

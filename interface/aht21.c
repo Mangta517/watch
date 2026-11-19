@@ -9,7 +9,7 @@
 
 #define AHT21_STATUS_BUSY       0x80
 #define AHT21_STATUS_CALIBRATED 0x08
-/* 熄屏每100ms才推进一拍，五个恢复阶段及调度余量须落在1.6s环境窗口内。 */
+/* 熄屏每100ms推进一拍，复位和校准阶段仍须落在1.6s环境窗口内。 */
 #define AHT21_RECOVERY_TIMEOUT_MS 1000
 
 /* 0x71 是读地址字节，不是寄存器号；不能使用先写寄存器的 read_bytes。 */
@@ -47,7 +47,10 @@ static aht21_result aht21_read_bytes(uint8_t *data, uint8_t size)
         }
     }
     /* 发送停止条件，结束本次读事务并释放总线。 */
-    my_i2c_stop(MY_I2C_BUS_SENSOR);
+    if (my_i2c_stop(MY_I2C_BUS_SENSOR) != 0)
+    {
+        return AHT21_I2C_ERROR;
+    }
     return AHT21_OK;
 }
 
@@ -174,14 +177,23 @@ aht21_result aht21_recover_step(uint32_t now_ms)
     {
         result = AHT21_TIMEOUT;
     }
-    /* 第一阶段：上电等待，满 40ms 才允许访问器件。 */
     else if (aht_recovery.phase == AHT_RECOVER_WAIT_POWER)
     {
-        /* 阶段计时达到 40ms 后推进到状态检查阶段。 */
-        if ((uint32_t)(now_ms - aht_recovery.phase_ms) >= 40)
+        if ((uint32_t)(now_ms - aht_recovery.phase_ms) < 40)
         {
-            aht_recovery.phase = AHT_RECOVER_STATUS;
+            return AHT21_BUSY;
         }
+        /* 退出遗留的BUSY或失步状态，复位后分步等待再读状态。 */
+        if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, AHT21_ADDR, 0xBA, NULL, 0) == 0)
+        {
+            aht_recovery.phase_ms = HAL_GetTick();
+            aht_recovery.phase = AHT_RECOVER_STATUS;
+            return AHT21_BUSY;
+        }
+        result = AHT21_I2C_ERROR;
+    }
+    else if (aht_recovery.phase == AHT_RECOVER_STATUS && (uint32_t)(now_ms - aht_recovery.phase_ms) < 20)
+    {
         return AHT21_BUSY;
     }
     /* 配置阶段：写校准使能命令，成功后进入写后等待。 */

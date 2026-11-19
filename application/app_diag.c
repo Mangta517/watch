@@ -196,8 +196,16 @@ void app_diag_task_begin(uint8_t id)
     /* 只有已经有过上一轮起点时才能算出周期。 */
     if (stats->have_start != 0)
     {
-        /* 两次起点的100us计数差乘以100换算成us，无符号减法可跨回绕。 */
-        period = (now - stats->started) * 100;
+        /* 差值按100us计数；饱和后再转微秒，避免长间隔乘法回绕。 */
+        period = now - stats->started;
+        if (period > UINT32_MAX / 100)
+        {
+            period = UINT32_MAX;
+        }
+        else
+        {
+            period *= 100;
+        }
         /* 保存最近一次循环周期。 */
         stats->period_last = period;
         /* 首次统计时period_min还是0，直接采用本次；之后取更小值。 */
@@ -414,7 +422,7 @@ uint8_t app_diag_take_imu_calibration(void)
 }
 
 /* LVGL把串口字节按行喂进来，支持 DIAG,0 / DIAG,1 / IMU,CAL，行尾 CR 或 LF 都算结束：
- * DIAG,1 会重置轮内行号(s_row)并强制重新采样；IMU,CAL 只置请求标志，校准由sensor任务消费后执行。 */
+ * DIAG,1 会重置轮内行号(s_row)并强制重新采样；旧版IMU,CAL由sensor任务消费后报告失败。 */
 void app_diag_receive(const uint8_t *data, uint16_t size)
 {
     /* 逐个字节处理本次收到的数据。 */
@@ -753,7 +761,7 @@ static void diag_put_u32(uint8_t *data, uint32_t value)
  * 5=IMU保存、6=MPU校准。frame[5]是该行对象在本类表中的ID（任务/传感器下标），
  * 不是全局行号；全局行号由s_row推进。整轮行号推进完后才回到第0行并重新采样；启动异步发送
  * 返回BUSY时保留行号和序号，下一拍重试同一行，HAL_OK则等回收结果后再计成败。 */
-void app_diag_service(void)
+void app_diag_service(uint8_t allow_tx)
 {
     /* 固定帧缓冲，异步发送期间必须保持内容不变。 */
     uint8_t *frame = s_tx_frame;
@@ -786,7 +794,7 @@ void app_diag_service(void)
         }
     }
     /* 未开启、蓝牙初始化未完成、发送忙或未到100ms间隔时本拍不发送。 */
-    if (s_enabled == 0 || kt6368a_init_is_pending() != 0 || kt6368a_tx_is_busy() != 0 ||
+    if (allow_tx == 0 || s_enabled == 0 || kt6368a_init_is_pending() != 0 || kt6368a_tx_is_busy() != 0 ||
         now - s_last_send_ms < APP_DIAG_FRAME_MS)
     {
         /* 直接返回，保留当前行号和快照，等待下一拍。 */
@@ -897,7 +905,7 @@ void app_diag_service(void)
     /* 追加CRC高字节，size此时为完整帧长。 */
     frame[size++] = (uint8_t)(crc >> 8);
     /* 启动异步发送，缓冲区在结果取走前不可改写。 */
-    status = kt6368a_write_async(frame, size, 10);
+    status = kt6368a_write_async(frame, size, 30);
     /* 驱动忙时本次不推进任何状态。 */
     if (status == HAL_BUSY)
     {

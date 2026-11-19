@@ -28,6 +28,7 @@ extern "C"
     typedef struct
     {
         uint32_t received_ms; /* UART实际到达的HAL tick；空队列时为最近活动时刻。 */
+        uint32_t dropped, errors; /* 与空队列检查同一时刻取得的累计计数。 */
         uint32_t sampled_ms;  /* 空队列的原子检查时刻，不用检查后推进的时间结算残帧。 */
         uint8_t flags;        /* 本块之前的真实空闲/丢字节边界。 */
     } kt6368a_rx_info_struct;

@@ -16,6 +16,7 @@ enum
 {
     BATLOG_NONE,
     BATLOG_STATUS,
+    BATLOG_STEPS,
     BATLOG_READ,
     BATLOG_CLEAR,
     BATLOG_STOP
@@ -38,13 +39,12 @@ void app_battery_log_ble_reset(void)
     s_ble.overflow = 0; /* 清掉上一帧的超长/非法字符标记。 */
     s_ble.command = BATLOG_NONE; /* 撤销尚未执行的命令。 */
     s_ble.streaming = 0; /* 结束READ流式导出状态。 */
-    s_ble.clear_wait = 0; /* 取消CLEAR回执后的等待重启。 */
     /* 异步TX缓冲必须保留到结果回收；pending=0时清长度，避免旧文本被当成本轮待发。 */
     if (s_ble.pending == 0)
     {
         s_ble.tx_length = 0;
+        s_ble.after_send = 0;
     }
-    s_ble.after_send = 0; /* 清除"本笔发送完成后要执行的动作"。 */
 }
 
 /* 分包到达的字节在此拼行：CR/LF成形，控制字符或超过23字符使整帧作废(overflow)，
@@ -69,10 +69,14 @@ void app_battery_log_ble_receive(const uint8_t *data, uint16_t size, uint32_t no
             /* 只接受一条未执行命令；CLEAR等待重启期间不再收新命令。 */
             if (s_ble.overflow == 0 && s_ble.command == BATLOG_NONE && s_ble.clear_wait == 0)
             {
-                /* 整行精确匹配四条命令之一，命中则记下待执行命令。 */
+                /* 整行精确匹配命令，命中则记下待执行命令。 */
                 if (strcmp(s_ble.line, "BATLOG,STATUS") == 0)
                 {
                     s_ble.command = BATLOG_STATUS;
+                }
+                else if (strcmp(s_ble.line, "BATLOG,STEPS") == 0)
+                {
+                    s_ble.command = BATLOG_STEPS;
                 }
                 else if (strcmp(s_ble.line, "BATLOG,READ") == 0)
                 {
@@ -142,12 +146,6 @@ uint8_t app_battery_log_ble_service(uint8_t ready, uint32_t now_ms)
         }
         s_ble.after_send = 0; /* 本次"发送后动作"已执行或无需执行，清空。 */
     }
-    /* 蓝牙未就绪时丢弃解析/命令状态，返回0表示本轮不占用发送。 */
-    if (ready == 0)
-    {
-        app_battery_log_ble_reset();
-        return 0;
-    }
     /* CLEAR 回执发出后等300ms再擦扇区重启，留出SPP把文本送完的时间。 */
     if (s_ble.clear_wait != 0)
     {
@@ -158,6 +156,11 @@ uint8_t app_battery_log_ble_service(uint8_t ready, uint32_t now_ms)
         }
         return 1; /* 等待期间继续占用蓝牙发送。 */
     }
+    if (ready == 0)
+    {
+        app_battery_log_ble_reset();
+        return 0;
+    }
     /* 无待发文本且有命令待处理时，先取日志状态并生成首行文本。 */
     if (s_ble.tx_length == 0 && s_ble.command != BATLOG_NONE)
     {
@@ -166,13 +169,23 @@ uint8_t app_battery_log_ble_service(uint8_t ready, uint32_t now_ms)
         {
             return 1;
         }
+        /* 保留导出请求，等扫描发布实际槽数后再生成BEGIN。 */
+        if (s_ble.command == BATLOG_READ && status.state == APP_BATTERY_LOG_STARTING)
+        {
+            return 0;
+        }
         s_ble.streaming = 0; /* 新命令默认不是流式导出，READ分支再单独置位。 */
         /* STATUS：输出有效样本数、已占槽数、容量和日志状态枚举值。 */
         if (s_ble.command == BATLOG_STATUS)
         {
             s_ble.tx_length = (uint16_t)snprintf(s_ble.tx, sizeof(s_ble.tx), "BATLOG,STATUS,%lu,%lu,%lu,%u\r\n",
                                                  (unsigned long)status.samples, (unsigned long)status.slots,
-                                                 (unsigned long)BATTERY_LOG_CAPACITY, (unsigned)status.state);
+                                                 (unsigned long)status.capacity, (unsigned)status.state);
+        }
+        else if (s_ble.command == BATLOG_STEPS)
+        {
+            s_ble.tx_length = (uint16_t)snprintf(s_ble.tx, sizeof(s_ble.tx), "BATLOG,STEPS,%u,%u\r\n",
+                                                 (unsigned)status.step_slots, (unsigned)status.step_capacity);
         }
         /* READ在日志区需要清空时直接回错误行，不进入导出。 */
         else if (s_ble.command == BATLOG_READ && status.state == APP_BATTERY_LOG_NEED_CLEAR)

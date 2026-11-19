@@ -33,15 +33,14 @@ void app_clock_reset_receive(void)
     parser.has_colon = 0;
 }
 
-/* 仅处理含冒号的帧：范围/格式非法记INVALID，合法才写RTC；无冒号帧忽略并保留上次结论，RTC写失败记RTC_ERROR。 */
+/* 只解析数字开头且包含冒号的候选帧，避免一般蓝牙文本覆盖校时结论。 */
 static void app_clock_finish(void)
 {
     /* i为帧内字节下标；part为当前字段序号(0时/1分/2秒)；digits为本段已收数字位数；value按段累计数值。 */
     uint8_t i, part = 0, digits = 0, value[3] = {0};
     /* 先给合法性一个初值：未溢出且帧长在3..8字符之间才可能继续校验。 */
     uint8_t valid = !parser.overflow && parser.length >= 3 && parser.length <= 8;
-    /* 没有冒号(含空行)的帧直接丢弃，不记INVALID，避免其他用途的文本干扰校时结论。 */
-    if (parser.has_colon)
+    if (parser.has_colon && parser.frame[0] >= '0' && parser.frame[0] <= '9')
     {
         /* 逐字节扫描在制帧；一旦valid被置0，循环条件不再成立并提前结束。 */
         for (i = 0; valid && i < parser.length; ++i)

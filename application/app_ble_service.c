@@ -3,7 +3,7 @@
  * @brief 显示任务串行执行的蓝牙业务协调；不依赖LVGL控件或页面状态。
  *
  * AT初始化仍由app_task推进；正常业务是唯一UART接收消费者。各解析器保留原协议，
- * 丢字节仅废弃残行，真实空闲边界和到达时间由驱动提供。ECO等待1000ms安静期，
+ * 丢字节仅废弃残行，真实空闲边界和到达时间由驱动提供。ECO未确认手机时等待1秒，合法校时后等待30秒安静期，
  * SPORT强制断电；各发送者的异步缓冲及完成结果仍由原发起者保有。
  */
 #include "app_ble_service.h"
@@ -26,7 +26,8 @@
 #define APP_BLE_READ_SIZE      64
 #define APP_BLE_RX_BUDGET      256
 #define APP_BLE_TX_TIMEOUT_MS  20
-#define APP_BLE_ECO_QUIET_MS   1000
+#define APP_BLE_ECO_QUIET_MS        1000
+#define APP_BLE_ECO_PHONE_QUIET_MS  30000
 
 /* LVGL当前直接使用1kHz FreeRTOS tick，与天气/校时的业务毫秒时基相同。 */
 static struct
@@ -74,8 +75,8 @@ static void app_ble_receive_frames(uint8_t sport_mode)
     char text[APP_BLE_READ_SIZE * 4];
     /* 本次实际读到的字节数、转出的文本长度、需要丢弃的旧文本数、下标、起点和剩余预算。 */
     uint16_t received, length, remove, i, start, budget = APP_BLE_RX_BUDGET;
-    /* 本轮业务毫秒时刻、HAL/RTOS零点偏移、驱动丢字节计数和UART错误计数。 */
-    uint32_t now_ms, tick_offset, dropped, errors;
+    /* 本轮业务毫秒时刻及HAL/RTOS零点偏移。 */
+    uint32_t now_ms, tick_offset;
     /* 队列已读空的标志。 */
     uint8_t drained = 0;
     /* 驱动返回的本块元数据：到达时刻、采样时刻和空闲/丢字节标志。 */
@@ -218,17 +219,15 @@ static void app_ble_receive_frames(uint8_t sport_mode)
     /* 只有队列确实读空时才做丢字节统计与空闲结算，避免把"预算用完"当成空闲。 */
     if (drained != 0)
     {
-        /* 取驱动累计的丢字节数和UART错误数。 */
-        dropped = kt6368a_get_rx_dropped();
-        errors = kt6368a_get_rx_errors();
-        /* 本块报告丢字节且计数确有变化时，再复位一次各解析器。 */
-        if ((info.flags & KT6368A_RX_LOSS) != 0 && (dropped != s_ble.rx_dropped || errors != s_ble.rx_errors))
+        /* LOSS标志与累计计数来自同一次空队列检查。 */
+        if ((info.flags & KT6368A_RX_LOSS) != 0 &&
+            (info.dropped != s_ble.rx_dropped || info.errors != s_ble.rx_errors))
         {
             app_ble_rx_reset(); /* 错误后尚无下一字节时，也不能提交残缺的无换行帧。 */
         }
         /* 保存本轮计数，作为下次比较的基线。 */
-        s_ble.rx_dropped = dropped;
-        s_ble.rx_errors = errors;
+        s_ble.rx_dropped = info.dropped;
+        s_ble.rx_errors = info.errors;
         /* 采样时刻与最后到达时刻相差达到空闲阈值，说明总线已静默，推进时钟/天气超时等待。 */
         if ((uint32_t)(info.sampled_ms - info.received_ms) >= KT6368A_RX_IDLE_MS)
         {
@@ -340,7 +339,7 @@ static uint8_t app_ble_send(uint8_t screen_on, uint8_t sport_mode)
         }
     }
 #endif
-    (void)screen_on;
+    app_diag_service(0); /* 先回收诊断TX，再让管理命令决定是否占用串口。 */
     /* 三个命令服务各自回收自己的异步TX结果：返回1表示报告或在途TX仍占用发送服务。
      * 本文件不把该返回值当作发送成功，只据此推迟UPTIME与波形，避免抢别的发送者。 */
     if (app_battery_log_ble_service(s_ble.enabled != 0 && sport_mode == 0 && kt6368a_init_is_pending() == 0, (uint32_t)xTaskGetTickCount()) != 0)
@@ -376,6 +375,7 @@ static uint8_t app_ble_send(uint8_t screen_on, uint8_t sport_mode)
         s_ble.quiet_tick = (uint32_t)xTaskGetTickCount();
         return 0;
     }
+    app_diag_service(s_ble.enabled != 0 && sport_mode == 0 && (screen_on != 0 || s_ble.eco == 0));
 #if APP_DEBUG_TELEMETRY
     /* 熄屏、运动中、初始化未完或TX仍忙时不发波形。 */
     if (screen_on == 0 || sport_mode != 0 || kt6368a_init_is_pending() != 0 || kt6368a_tx_is_busy() != 0)
@@ -450,6 +450,7 @@ void app_ble_update_power(uint8_t screen_on, uint8_t sport_mode, uint8_t restart
     uint8_t enabled = sport_mode == 0;
     /* 取一次当前毫秒tick，作为安静期判断和重置的统一时间基准。 */
     uint32_t now_ms = (uint32_t)xTaskGetTickCount();
+    uint32_t quiet_ms = APP_BLE_ECO_QUIET_MS;
     if (restart_quiet != 0)
     {
         s_ble.quiet_tick = now_ms;
@@ -471,8 +472,12 @@ void app_ble_update_power(uint8_t screen_on, uint8_t sport_mode, uint8_t restart
                 s_ble.quiet_tick = now_ms;
                 return;
             }
-            /* 空闲时间还不足APP_BLE_ECO_QUIET_MS，本轮继续等待，不改电源状态。 */
-            if ((uint32_t)(now_ms - s_ble.quiet_tick) < APP_BLE_ECO_QUIET_MS)
+            /* 手机已用合法校时确认通信时，给熄屏后选BIN并发送OTA请求留出时间。 */
+            if (s_ble.phone_ready != 0)
+            {
+                quiet_ms = APP_BLE_ECO_PHONE_QUIET_MS;
+            }
+            if ((uint32_t)(now_ms - s_ble.quiet_tick) < quiet_ms)
             {
                 return;
             }

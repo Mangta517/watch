@@ -6,6 +6,8 @@ import java.util.UUID;
 
 public class BluetoothDevice
 {
+    public static final int TRANSPORT_LE = 2;
+    public int lastGattTransport;
     public BluetoothGatt gatt;
     public boolean inlineConnect;
     public BluetoothSocket sppSocket;
@@ -25,6 +27,12 @@ public class BluetoothDevice
     public String getAddress()
     {
         return address;
+    }
+
+    public BluetoothGatt connectGatt(Context context, boolean autoConnect, BluetoothGattCallback callback, int transport)
+    {
+        lastGattTransport = transport;
+        return connectGatt(context, autoConnect, callback);
     }
 
     public BluetoothGatt connectGatt(Context context, boolean autoConnect, BluetoothGattCallback callback)

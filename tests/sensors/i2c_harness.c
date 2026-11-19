@@ -14,6 +14,7 @@ static uint8_t read_data, slave_low, check_stop, nack_pending;
 static uint8_t expected_ack;
 static unsigned sda_init_calls, redundant_sda_inits;
 static unsigned analog_pins;
+static uint32_t scl_release_after;
 
 void host_i2c_nop(void)
 {
@@ -43,6 +44,7 @@ void __set_PRIMASK(uint32_t mask)
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *config)
 {
     assert(port == GPIOB && primask == 1);
+    assert(config->Pull == GPIO_NOPULL);
     if (config->Mode == GPIO_MODE_ANALOG)
     {
         assert(config->Pull == GPIO_NOPULL);
@@ -139,6 +141,14 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
 
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
 {
+    if (port == GPIOB && pin == SENSOR_SCL_Pin)
+    {
+        if (nop_count < scl_release_after)
+        {
+            return GPIO_PIN_RESET;
+        }
+        return scl;
+    }
     assert(port == GPIOB && pin == SENSOR_SDA_Pin && sda_mode == GPIO_MODE_INPUT && scl == GPIO_PIN_SET);
     assert(input_pos < sizeof(input_bits));
     ++input_pos;
@@ -186,6 +196,13 @@ static void read_pid(uint8_t pid, uint8_t ack)
 int main(int argc, char **argv)
 {
     my_i2c_init(MY_I2C_BUS_SENSOR);
+    nop_count = 0;
+    my_i2c_stop(MY_I2C_BUS_SENSOR);
+#if defined(F411_BOOTLOADER)
+    assert(nop_count == 3 * 160);
+#else
+    assert(nop_count == 3 * 134);
+#endif
     if (argc > 1 && strcmp(argv[1], "suspend") == 0)
     {
         my_i2c_suspend(MY_I2C_BUS_SENSOR);
@@ -206,6 +223,13 @@ int main(int argc, char **argv)
     }
     else
     {
+        scl_release_after = nop_count + 500;
+        my_i2c_start(MY_I2C_BUS_SENSOR);
+        assert(nop_count >= scl_release_after && my_i2c_stop(MY_I2C_BUS_SENSOR) == 0);
+        scl_release_after = UINT32_MAX;
+        my_i2c_start(MY_I2C_BUS_SENSOR);
+        assert(my_i2c_wait_ack(MY_I2C_BUS_SENSOR) != 0 && my_i2c_stop(MY_I2C_BUS_SENSOR) != 0);
+        scl_release_after = 0;
         read_pid(0x36, 1);
         read_pid(0x7E, 1);
         read_pid(0x00, 1);

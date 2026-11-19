@@ -6,9 +6,13 @@
 #include <string.h>
 
 static uint32_t rtc_seconds;
+static RTC_DateTypeDef calendar = {.Year = 0, .Month = 1, .Date = 1};
 RTC_TypeDef host_rtc;
 Host_Cycle_Type host_cycles;
-uint32_t SystemCoreClock = 64000000;
+uint32_t SystemCoreClock = 84000000;
+uint32_t host_rtc_source;
+static uint8_t init_registers, fresh_init, mismatch_ssr;
+static uint32_t saved_prer;
 #define backup host_rtc.BKP0R
 static uint32_t rtc_subsecond, prescaler_changes;
 static uint32_t tick, lse_ready, tick_reads;
@@ -105,8 +109,6 @@ static uint8_t power_enabled, backup_enabled, rtc_enabled, shadow_locked;
 static uint32_t set_calls, date_calls, get_time_calls;
 static uint32_t hal_set_calls;
 static uint8_t drop_lse_on_read;
-static HAL_StatusTypeDef oscillator_status = HAL_OK;
-static HAL_StatusTypeDef set_status = HAL_OK;
 static HAL_StatusTypeDef get_status = HAL_OK;
 
 void host_write_protection(RTC_HandleTypeDef *rtc, uint8_t enabled)
@@ -117,12 +119,29 @@ void host_write_protection(RTC_HandleTypeDef *rtc, uint8_t enabled)
     {
         runtime_set_active = rtc->State == HAL_RTC_STATE_BUSY;
         set_phase_nops = set_elapsed_nops = 0;
+        saved_prer = RTC->PRER;
+        fresh_init = backup != 0x52544330U && backup != 0x52544331U;
     }
     else if (runtime_set_active != 0)
     {
         assert((RTC->ISR & RTC_ISR_INIT) == 0);
         RTC->ISR &= ~RTC_ISR_INITF;
-        if (rtc->State == HAL_RTC_STATE_READY)
+        if (init_registers != 0)
+        {
+            if (saved_prer != RTC->PRER && !fresh_init)
+            {
+                ++prescaler_changes;
+            }
+            if (fresh_init && RTC->DR == ((6U << 13) | (1U << 8) | 1U))
+            {
+                rtc_seconds = rtc_subsecond = 0;
+                calendar = (RTC_DateTypeDef){.Month = 1, .Date = 1, .WeekDay = 6};
+                ++set_calls;
+                ++date_calls;
+            }
+            init_registers = 0;
+        }
+        else if (rtc->State == HAL_RTC_STATE_READY)
         {
             uint32_t hours = ((RTC->TR >> 20) & 3) * 10 + ((RTC->TR >> 16) & 15);
             uint32_t minutes = ((RTC->TR >> 12) & 7) * 10 + ((RTC->TR >> 8) & 15);
@@ -149,63 +168,13 @@ void HAL_PWR_EnableBkUpAccess(void)
 void mock_rtc_enable(void)
 {
     rtc_enabled = 1;
+    init_registers = 1;
 }
-HAL_StatusTypeDef HAL_RCC_OscConfig(RCC_OscInitTypeDef *oscillator)
+void host_reset_backup(void)
 {
-    assert(backup_enabled && oscillator->OscillatorType == RCC_OSCILLATORTYPE_LSE);
-    assert(oscillator->LSEState == RCC_LSE_ON && oscillator->PLL.PLLState == RCC_PLL_NONE);
-    if (oscillator_status == HAL_OK)
-    {
-        lse_ready = 1;
-    }
-    return oscillator_status;
-}
-HAL_StatusTypeDef HAL_RCCEx_PeriphCLKConfig(RCC_PeriphCLKInitTypeDef *clock)
-{
-    assert(clock->PeriphClockSelection == RCC_PERIPHCLK_RTC && clock->RTCClockSelection == RCC_RTCCLKSOURCE_LSE);
-    return HAL_OK;
-}
-HAL_StatusTypeDef HAL_RTC_Init(RTC_HandleTypeDef *rtc)
-{
-    assert(rtc_enabled && rtc->Instance == RTC && rtc->Init.HourFormat == RTC_HOURFORMAT_24);
-    assert(rtc->Init.AsynchPrediv == 0 && rtc->Init.SynchPrediv == 32767);
-    if (host_rtc.PRER == 0)
-    {
-        host_rtc.PRER = rtc->Init.SynchPrediv;
-    }
-    rtc->State = HAL_RTC_STATE_READY;
-    return HAL_OK;
-}
-HAL_StatusTypeDef RTC_EnterInitMode(RTC_HandleTypeDef *rtc)
-{
-    assert(rtc->Instance == RTC);
-    ++prescaler_changes;
-    return HAL_OK;
-}
-HAL_StatusTypeDef RTC_ExitInitMode(RTC_HandleTypeDef *rtc)
-{
-    assert(rtc->Instance == RTC && host_rtc.PRER == 32767U);
-    return HAL_OK;
-}
-HAL_StatusTypeDef HAL_RTC_SetTime(RTC_HandleTypeDef *rtc, RTC_TimeTypeDef *time, uint32_t format)
-{
-    assert(rtc->Instance == RTC && format == RTC_FORMAT_BIN);
-    ++hal_set_calls;
-    if (set_status != HAL_OK)
-    {
-        return set_status;
-    }
-    assert(time->Hours < 24 && time->Minutes < 60 && time->Seconds < 60);
-    rtc_seconds = time->Hours * 3600U + time->Minutes * 60U + time->Seconds;
-    ++set_calls;
-    return HAL_OK;
-}
-HAL_StatusTypeDef HAL_RTC_SetDate(RTC_HandleTypeDef *rtc, RTC_DateTypeDef *date, uint32_t format)
-{
-    assert(rtc->Instance == RTC && format == RTC_FORMAT_BIN);
-    assert(date->Year == 0 && date->Month == 1 && date->Date == 1 && date->WeekDay == RTC_WEEKDAY_SATURDAY);
-    ++date_calls;
-    return HAL_OK;
+    host_rtc_source = 0;
+    lse_ready = 0;
+    memset(&host_rtc, 0, sizeof(host_rtc));
 }
 HAL_StatusTypeDef HAL_RTC_GetTime(RTC_HandleTypeDef *rtc, RTC_TimeTypeDef *time, uint32_t format)
 {
@@ -220,6 +189,7 @@ HAL_StatusTypeDef HAL_RTC_GetTime(RTC_HandleTypeDef *rtc, RTC_TimeTypeDef *time,
     time->Minutes = rtc_seconds / 60 % 60;
     time->Seconds = rtc_seconds % 60;
     time->SubSeconds = 32767U - rtc_subsecond;
+    RTC->SSR = time->SubSeconds;
     if (drop_lse_on_read != 0)
     {
         lse_ready = 0;
@@ -230,7 +200,12 @@ HAL_StatusTypeDef HAL_RTC_GetDate(RTC_HandleTypeDef *rtc, RTC_DateTypeDef *date,
 {
     assert(rtc->Instance == RTC && format == RTC_FORMAT_BIN && shadow_locked);
     shadow_locked = 0;
-    memset(date, 0, sizeof(*date));
+    *date = calendar;
+    if (mismatch_ssr != 0)
+    {
+        --mismatch_ssr;
+        RTC->SSR ^= 1U;
+    }
     return HAL_OK;
 }
 uint32_t HAL_RTCEx_BKUPRead(RTC_HandleTypeDef *rtc, uint32_t reg)
@@ -352,7 +327,9 @@ int main(int argc, char **argv)
     watch_rtc_get_status(&status);
     assert(status.ready == 0 && status.lse_ready == 0 && status.synced == 0 && status.read_status == HAL_ERROR);
     assert(status.marker == backup && status.time.hours == 0 && set_calls == 0 && date_calls == 0);
-    assert(watch_rtc_init() == HAL_OK && !watch_rtc_is_synced());
+    watch_rtc_init_begin();
+    lse_ready = 1;
+    assert(watch_rtc_init_service() == HAL_OK && !watch_rtc_is_synced());
     assert(set_calls == 1 && date_calls == 1);
     {
         uint32_t tick_reads_before = tick_reads;
@@ -420,6 +397,32 @@ int main(int argc, char **argv)
     rtc_seconds += 61;
     assert(watch_rtc_get_time(&time) == HAL_OK && time.minutes == 36 && time.seconds == 1);
     assert(watch_rtc_get_time(&time) == HAL_OK); /* 连续读取验证GetDate已释放影子锁存 */
+    {
+        uint16_t day = 0;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 1);
+        calendar.Month = 2;
+        calendar.Date = 29;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 60);
+        calendar.Month = 3;
+        calendar.Date = 1;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 61);
+        calendar.Year = 1;
+        calendar.Month = 1;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 367);
+        calendar.Month = 2;
+        calendar.Date = 29;
+        assert(watch_rtc_get_day_key(&day) == 1 && day == 367);
+        calendar.Year = 99;
+        calendar.Month = 12;
+        calendar.Date = 31;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 36525);
+        lse_ready = 0;
+        assert(watch_rtc_get_day_key(&day) == 1);
+        lse_ready = 1;
+        calendar.Year = 0;
+        calendar.Month = calendar.Date = 1;
+        puts("PASS: day keys use a coherent RTC date/time, include leap days and reject invalid dates or lost LSE.");
+    }
     calls = set_calls;
     seconds = rtc_seconds;
     host_rtc.PRER = (127U << 16) | 255U; /* 模拟旧固件已经初始化过的备份域。 */
@@ -461,7 +464,10 @@ int main(int argc, char **argv)
 
         rtc_seconds = 5;
         rtc_subsecond = 100;
+        mismatch_ssr = 1;
         assert(watch_rtc_get_counter() == 5U * WATCH_RTC_SUBSECOND_HZ + 100U && !shadow_locked);
+        mismatch_ssr = 3;
+        assert(watch_rtc_get_counter() == UINT32_MAX && !shadow_locked);
         assert(watch_rtc_get_subsecond() == 100U);
         rtc_subsecond = 32767U;
         assert(watch_rtc_get_counter() == 5U * WATCH_RTC_SUBSECOND_HZ + 32767U);
@@ -535,6 +541,8 @@ int main(int argc, char **argv)
     assert(status.time.hours == 14 && status.time.minutes == 36 && status.time.seconds == 1);
     assert(status.marker == 0x52544331 && backup == 0x52544331);
     assert(set_calls == calls && date_calls == 1 && rtc_seconds == seconds && !shadow_locked);
+    feed("status: ready\n", 490);
+    assert(app_clock_get_result() == APP_CLOCK_SYNCED && set_calls == calls);
     puts("PASS: runtime LSE loss reports read error without HAL reads or output changes; loss during read unlocks shadows; "
          "recovery retains time and marker.");
     feed("24:00\n", 500);
@@ -596,10 +604,10 @@ int main(int argc, char **argv)
     feed("01:02:03", UINT32_MAX - 100U);
     app_clock_service(99U);
     assert(app_clock_get_result() == APP_CLOCK_SYNCED && rtc_seconds == 3723);
-    oscillator_status = HAL_TIMEOUT;
+    lse_ready = 0;
     assert(watch_rtc_init() == HAL_TIMEOUT && watch_rtc_get_time(&time) == HAL_ERROR);
     assert(!watch_rtc_is_synced());
-    oscillator_status = HAL_OK;
+    lse_ready = 1;
     assert(watch_rtc_init() == HAL_OK && watch_rtc_is_synced() && rtc_seconds == 3723);
     puts("PASS: LSE/RTC configuration, backup retention, shadow unlock, fragmented HH:MM:SS and legacy HH:MM, no-newline idle, ranges/noise/failures, midnight "
          "and tick wrap.");
@@ -612,18 +620,21 @@ int main(int argc, char **argv)
     assert(watch_rtc_init_service() == HAL_BUSY && watch_rtc_init_is_pending());
     ++tick;
     assert(watch_rtc_init_service() == HAL_TIMEOUT && !watch_rtc_init_is_pending());
-    assert(set_calls == calls);
+    tick += 60000;
+    assert(watch_rtc_init_service() == HAL_TIMEOUT && !watch_rtc_init_is_pending());
+    assert(set_calls == calls && watch_rtc_get_time(&time) == HAL_ERROR);
     lse_ready = 1;
-    watch_rtc_init_begin();
     assert(watch_rtc_init_service() == HAL_OK && !watch_rtc_init_is_pending());
+    assert(watch_rtc_get_time(&time) == HAL_OK && time.hours == 1 && time.minutes == 2 && time.seconds == 3);
     assert(watch_rtc_is_synced() && rtc_seconds == 3723 && set_calls == calls);
-    oscillator_status = HAL_ERROR;
+    assert(watch_rtc_set_time(3, 2, 1) == 0 && rtc_seconds == 10921);
+    set_sync_stuck = 1;
     watch_rtc_init_begin();
-    assert(watch_rtc_init_service() == HAL_ERROR && !watch_rtc_init_is_pending());
-    oscillator_status = HAL_OK;
+    assert(watch_rtc_init_service() == HAL_TIMEOUT && !watch_rtc_init_is_pending());
+    set_sync_stuck = 0;
     watch_rtc_init_begin();
     assert(watch_rtc_init_service() == HAL_OK);
-    puts("PASS: staged LSE wait, timeout/tick wrap, retained time and final initialization failures.");
+    puts("PASS: staged LSE wait, late startup after timeout/tick wrap, retained time, runtime sync and final initialization failures.");
     bounded_set_time_tests();
     if (argc > 1)
     {

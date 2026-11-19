@@ -8,21 +8,21 @@
  *   MY_I2C_BUS_TP     : SCL = PB6  (TP_SCL)      SDA = PB4  (TP_SDA)
  *   MY_I2C_BUS_EEPROM : SCL = PA12 (EEPROM_SCL) SDA = PA11 (EEPROM_SDA)，开漏+外部上拉
  *
- * SENSOR/EEPROM 使用开漏输出，必须有外部上拉到 3.3V；内部上拉不能替代外部上拉。
- * TP 保留原推挽发送实现；SDA 读 ACK/数据和发送 NACK 时切换为输入释放。
+ * 三条总线均使用开漏输出和外部上拉到3.3V；TP的4.7k上拉见Core原理图R4。
+ * SDA读ACK/数据和发送NACK时切换为输入释放。
  * SENSOR 总线将原位延时加倍，增加从机准备数据及线路稳定的余量；实际频率需实测。
  * TP/EEPROM 位延时保持原值；ACK拉低前预置输出，NACK以输入释放SDA。
  ******************************************************************************
  */
 #include "my_i2c.h"
 
-/* APP按64MHz缩放位延时，SENSOR仍加倍；Bootloader保留100MHz原值。 */
+/* APP按84MHz缩放位延时，SENSOR仍加倍；Bootloader保留100MHz原值。 */
 #if defined(F411_BOOTLOADER)
+#define MY_I2C_DELAY_LOOPS        80
+#define MY_I2C_SENSOR_DELAY_LOOPS 160
+#else
 #define MY_I2C_DELAY_LOOPS        67
 #define MY_I2C_SENSOR_DELAY_LOOPS 134
-#else
-#define MY_I2C_DELAY_LOOPS        51
-#define MY_I2C_SENSOR_DELAY_LOOPS 102
 #endif
 
 /* ================================================================ 总线表 */
@@ -43,6 +43,7 @@ static const my_i2c_pin_t my_i2c_pin[MY_I2C_BUS_COUNT] = {
 };
 /* 各总线由原owner串行操作；0未知、1输出、2输入，仅省略同方向的重复配置。 */
 static uint8_t s_sda_direction[MY_I2C_BUS_COUNT];
+static uint8_t s_clock_fault[MY_I2C_BUS_COUNT];
 
 /* ================================================================ 私有工具 */
 /**
@@ -108,7 +109,7 @@ static inline uint8_t sda_read(my_i2c_bus_t bus)
 }
 
 /**
- * @brief 切换SDA方向：0=输出(SENSOR/EEPROM开漏，TP推挽)，1=输入+上拉(读ACK/数据)
+ * @brief 切换SDA方向：0=开漏输出，1=输入(读ACK/数据)，均使用外部上拉
  * @note  HAL_GPIO_Init 对 GPIOB 的 MODER/PUPDR 是非原子读-改-写; 本工程的
  *        touch.c 每个字节也会切 PB4 方向, sensor 任务会切 PB13 方向 ——
  *        两边互相可能把对方刚写入的位用旧快照覆盖。故整个切换用 PRIMASK
@@ -137,16 +138,11 @@ static void my_i2c_sda_dir(my_i2c_bus_t bus, uint8_t as_input)
     }
     else
     {
-        /* 先按推挽输出准备，TP 总线最终保持推挽发送 */
-        gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    }
-    /* SENSOR/EEPROM 发送时改用开漏输出，避免与从机拉低产生对顶电流 */
-    if (!as_input && bus != MY_I2C_BUS_TP)
-    {
+        /* 高电平释放总线，避免主机与从机拉低产生对顶电流。 */
         gpio.Mode = GPIO_MODE_OUTPUT_OD;
     }
-    /* 输入态靠上拉把空闲线保持为高；输出态该字段仍按上拉填写 */
-    gpio.Pull = GPIO_PULLUP;
+    /* 三条总线均有外部4.7k上拉，输入和开漏输出均关闭内部上拉。 */
+    gpio.Pull = GPIO_NOPULL;
     /* 高速档缩短引脚翻转时间，配合位延时满足时序 */
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
 
@@ -177,6 +173,17 @@ static uint8_t my_i2c_scl_released(my_i2c_bus_t bus)
     }
     /* 16 次都没读到高电平，返回 0 表示 SCL 仍被占用 */
     return 0;
+}
+
+/* 每次采样前等线路真的释放；超时由ACK/STOP向调用方上报。 */
+static uint8_t my_i2c_clock_up(my_i2c_bus_t bus)
+{
+    scl_hi(bus);
+    if (my_i2c_scl_released(bus) == 0)
+    {
+        s_clock_fault[bus] = 1;
+    }
+    return s_clock_fault[bus];
 }
 
 uint8_t my_i2c_recover(my_i2c_bus_t bus)
@@ -321,10 +328,10 @@ void my_i2c_suspend(my_i2c_bus_t bus)
 }
 
 /**
- * @brief 初始化软件I2C：SENSOR/EEPROM开漏，TP推挽，空闲释放为高
+ * @brief 初始化软件I2C：SCL/SDA开漏，空闲由外部上拉保持高电平
  * @param bus 要初始化的总线
  * @note  需在 HAL_Init()/时钟配置完成后调用; 会覆盖 MX_GPIO_Init 中对应引脚
- *        的推挽初始配置。重复调用无害(幂等)。
+ *        的初始配置。重复调用无害(幂等)。
  */
 void my_i2c_init(my_i2c_bus_t bus)
 {
@@ -339,29 +346,22 @@ void my_i2c_init(my_i2c_bus_t bus)
         return;
     }
 
-    /* EEPROM 总线在 GPIOA，打开对应端口时钟才能写寄存器 */
+    __disable_irq();
     if (bus == MY_I2C_BUS_EEPROM)
     {
         __HAL_RCC_GPIOA_CLK_ENABLE();
     }
     else
     {
-        /* SENSOR 与 TP 总线都在 GPIOB，打开 GPIOB 时钟 */
         __HAL_RCC_GPIOB_CLK_ENABLE();
     }
-
-    /* SCL: SENSOR/EEPROM 开漏；SDA 方向随后由 sda_dir 逐相切换。 */
-    __disable_irq();
+    /* 先释放输出锁存，再切开漏，避免切换方向时产生低脉冲。 */
+    scl_hi(bus);
+    sda_hi(bus);
     gpio.Pin = my_i2c_pin[bus].scl_pin;
-    /* 默认先按推挽输出，TP 总线保持这种模式 */
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    /* SENSOR/EEPROM 的 SCL 改为开漏，高电平靠外部上拉 */
-    if (bus != MY_I2C_BUS_TP)
-    {
-        gpio.Mode = GPIO_MODE_OUTPUT_OD;
-    }
-    /* 使能内部上拉；开漏输出时仍需外部上拉才能得到可靠高电平 */
-    gpio.Pull = GPIO_PULLUP;
+    gpio.Mode = GPIO_MODE_OUTPUT_OD;
+    /* 空闲高电平由外部4.7k上拉提供。 */
+    gpio.Pull = GPIO_NOPULL;
     /* 高速档让边沿更快，实际速率仍由位延时决定 */
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
     /* 在临界区内写 SCL 引脚配置，避免与其它任务/ISR 的引脚操作交错 */
@@ -369,11 +369,8 @@ void my_i2c_init(my_i2c_bus_t bus)
     /* 恢复中断屏蔽状态 */
     __set_PRIMASK(primask);
 
-    /* 初始化完成后先把 SCL 释放为高 */
-    scl_hi(bus);
     s_sda_direction[bus] = 0; /* 重新初始化时强制恢复SDA硬件配置。 */
-    my_i2c_sda_dir(bus, 0);   /* SDA 配为输出 */
-    sda_hi(bus);              /* 释放总线, 空闲高 */
+    my_i2c_sda_dir(bus, 0);
     /* 等空闲电平建立后再返回 */
     my_i2c_delay(bus);
 }
@@ -383,12 +380,13 @@ void my_i2c_init(my_i2c_bus_t bus)
  */
 void my_i2c_start(my_i2c_bus_t bus)
 {
-    /* 先把 SDA 切成输出，下面才能主动制造下降沿 */
-    my_i2c_sda_dir(bus, 0);
-    /* 输出高电平，保证 START 之前 SDA 处于释放状态 */
+    /* 先释放锁存再切输出，确保后续下降沿才是 START。 */
     sda_hi(bus);
-    /* SCL 拉高，进入 START 要求的“SCL 高”前提 */
-    scl_hi(bus);
+    my_i2c_sda_dir(bus, 0);
+    if (my_i2c_clock_up(bus) != 0)
+    {
+        return;
+    }
     /* 等 SCL 与 SDA 的高电平稳定 */
     my_i2c_delay(bus);
     sda_lo(bus); /* SCL 高电平期间 SDA 拉低 = START */
@@ -403,20 +401,22 @@ void my_i2c_start(my_i2c_bus_t bus)
 /**
  * @brief 停止信号：SCL 为高期间 SDA 产生上升沿
  */
-void my_i2c_stop(my_i2c_bus_t bus)
+uint8_t my_i2c_stop(my_i2c_bus_t bus)
 {
-    /* 切 SDA 为输出，才能在 STOP 中先拉低再释放 */
-    my_i2c_sda_dir(bus, 0);
-    /* 先把 SDA 驱动为低电平 */
+    uint8_t result;
+    scl_lo(bus);
     sda_lo(bus);
+    my_i2c_sda_dir(bus, 0);
     my_i2c_delay(bus); /* SCL 拉高前建立 SDA 低电平 */
-    /* 在 SDA 为低时抬高 SCL */
-    scl_hi(bus);
+    /* 在 SDA 为低时释放 SCL，收尾并带回本次事务的超时状态。 */
+    result = my_i2c_clock_up(bus);
     /* 等 SCL 高电平稳定 */
     my_i2c_delay(bus);
     sda_hi(bus); /* SCL 高电平期间 SDA 释放 = STOP */
     /* 保持该状态，让从机识别到停止条件 */
     my_i2c_delay(bus);
+    s_clock_fault[bus] = 0;
+    return result;
 }
 
 /**
@@ -427,6 +427,10 @@ void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat)
     /* i：已发送的位数，循环 8 次发完一个字节 */
     uint8_t i;
 
+    if (s_clock_fault[bus] != 0)
+    {
+        return;
+    }
     my_i2c_sda_dir(bus, 0); /* 发送相: SDA 输出 */
     /* 从最高位开始逐位输出，每圈发送 dat 的当前最高位 */
     for (i = 0; i < 8; i++)
@@ -443,7 +447,10 @@ void my_i2c_write_byte(my_i2c_bus_t bus, uint8_t dat)
             sda_lo(bus);
         }
         my_i2c_delay(bus); /* 数据建立 */
-        scl_hi(bus);       /* SCL 上升沿从机采样 */
+        if (my_i2c_clock_up(bus) != 0)
+        {
+            return;
+        }
         /* SCL 保持高电平一个位时间，让从机完成采样 */
         my_i2c_delay(bus);
         scl_lo(bus); /* 下降沿后再移位 */
@@ -463,6 +470,10 @@ uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
     /* dat：接收缓冲区，每读一位左移后填入最低位，初始为 0 */
     uint8_t dat = 0;
 
+    if (s_clock_fault[bus] != 0)
+    {
+        return 0;
+    }
     my_i2c_sda_dir(bus, 1); /* 接收相: SDA 输入, 交给从机 */
     /* 逐位读取，先读到的是字节的最高位 */
     for (i = 0; i < 8; i++)
@@ -471,7 +482,10 @@ uint8_t my_i2c_read_byte(my_i2c_bus_t bus, uint8_t ack)
         scl_lo(bus);
         /* 等 SCL 低电平建立 */
         my_i2c_delay(bus);
-        scl_hi(bus);       /* 从机在 SCL 低期间准备数据，高期间保持稳定 */
+        if (my_i2c_clock_up(bus) != 0)
+        {
+            return 0;
+        }
         my_i2c_delay(bus); /* 等线路稳定后再采样 (关键!) */
         /* 左移一位，为本次采样腾出最低位 */
         dat <<= 1;
@@ -498,13 +512,19 @@ uint8_t my_i2c_wait_ack(my_i2c_bus_t bus)
     /* ack：第 9 个时钟采样到的 SDA 电平，0=从机拉低应答，1=未应答 */
     uint8_t ack;
 
+    if (s_clock_fault[bus] != 0)
+    {
+        return 1;
+    }
     my_i2c_sda_dir(bus, 1); /* 释放 SDA 让从机拉低 */
     /* 拉低 SCL，开始第 9 个时钟的低相 */
     scl_lo(bus);
     /* 等低电平建立，给从机留出拉低 SDA 的时间 */
     my_i2c_delay(bus);
-    /* 抬高 SCL，进入应答位的采样窗口 */
-    scl_hi(bus);
+    if (my_i2c_clock_up(bus) != 0)
+    {
+        return 1;
+    }
     my_i2c_delay(bus);   /* 等从机驱动建立 */
     ack = sda_read(bus); /* 从机拉低 = ACK */
     /* 采样结束，拉低 SCL 完成第 9 个时钟 */
@@ -538,8 +558,11 @@ void my_i2c_send_ack(my_i2c_bus_t bus, uint8_t ack)
     }
     /* 等 SDA 在 SCL 低期间建立 */
     my_i2c_delay(bus);
-    /* 抬高 SCL，从机在此时钟采样应答位 */
-    scl_hi(bus);
+    if (my_i2c_clock_up(bus) != 0)
+    {
+        my_i2c_sda_dir(bus, 1);
+        return;
+    }
     /* 保持高电平一个位时间 */
     my_i2c_delay(bus);
     /* 拉低 SCL，结束第 9 个时钟 */
@@ -571,9 +594,7 @@ uint8_t my_i2c_probe(my_i2c_bus_t bus, uint8_t dev_addr)
     /* 第 9 个时钟读从机应答，作为探测结果 */
     result = my_i2c_wait_ack(bus);
     /* 无论有无应答都发停止条件，把总线还给空闲态 */
-    my_i2c_stop(bus);
-    /* 返回 0 表示该地址有从机应答，1 表示无应答 */
-    return result;
+    return my_i2c_stop(bus) | result;
 }
 
 /**
@@ -587,7 +608,7 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
     uint16_t i;
 
     /* 总线越界，或长度为非 0 却没有数据指针时无法发送，返回参数错误 */
-    if (bus >= MY_I2C_BUS_COUNT || (dat == NULL && len > 0))
+    if (bus >= MY_I2C_BUS_COUNT || dev_addr > 0x7F || (dat == NULL && len > 0))
     {
         return 1;
     }
@@ -630,9 +651,7 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr,
     }
 
     /* 所有字节都收到 ACK，发停止条件结束本帧 */
-    my_i2c_stop(bus);
-    /* 0 表示整帧写入过程未遇到 NACK 或参数错误 */
-    return 0;
+    return my_i2c_stop(bus);
 }
 
 /**
@@ -647,7 +666,7 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr, 
     uint16_t i;
 
     /* 总线越界、数据指针为空或长度为 0 时没有可执行的读操作，返回失败 */
-    if (bus >= MY_I2C_BUS_COUNT || dat == NULL || len == 0)
+    if (bus >= MY_I2C_BUS_COUNT || dev_addr > 0x7F || dat == NULL || len == 0)
     {
         return 1;
     }
@@ -704,7 +723,5 @@ uint8_t my_i2c_read_bytes(my_i2c_bus_t bus, uint8_t dev_addr, uint8_t reg_addr, 
     }
 
     /* 读满后发停止条件释放总线 */
-    my_i2c_stop(bus);
-    /* 0 表示地址与寄存器地址均被应答且数据已全部读入 */
-    return 0;
+    return my_i2c_stop(bus);
 }

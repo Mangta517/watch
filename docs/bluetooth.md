@@ -1,4 +1,4 @@
-> 当前策略（2026-11-02）：默认ECO，Settings → Bluetooth向下滚动可切换`BLE: KEEP CONNECTED`与`BLE: ECO / SCREEN OFF`；模式只保存在RAM，重启恢复ECO，不写EEPROM。ECO熄屏后先完成当前日志导出、状态报告、UART收发和初始化，再等待1秒无通信后关闭模块及USART1。亮屏复用原分步启动并需手机重新连接；关闭期间不能接收校时、天气或诊断。选择保连时普通APP与升级APP在屏幕明暗切换时保持BLE供电、USART1和解析残帧。SPORT始终关闭蓝牙。日常APP保持BLE开启、SPP关闭；独立保底同时开启BLE和SPP，供一键OTA在BLE控制后改用SPP发送BIN。升级结束跳入APP后由APP关闭SPP，手机重新连接BLE。实际功耗、计步/抬腕精度及唤醒时序仍需实板测量。
+> 当前策略（2026-11-15）：默认ECO，Settings → Bluetooth向下滚动可切换`BLE: KEEP CONNECTED`与`BLE: ECO / SCREEN OFF`；模式只保存在RAM，重启恢复ECO，不写EEPROM。ECO熄屏后先完成当前日志导出、状态报告、OTA请求、UART收发和初始化；未收到合法手机校时消息时，等待1秒安静期后关闭模块及USART1，已收到时延长到30秒，给选BIN和开始升级留出时间。收发活动会刷新安静期，断电或接收错误会清除手机就绪标志；单纯BLE连接不算通信确认。亮屏复用原分步启动并需手机重新连接；关闭期间不能接收校时、天气或诊断。选择保连时普通APP与升级APP在屏幕明暗切换时保持BLE供电、USART1和解析残帧。SPORT始终关闭蓝牙。日常APP保持BLE开启、SPP关闭；独立保底同时开启BLE和SPP，供一键OTA在BLE控制后改用SPP发送BIN。升级结束跳入APP后由APP关闭SPP，手机重新连接BLE。实际功耗、计步/抬腕精度及唤醒时序仍需实板测量。
 
 # KT6368A 蓝牙驱动（APP日常仅BLE，保底OTA开启SPP）
 
@@ -55,7 +55,7 @@ STM32与模块之间仍是USART1、115200/8N1。UART发送成功仅代表字节�
 从Settings页点击Bluetooth进入接收窗口，可以查看初始化结果、接收字节数及最近的接收内容；`INIT OK / BLE ONLY` 不表示手机已连接。Clear按钮清空记录和计数。
 点击Send Test向手机发送固定文本`hello from watch\r\n`（18字节，不发送末尾NUL）。手机必须先开启FFF1 Notify，然后在接收窗口查看消息。
 窗口显示上次发送结果：`TX UART OK`仅代表UART发送完成，不代表手机收到；模块未供电或仍在启动等待时返回忙，超时/忙/错误分别显示`TX TIMEOUT`、`TX BUSY`、`TX ERROR`。发送在LVGL任务内调用，超时上限20ms，不自动重试。
-UI活跃时每10ms非阻塞读取接收缓冲，每轮最多读取256字节；选择保连时普通熄屏由UART通知或200/400ms后台期限继续接收，离开蓝牙页面也继续接收（ECO熄屏关闭BLE后不再接收），最近511个显示字符保存在RAM中，重启后清空。窗口每100ms更新，有新数据时滚动到最新内容，也可以手动上下滚动查看。
+UI活跃时每10ms非阻塞读取接收缓冲，每轮最多读取256字节；选择保连时普通熄屏由UART通知或200/1000ms后台期限继续接收，离开蓝牙页面也继续接收（ECO熄屏关闭BLE后不再接收），最近511个显示字符保存在RAM中，重启后清空。窗口每100ms更新，有新数据时滚动到最新内容，也可以手动上下滚动查看。
 ASCII按文本显示，CRLF归一为一次换行；非打印字节和非ASCII字节显示为`\xHH`，当前未增加中文字库。接收数据不原样回显；合法校时消息可触发下述上次开机时间报告。
 
 ### SPP OTA传输（保底程序）
@@ -94,9 +94,9 @@ sensor启动时从EEPROM双副本恢复最近保存的开机秒数，发布一�
 时分秒校时已接入同一个UART接收入口：手机向FFF1发送`14:35:47`（ASCII），或`14:35:47\n`；继续兼容`14:35`。解析与日志显示共用数据，未增加第二个接收消费者。完整消息校验通过后更新RTC；省略秒时置零；不带换行时以200ms空闲作为消息结束，连续多条消息请加换行。支持一到两位小时、分钟、秒，范围分别为0–23、0–59、0–59。
 Bluetooth页显示`TIME SYNCED`、`TIME INVALID`或`RTC ERROR`，主界面显示对应的时针、分针和数字时分秒。Clear只清接收记录，不重置RTC。未实现自动校时回执，仍需看手表界面确认校时结果。
 
-RTC的LSE初始化在`watch_rtc_init()`中完成，HAL RTC模块及RTC/RTCEx源文件已启用。CubeMX的Advanced Settings已关闭`SystemClock_Config`和`MX_RTC_Init`的自动调用；main的USER CODE区使用原有64MHz HSI/PLL参数初始化系统时钟，LSE失败不进入系统Error_Handler。生成RTC的MSP USER CODE区对watch_rtc的自有句柄直接返回，时钟配置由现有RTC驱动管理。日期、时间首次初始化及复位保留仍由驱动管理；RTC读写仅在LVGL任务中进行，IRQ不设置RTC。
+RTC的LSE初始化由`watch_rtc_init_begin()`和`watch_rtc_init_service()`分步完成，HAL RTC模块及RTC/RTCEx源文件已启用。CubeMX的Advanced Settings已关闭`SystemClock_Config`和`MX_RTC_Init`的自动调用；main的USER CODE区使用84MHz HSI/PLL参数初始化系统时钟，LSE失败不进入系统Error_Handler。生成RTC的MSP USER CODE区对watch_rtc的自有句柄直接返回，时钟配置由现有RTC驱动管理。日期、时间首次初始化及复位保留仍由驱动管理；RTC读写仅在LVGL任务中进行，IRQ不设置RTC。
 
-USART1中断仅写入环形缓冲，不调用FreeRTOS接口。启动阶段在首帧显示后由LVGL任务串行配置，配置完成后才进入UI收发循环；运行期接收由LVGL任务独占，其他任务不要再调用`kt6368a_read()`抢走同一份数据。电源切换及发送须与接收串行安排；不在串口中断中更新LVGL。将来若在UART回调使用FromISR接口，需要另外按FreeRTOS配置调整UART中断优先级。
+USART1中断把字节写入环形缓冲，并经已注册的接收回调在熄屏时用FromISR通知唤醒LVGL任务；中断不解析业务协议或操作LVGL对象。启动阶段在首帧显示后由LVGL任务串行配置，配置完成后才进入UI收发循环；运行期接收由LVGL任务独占，其他任务不要再调用`kt6368a_read()`抢走同一份数据。电源切换及发送须与接收串行安排；不在串口中断中更新LVGL。USART1与USART1_RX DMA中断当前抢占优先级均为12，满足FreeRTOS的FromISR调用约束。
 
 ## 验证
 

@@ -1,5 +1,7 @@
 # F411 主引导、独立保底与手机蓝牙 OTA
 
+2026-11-15：共用MSP启用PVD；Recovery在APP擦除前及每次编程前拒绝已检测到的欠压，仍需保证擦写过程供电稳定。该保护需要更新Recovery自身，仅更新APP不能改变旧Recovery的行为。分区、CRC及手机协议不变。详见[本轮核验](hardware-review-20261115.md)。
+
 2026-11-02启用三个独立程序：主Bootloader读取EEPROM和按键后选择跳转目标；保底程序独立驻留，负责KT6368A、BLE/SPP接收、CRC和Flash更新；手表APP运行FreeRTOS/LVGL及传感器业务。沿用F407的分层职责，F411直接写内部Flash。
 
 2026-11-04的SPP一键版本起，手机OTA采用“BLE控制＋SPP传输”：日常APP保持`T4+01`/`T5+00`，保底保持`T4+01`/`T5+01`。手机先在原主界面连接APP的BLE，打开OTA页选择APP BIN并点一次“开始升级”；APK经BLE探测或发送`OTA,START`，随后关闭BLE，按同一模块的SPP地址完成布局查询、整包发送和`ok,len:N`确认，再关闭SPP、等待APP启动并自动恢复原BLE。三程序分区、320KiB上限、CRC32、回读、向量和EEPROM提交规则不变。更早的BLE OTA与一键BLE版本说明保留为历史记录。
@@ -43,7 +45,7 @@ flowchart TD
     H -->|接收或写入失败| A
 ```
 
-主引导入口为`bootloader/boot_main.c`，选择逻辑为`application/app_boot_select.c`，不链接蓝牙驱动或固件擦写模块。正常启动只读EEPROM，不写标志，也不会引入无条件开机延时。复位后PA5（KEY_1，空闲高、按下低）若为高立即进入正常判定；只有检测到按下才每10ms轮询，复位期间连续按住满2秒进入独立保底，任何提前松开都视为正常启动。APP向量有效且EEPROM读取成功时，若标志不以`42 4C`（BL）开头（空白或首次SWD下载APP的遗留记录）直接启动APP；若以BL开头则只有精确`42 4C A5 5A`才启动APP，`42 4C 5A A5`升级中、畸形或撕裂标志均进入独立保底。APP向量无效或EEPROM读取失败同样进入独立保底。
+主引导入口为`bootloader/boot_main.c`，选择逻辑为`application/app_boot_select.c`，不链接蓝牙驱动或固件擦写模块。正常启动只读EEPROM，不写标志，也不会引入无条件开机延时。复位后PA5（KEY_1，空闲高、按下低）若为高立即进入正常判定；只有检测到按下才每10ms轮询，复位期间连续按住满2秒进入独立保底，任何提前松开都视为正常启动。APP向量有效且EEPROM读取成功时，若标志不以`42 4C`（BL）开头（空白或首次SWD下载APP的遗留记录）直接启动APP；若以BL开头则只有精确`42 4C A5 5A`才启动APP，`42 4C 5A A5`升级中、畸形或撕裂标志均进入独立保底。APP向量无效或EEPROM连续三次读取失败时进入独立保底。APP复位入口须为Thumb地址并越过完整向量表，初始MSP须8字节对齐，且在SRAM中为主栈留出至少1KiB。
 
 保底入口为`bootloader/recovery_main.c`，复用`application/app_bootloader.c`、`interface/int_bootloader.c`。INIT → RUN → REC_DATA → CHECK_DATA → JUMP_TO_APP状态机在保底区运行，升级失败会复位回主引导，再由主引导重新进入保底。保底没有安装或向量损坏时，主引导不会跳转未知代码，该情况需通过SWD恢复保底。
 
@@ -80,6 +82,8 @@ flowchart TD
 5. 进度100%只表示字节已交给协议栈；只有设备回传匹配长度的`ok,len:N`才算CRC、长度、回读、向量和EEPROM提交全部通过。收到确认后恢复原BLE失败只报告连接问题，不回滚、不重发固件，固件仍算成功。
 6. 打开OTA页时若没有当前主连接，或手表已在保底（例如KEY_1进入），允许在OTA页选择目标一次；之后仍走同一自动流程。
 
+2026-11-15起，APP的ECO策略在收到合法手机校时消息后，将熄屏安静期从1秒延长到30秒，期间收到OTA探测或其他字节会重新计时；`OTA,START`受理后继续由事务忙状态保持供电。未校时仍使用1秒；30秒完全无通信后仍会断电，选文件较久可先在手表蓝牙页切为`BLE: KEEP CONNECTED`。此策略由新版APP生效，旧版升级到新版的这一次仍需按旧策略亮屏操作。
+
 ### 首次部署与迁移（按需）
 
 - **首次工厂部署**：用SWD写入三个BIN。手机只发送APP BIN，不能写主引导或保底。
@@ -109,7 +113,7 @@ flowchart TD
 ## 字节流协议与擦写范围
 
 1. 手机发送`OTA,INFO\n`。保底用同一条USART通道回`OTA,LAYOUT,...`，因此手机必须在对应连接上查询：APK先用BLE探测是否已在保底，关闭BLE进入SPP后再严格核对`OTA,LAYOUT,08010000,00050000`。布局不符或设备不识别时不发送start。
-2. 手机发送`start:十进制长度:8位CRC32\n`。CRC为CRC-32/ISO-HDLC，与Python `zlib.crc32(BIN)`一致。保底继续兼容原`start:长度`调试方式，无CRC模式会警告，畸形CRC字段不会降级。SPP可一次写入整条命令，不要求拆成BLE的20字节片。
+2. 手机发送`start:十进制长度:8位CRC32\n`。CRC为CRC-32/ISO-HDLC，与Python `zlib.crc32(BIN)`一致。保底在擦除前拒绝无CRC的旧`start:长度`命令及畸形CRC字段；电脑和手机现有发送端均已携带CRC。CRC只校验传输完整性，不提供固件签名或身份鉴权。SPP可一次写入整条命令，不要求拆成BLE的20字节片。
 3. 等待`Flash erased, ready to receive data...`后发送原始BIN。不能添加HEX文本、换行、包头或包尾；接收阶段的新start会被当成正文。
 4. 完整接收并处理后留100ms保护窗口，检查多收字节、CRC、回读和向量；确认后回传`ok,len:N`，留500ms发送窗口再跳APP。错误回传后复位。
 
@@ -132,7 +136,7 @@ flowchart TD
 
 DMA2 Stream5/Channel4使用8192字节循环缓冲和HT/TC标记，主循环复制到512字节工作缓冲后按半字写内部Flash。首8字节向量暂存，长度、CRC、回读和向量通过后才提交，MSP最后写；奇数末字节补FF，不计入BIN长度或CRC。UART/DMA错误、缓冲覆盖或Flash失败会终止本轮。
 
-保底不运行FreeRTOS、LVGL和传感器任务，屏蔽TPS3823的RST，不启用内部IWDG；接收超时由状态机处理，执行停滞没有看门狗复位。CRC仅用于检错，没有镜像签名或A/B回滚。
+保底使用2KiB主栈，块缓冲由保底主循环独占。NMI和故障向量请求系统复位。等待升级命令超过3分钟无活动时，保底尝试跳转已验证APP，否则关闭蓝牙并释放供电自锁。接收镜像期间沿用传输超时处理。CRC用于校验镜像完整性。保底屏蔽外部TPS3823复位线，内部IWDG也保持关闭。
 
 ## 构建与验证
 
