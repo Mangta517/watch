@@ -168,15 +168,15 @@ static void check_percent(void)
     }
     next_sample();
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.valid && snapshot.voltage_mv == 3900 && snapshot.percent == 34);
-    /* 复现日志里的短时压降：电压快速跟随，电量慢滤波避免直接锁到接近0%。 */
+    assert(snapshot.valid && snapshot.voltage_mv == 3900 && snapshot.percent == 73);
+    /* 复现日志里的短时压降：电压快速跟随，电量慢滤波减小短时压降造成的掉量。 */
     adc_value = (3710 * 4095 + 3300) / 6600;
     for (i = 0; i < 60; ++i)
     {
         next_sample();
     }
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.voltage_mv < 3720 && snapshot.percent == 20);
+    assert(snapshot.voltage_mv < 3720 && snapshot.percent == 66);
     previous_percent = snapshot.percent;
     adc_value = (3900 * 4095 + 3300) / 6600;
     for (i = 0; i < 2048; ++i)
@@ -192,14 +192,14 @@ static void check_percent(void)
         next_sample();
     }
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.voltage_mv == 3750 && snapshot.percent == 13);
+    assert(snapshot.voltage_mv == 3750 && snapshot.percent == 45);
     adc_value = (3900 * 4095 + 3300) / 6600;
     for (i = 0; i < 120; ++i)
     {
         next_sample();
     }
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.voltage_mv == 3900 && snapshot.percent == 13);
+    assert(snapshot.voltage_mv == 3900 && snapshot.percent == 45);
     /* ADC故障不丢失电量历史，恢复后也不能回涨。 */
     poll_result = HAL_TIMEOUT;
     next_sample();
@@ -207,7 +207,7 @@ static void check_percent(void)
     poll_result = HAL_OK;
     next_sample();
     app_battery_get_snapshot(&snapshot);
-    assert(snapshot.valid && snapshot.percent == 13);
+    assert(snapshot.valid && snapshot.percent == 45);
     previous_percent = snapshot.percent;
     /* 持续降至3.50V后慢滤波到达显示下限，随后电压回弹也保持0%。 */
     adc_value = (3500 * 4095 + 3300) / 6600;
@@ -231,48 +231,42 @@ static void check_percent(void)
 
 static void check_full_voltage(void)
 {
-    static const uint16_t voltages_mv[] =
+    /* 通过真实ADC换算与启动均值核对所有节点、各段中点、限幅和取整边界。 */
+    static const app_battery_curve_point_struct expected[] =
     {
-        0, 3400, 3499, 3500, 3502, 3512, 3513, 3525, 3550, 3575, 3600, 3625, 3650,
-        3675, 3700, 3725, 3750, 3782, 3800, 3825, 3850, 3860, 3861, 3900,
-        3925, 3950, 3975, 4000, 4025, 4048, 4050, 4051, 4300
-    };
-    /* 通过真实ADC换算与启动均值核对标定节点、插值、两端限幅和低电预警边界。 */
-    static const uint8_t percentages[] =
-    {
-        0, 0, 0, 0, 0, 0, 1, 1, 2, 4, 5, 6, 7,
-        9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 34,
-        41, 48, 66, 83, 92, 99, 100, 100, 100
+        {0, 0}, {3400, 0}, {3499, 0}, {3500, 0}, {3502, 0}, {3503, 1},
+        {3525, 5}, {3550, 9}, {3575, 14}, {3600, 18}, {3613, 20}, {3614, 21}, {3625, 23},
+        {3650, 27}, {3675, 32}, {3700, 36}, {3725, 41}, {3750, 45}, {3775, 50}, {3800, 55},
+        {3825, 60}, {3850, 64}, {3875, 69}, {3900, 73}, {3925, 78}, {3950, 82},
+        {3975, 87}, {4000, 91}, {4025, 96}, {4047, 99}, {4048, 100}, {4050, 100}, {4052, 100}, {4300, 100}
     };
     app_battery_struct snapshot;
     uint8_t count;
     const app_battery_curve_point_struct *points = app_battery_get_curve(&count);
     unsigned i, sample;
-    const uint32_t supply_mv = 3315; /* VREFINT读数1493时反算为3315mV，可恰好量化出3860和3861mV。 */
+    const uint32_t supply_mv = 3198; /* VREFINT读数1548反算所得，可精确量化测试表中的每个电压。 */
     assert(count == 12 && points[0].voltage_mv == 3500 && points[count - 1].voltage_mv == 4050);
-    assert(app_battery_voltage_to_percent(4049) == 100);
     for (i = 0; i < count; ++i)
     {
         assert(points[i].voltage_mv == 3500 + i * 50);
         assert(app_battery_voltage_to_percent(points[i].voltage_mv) == points[i].percent);
     }
-    reference_value = 1493;
-    for (i = 0; i < sizeof(voltages_mv) / sizeof(voltages_mv[0]); ++i)
+    reference_value = 1548;
+    for (i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i)
     {
-        assert(app_battery_voltage_to_percent(voltages_mv[i]) == percentages[i]);
+        assert(app_battery_voltage_to_percent(expected[i].voltage_mv) == expected[i].percent);
         app_battery_init();
-        adc_value = ((uint32_t)voltages_mv[i] * 4095 + supply_mv) / (supply_mv * 2);
+        adc_value = ((uint32_t)expected[i].voltage_mv * 4095 + supply_mv) / (supply_mv * 2);
         for (sample = 0; sample < 8; ++sample)
         {
             next_sample();
         }
         app_battery_get_snapshot(&snapshot);
         assert(snapshot.valid && snapshot.result == HAL_OK);
-        assert(snapshot.voltage_mv + 1 >= voltages_mv[i] && snapshot.voltage_mv <= voltages_mv[i] + 1U);
-        assert(snapshot.percent == percentages[i]);
+        assert(snapshot.voltage_mv == expected[i].voltage_mv && snapshot.percent == expected[i].percent);
     }
     reference_value = host_vrefint_cal;
-    puts("PASS: 12 curve nodes, rounded interpolation, 3860mV/20% and 3861mV/21%, zero and 4050mV full clamp.");
+    puts("PASS: 12 curve nodes, segment midpoints and exact 0/1%, 20/21%, 99/100% transitions through the ADC conversion.");
 }
 
 static void check_sleep_sampling(void)
@@ -333,7 +327,7 @@ static void check_sleep_sampling(void)
             app_battery_service();
         }
         app_battery_get_snapshot(&snapshot);
-        assert(snapshot.valid && snapshot.percent == 32);
+        assert(snapshot.valid && snapshot.percent == 72);
         if (profile == 0)
         {
             awake_voltage_mv = snapshot.voltage_mv;
@@ -451,7 +445,7 @@ int main(int argc, char **argv)
     }
     app_battery_get_snapshot(&snapshot);
     assert(snapshot.valid && snapshot.adc_raw == 2389 && snapshot.voltage_mv == 3850);
-    assert(snapshot.percent == 17);
+    assert(snapshot.percent == 64);
     assert(starts == 16 && polls == 16 && reads == 16 && stops == 16);
     now_ms += APP_BATTERY_PERIOD_MS - 1;
     app_battery_service();

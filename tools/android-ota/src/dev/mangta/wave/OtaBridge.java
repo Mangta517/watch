@@ -33,6 +33,7 @@ public final class OtaBridge
         button.setText("手表固件升级 · OTA");
         button.setOnClickListener(view -> activity.startActivity(new Intent(activity, OtaActivity.class)));
         container.addView(button, 1);
+        AltitudeCalibration.install(activity, container);
     }
 
     private static Object field(Object object, String name) throws Exception
@@ -229,6 +230,38 @@ public final class OtaBridge
             return (BluetoothDevice)device;
         }
         return null;
+    }
+
+    /* 用户开始定位时捕获这次BLE会话；定位过程中断线重连则请用户重新校准。 */
+    static BluetoothGatt calibrationLink(Activity activity)
+    {
+        if (activity != owner.get())
+        {
+            return null;
+        }
+        Object master = optionalField(activity, "master");
+        if (master == null || state(master) != OLD_STATE_CONNECTED ||
+            optionalField(master, "tx_characteristic") == null)
+        {
+            return null;
+        }
+        Object link = optionalField(master, "gatt");
+        if (link instanceof BluetoothGatt)
+        {
+            return (BluetoothGatt)link;
+        }
+        return null;
+    }
+
+    static void sendCalibration(Activity activity, BluetoothGatt link, int altitude_m) throws Exception
+    {
+        if (link != calibrationLink(activity))
+        {
+            throw new IOException("定位期间手表BLE连接已变化");
+        }
+        Object master = field(activity, "master");
+        byte[] command = ("BARO,ALT," + altitude_m + "\n").getBytes(StandardCharsets.US_ASCII);
+        method(master, "sendWatchSync", byte[].class).invoke(master, (Object)command);
     }
 
     /** 恢复失败时停掉重连并关闭本次恢复建立的GATT，避免旧连接残留在后台。 */

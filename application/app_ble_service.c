@@ -247,10 +247,17 @@ static void app_ble_receive_frames(uint8_t sport_mode)
 static void app_ble_receive(uint8_t sport_mode)
 {
     app_weather_struct weather;
+    int16_t altitude_m;
+    uint32_t now_ms;
     app_ble_receive_frames(sport_mode);
+    now_ms = (uint32_t)xTaskGetTickCount();
     app_weather_get_snapshot(&weather);
     app_baro_set_reference(weather.sea_level_pa, weather.temperature_x10,
-                           weather.valid != 0 && weather.cached == 0 && (uint32_t)((uint32_t)xTaskGetTickCount() - weather.received_ms) < 3600000);
+                           weather.valid != 0 && weather.cached == 0 && (uint32_t)(now_ms - weather.received_ms) < 3600000);
+    if (app_weather_take_altitude(&altitude_m, now_ms) == 0 && sport_mode == 0)
+    {
+        app_baro_calibrate_altitude(altitude_m, 1);
+    }
 }
 
 /* 合法手机校时确认通信就绪；旧运行记录每次开机只回传一次。 */

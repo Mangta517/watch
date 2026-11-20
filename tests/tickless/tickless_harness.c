@@ -23,7 +23,7 @@ static uint8_t stop_low_voltage;
 static uint32_t rtc_read_cycles;
 static uint64_t rtc_cpu_fraction;
 volatile uint32_t uwTick;
-static uint32_t kernel_tick, rtc_count, sleep_rtc_counts, step_limit;
+static uint32_t kernel_tick, pending_ticks, rtc_count, sleep_rtc_counts, step_limit;
 static uint32_t requested_load, sleeps, read_calls;
 static uint8_t irq_masked, abort_sleep, rtc_ready, rtc_fail_read, normal_tick, deadline_tick, pending_on_read;
 static uint8_t screen_off, wakeup_armed, wakeup_failed, sync_failed;
@@ -210,16 +210,22 @@ void host_disable_irq(void)
 
 void host_enable_irq(void)
 {
-    assert(irq_masked && kernel_tick == uwTick);
+    assert(irq_masked && kernel_tick + pending_ticks == uwTick);
     assert(!wakeup_armed && (RCC->CFGR & RCC_CFGR_SWS) == RCC_CFGR_SWS_PLL);
     watchdog_advance(0);
     irq_masked = 0;
     /* 模拟pending的普通tick；UART/DMA回调只能在补时完成后观察时间。 */
     if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
     {
-        ++kernel_tick;
+        ++pending_ticks;
         ++uwTick;
         SCB->ICSR = 0;
+    }
+    /* IDLE返回到FreeRTOS后，xTaskResumeAll才逐拍推进挂起期间的tick。 */
+    while (pending_ticks != 0)
+    {
+        ++kernel_tick;
+        --pending_ticks;
     }
 }
 
@@ -273,7 +279,13 @@ void vTaskStepTick(TickType_t ticks)
     assert(irq_masked && ticks < step_limit);
     host_barrier(); /* 硬件在函数执行期间已装载补齐当前tick的短LOAD。 */
     kernel_tick += ticks;
-    assert(kernel_tick == uwTick);
+}
+
+int xTaskIncrementTick(void)
+{
+    assert(irq_masked);
+    ++pending_ticks;
+    return 0;
 }
 
 void host_sleep(void)
@@ -377,7 +389,7 @@ int main(void)
     sleep_rtc_counts = 656U;
     deadline_tick = 1;
     app_tickless_sleep(20U);
-    assert(kernel_tick == 20U); /* 最后到期tick交ISR，step不跨过任务解阻塞点。 */
+    assert(kernel_tick == 20U); /* 到期tick由内核正常处理，step不跨过任务解阻塞点。 */
 
     reset(0);
     abort_sleep = 1;
@@ -614,7 +626,9 @@ int main(void)
     screen_off = 1;
     sleep_rtc_counts = 4000U;
     app_tickless_sleep(20U);
-    assert(stops == 1 && kernel_tick == 20); /* 延迟唤醒也不能step越过最近解阻塞点。 */
+    /* 实际已过122.07ms，整毫秒应补齐，下一拍距今约0.93ms。 */
+    assert(stops == 1 && kernel_tick == 122 && uwTick == 122);
+    assert(SysTick->VAL > 78000 && SysTick->VAL < 78200 && SysTick->LOAD == HOST_COUNTS_PER_TICK - 1);
 
     reset(0);
     screen_off = 1;
@@ -863,7 +877,7 @@ int main(void)
     assert(rtc_count == 0 && kernel_tick == 0 && uwTick == 0);
     irq_masked = 0;
     puts("PASS: all long requests cap at 400ms across RTC wrap; external watchdog model resets at 900ms with stalled tasks or a dead LSE and no wake interrupt.");
-    puts("PASS: STOP wake/clock-before-ISR, RTC and diagnostic time, deadline clamp, BLE/PWM/SPI/DMA/ADC veto, WUT and shadow-sync fallback.");
+    puts("PASS: STOP wake/clock-before-ISR, RTC and diagnostic time, catch-up past deadlines, BLE/PWM/SPI/DMA/ADC veto, WUT and shadow-sync fallback.");
     puts("PASS: every real STOP masks the MPU PB12 EXTI (keeps PA4 and other lines) and restores the exact original IMR on normal and early wake.");
     puts("PASS: 5/10/100/200/400ms STOP blocks a new DATA_RDY event during STOP, keeps its EXTI PR pending, and still ends at the RTC deadline; preexisting NVIC pending is not blocked.");
     return 0;

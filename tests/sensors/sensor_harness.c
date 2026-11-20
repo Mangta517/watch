@@ -145,7 +145,7 @@ int xSemaphoreGive(SemaphoreHandle_t mutex)
     if (baro_request_on_unlock != 0)
     {
         baro_request_on_unlock = 0;
-        assert(app_baro_calibrate_altitude(110) == 0);
+        assert(app_baro_calibrate_altitude(110, 0) == 0);
     }
     return 1;
 }
@@ -1040,7 +1040,10 @@ static void baro_service_tests(void)
     App_Baro_Service();
     assert(App_Baro_GetSnapshot(&sample) && sample.pressure_pa == 100000 && isfinite(sample.alt_m));
     standard_altitude = sample.alt_m;
-    assert(app_baro_calibrate_altitude(110) == 1);
+    assert(app_baro_calibrate_altitude(110, 0) == 0);
+    App_Baro_Service();
+    assert(App_Baro_GetSnapshot(&sample) && !sample.reference_ready && fabsf(sample.alt_m - 110.0f) < 0.01f);
+    app_baro_reset_calibration();
     app_baro_set_reference(102125, 0, 0);
     assert(App_Baro_GetSnapshot(&sample) && sample.pressure_pa == 100000);
     assert(sample.alt_m > standard_altitude + 60.0f && sample.alt_m < standard_altitude + 70.0f);
@@ -1158,37 +1161,52 @@ static void baro_calibration_tests(void)
     assert(App_Baro_GetSnapshot(&sample) && !sample.temperature_corrected);
     assert(fabsf(sample.alt_m - standard_altitude) < 0.01f);
     app_baro_set_reference(101325, 200, 1);
-    assert(app_baro_calibrate_altitude(-1001) == 1 && app_baro_calibrate_altitude(9001) == 1);
-    assert(app_baro_calibrate_altitude(500) == 0 && app_baro_calibration_pending());
+    assert(app_baro_calibrate_altitude(-1001, 1) == 1 && app_baro_calibrate_altitude(9001, 0) == 1);
+    assert(app_baro_calibrate_altitude(500, 1) == 0 && app_baro_calibration_pending());
     assert(App_Baro_GetSnapshot(&sample) && sample.alt_m < 200.0f);
     reads = spl_reads;
     App_Baro_Service();
     assert(spl_reads > reads && !app_baro_calibration_pending());
     assert(App_Baro_GetSnapshot(&sample) && sample.calibration_state == APP_BARO_CAL_APPLIED);
-    assert(sample.pressure_pa == 100000 && fabsf(sample.alt_m - 500.0f) < 0.2f);
+    assert(sample.calibrated_from_phone && sample.pressure_pa == 100000 && fabsf(sample.alt_m - 500.0f) < 0.01f);
     App_Baro_Service();
     assert(App_Baro_GetSnapshot(&sample) && fabsf(sample.alt_m - 500.0f) < 0.2f);
-    app_baro_set_reference(101425, 200, 1);
-    assert(App_Baro_GetSnapshot(&sample) && sample.alt_m > 508.0f && sample.alt_m < 510.0f);
+    app_baro_set_reference(101425, 0, 0);
+    assert(App_Baro_GetSnapshot(&sample) && fabsf(sample.alt_m - 500.0f) < 0.01f);
+    regs[SPL006_ADDR][SPL06_C00_BYTE1] = 0x5A;
+    regs[SPL006_ADDR][SPL06_C00_BYTE0] = 0x60;
+    assert(spl006_init() == 0);
+    regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
+    App_Baro_Service();
+    assert(App_Baro_GetSnapshot(&sample) && sample.pressure_pa == 99750 && sample.alt_m > 521.0f && sample.alt_m < 522.0f);
     calibrated_altitude = sample.alt_m;
-    assert(app_baro_calibrate_altitude(110) == 0);
+    assert(app_baro_calibrate_altitude(110, 1) == 0);
+    tick += 8000;
+    App_Baro_Service();
+    assert(App_Baro_GetSnapshot(&sample) && sample.calibration_state == APP_BARO_CAL_FAILED);
+    assert(fabsf(sample.alt_m - calibrated_altitude) < 0.01f);
+    assert(app_baro_calibrate_altitude(110, 0) == 0);
     fail_dev = SPL006_ADDR;
     App_Baro_Service();
     fail_dev = -1;
     assert(!app_baro_calibration_pending());
     App_Baro_GetSnapshot(&sample);
     assert(sample.calibration_state == APP_BARO_CAL_FAILED && fabsf(sample.alt_m - calibrated_altitude) < 0.01f);
-    assert(app_baro_calibrate_altitude(110) == 0);
+    assert(app_baro_calibrate_altitude(110, 0) == 0);
     app_baro_reset_calibration();
     assert(!app_baro_calibration_pending());
     app_baro_set_reference(101325, 0, 0);
+    regs[SPL006_ADDR][SPL06_C00_BYTE1] = 0x6A;
+    regs[SPL006_ADDR][SPL06_C00_BYTE0] = 0;
+    assert(spl006_init() == 0);
+    regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
     App_Baro_Service();
     assert(App_Baro_GetSnapshot(&sample) && sample.calibration_state == APP_BARO_CAL_NONE);
     assert(fabsf(sample.alt_m - standard_altitude) < 0.01f);
-    assert(app_baro_calibrate_altitude(-50) == 0);
+    assert(app_baro_calibrate_altitude(-50, 0) == 0);
     App_Baro_Service();
     assert(App_Baro_GetSnapshot(&sample) && fabsf(sample.alt_m + 50.0f) < 0.2f);
-    /* 正校准偏差也不能把非正原始气压变成有效高度。 */
+    /* 无效气压不能更新校准点和海拔。 */
     regs[SPL006_ADDR][SPL06_C00_BYTE2] = 0;
     regs[SPL006_ADDR][SPL06_C00_BYTE1] = 0;
     assert(spl006_init() == 0);
@@ -1200,7 +1218,7 @@ static void baro_calibration_tests(void)
     regs[SPL006_ADDR][SPL06_C00_BYTE1] = 0x6A;
     assert(spl006_init() == 0);
     regs[SPL006_ADDR][SPL06_MEAS_CFG] = SPL06_PRS_RDY | SPL06_TMP_RDY;
-    assert(app_baro_calibrate_altitude(500) == 0);
+    assert(app_baro_calibrate_altitude(500, 0) == 0);
     baro_request_on_unlock = 1;
     App_Baro_Service();
     assert(app_baro_calibration_pending());
@@ -1211,7 +1229,7 @@ static void baro_calibration_tests(void)
     App_Baro_GetSnapshot(&sample);
     assert(fabsf(sample.alt_m - 110.0f) < 0.2f);
     app_baro_reset_calibration();
-    puts("PASS: phone temperature/fallback, fresh-sample altitude calibration, pressure refresh, negative altitude, failure retention and reset.");
+    puts("PASS: fresh phone/manual anchor, pressure-relative ascent, weather independence, expired request, failure retention and reset.");
 }
 
 static void spl006_sleep_recovery_tests(void)

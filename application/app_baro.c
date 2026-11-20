@@ -26,11 +26,13 @@
 /* 允许连续两轮失败，超过三个采样间隔的快照也会单独过期。 */
 #define APP_BARO_MAX_AGE_MS (APP_BARO_SAMPLE_PERIOD_MS * APP_BARO_OFFLINE_STREAK + 1000)
 
-/* 标准模型保留原参数；有手机环境温度时，按0.0065K/m递减率求温压高度。
+/* 未校准时沿用气象参考或标准模型；校准后从已知高度和实测气压换算相对高度。
  * 手机温度近似所在地空气温度，芯片原始温度仍只用于SPL006压力补偿。 */
 #define APP_BARO_ALT_SCALE    44330.0f
 #define APP_BARO_ALT_POW      0.1902989f
 #define APP_BARO_LAPSE_K_PER_M 0.0065f
+#define APP_BARO_ANCHOR_POW    0.1902667f
+#define APP_BARO_PHONE_PAIR_MS 8000
 
 /**********************
  *  STATIC VARIABLES
@@ -40,7 +42,11 @@ static app_baro_struct s_baro_data;  /* 最新数据 (锁内赋值) */
 static uint32_t s_sea_level_pa = 101325; /* 手机未同步时使用标准参考，和快照共用互斥锁。 */
 static int16_t s_temperature_x10;
 static int16_t s_calibration_altitude_m;
-static float s_pressure_correction_pa; /* 已知海拔校准得到的压力偏差，仅用于高度换算。 */
+static uint8_t s_calibration_from_phone;
+static uint32_t s_calibration_requested_ms;
+static int32_t s_anchor_pressure_pa; /* 校准时的本表实测气压，0表示未校准。 */
+static int16_t s_anchor_altitude_m;
+static float s_anchor_temperature_k;
 static uint8_t s_online;             /* 1=快照有效 */
 static uint32_t s_sample_ms;
 static uint8_t s_err_streak; /* 连续总线失败计数 (仅 Service 读写) */
@@ -80,13 +86,16 @@ static void baro_unlock(void)
 static float baro_altitude(float pressure_pa)
 {
     float temperature_k;
-    /* 压力或校准后气压非正时无法求幂，返回0m保护。 */
-    if (pressure_pa <= 0.0f || pressure_pa + s_pressure_correction_pa <= 0.0f)
+    if (pressure_pa <= 0.0f)
     {
         return 0.0f;
     }
-    /* 先叠加已知海拔校准偏差；若手机环境温度有效则按实测温压公式，否则用标准大气模型。 */
-    pressure_pa += s_pressure_correction_pa;
+    if (s_anchor_pressure_pa != 0)
+    {
+        /* 温度取校准点温度。此后温度只影响相对高度，天气刷新不会挪动已知校准点。 */
+        return (float)s_anchor_altitude_m + s_anchor_temperature_k / APP_BARO_LAPSE_K_PER_M *
+               (1.0f - powf(pressure_pa / (float)s_anchor_pressure_pa, APP_BARO_ANCHOR_POW));
+    }
     if (s_baro_data.temperature_corrected != 0)
     {
         temperature_k = (float)s_temperature_x10 / 10.0f + 273.15f;
@@ -94,6 +103,16 @@ static float baro_altitude(float pressure_pa)
                (powf((float)s_sea_level_pa / pressure_pa, APP_BARO_ALT_POW) - 1.0f);
     }
     return APP_BARO_ALT_SCALE * (1.0f - powf(pressure_pa / (float)s_sea_level_pa, APP_BARO_ALT_POW));
+}
+
+/* 持锁检查。退出SPORT或传感器恢复后，已过时的定位不能配对新地点的气压。 */
+static void baro_expire_phone_calibration(void)
+{
+    if (s_baro_data.calibration_state == APP_BARO_CAL_PENDING && s_calibration_from_phone != 0 &&
+        (uint32_t)(HAL_GetTick() - s_calibration_requested_ms) >= APP_BARO_PHONE_PAIR_MS)
+    {
+        s_baro_data.calibration_state = APP_BARO_CAL_FAILED;
+    }
 }
 
 /**********************
@@ -221,7 +240,6 @@ void App_Baro_Service(void)
     int32_t praw = 0;  /* 本次读到的原始压力计数，驱动填充。 */
     int32_t traw = 0;  /* 本次读到的原始温度计数，用于补偿。 */
     int32_t ppa = 0;   /* 温度补偿后的气压，单位 Pa。 */
-    float reference_pressure_pa, temperature_k; /* 已知海拔处的模型气压及环境绝对温度。 */
     uint8_t pr, tr;    /* 从返回码拆出的压力字节、温度字节，0/1/2 为状态。 */
     uint16_t result;   /* spl006_read_sample 的 16 位返回码：低字节压力、高字节温度。 */
     uint32_t read_started = app_diag_clock_count(); /* 读开始时刻，仅用于诊断耗时。 */
@@ -236,6 +254,7 @@ void App_Baro_Service(void)
 
     /* 本次结果与校准收尾一起发布，释放锁后到达的新请求留给下一次采样。 */
     baro_lock();
+    baro_expire_phone_calibration();
 
     if ((pr == 0) && (tr == 0) && (spl006_process_pressure(praw, traw, &ppa) == 0))
     {
@@ -243,19 +262,17 @@ void App_Baro_Service(void)
         app_diag_sensor_record(APP_DIAG_BARO, APP_DIAG_OK, 0, read_started);
         if (s_baro_data.calibration_state == APP_BARO_CAL_PENDING && ppa > 0)
         {
-            /* 用当前参考反算已知海拔处的气压，偏差在后续采样及手机刷新后继续生效。 */
+            s_anchor_pressure_pa = ppa;
+            s_anchor_altitude_m = s_calibration_altitude_m;
             if (s_baro_data.temperature_corrected != 0)
             {
-                temperature_k = (float)s_temperature_x10 / 10.0f + 273.15f;
-                reference_pressure_pa = (float)s_sea_level_pa /
-                    powf(1.0f + APP_BARO_LAPSE_K_PER_M * (float)s_calibration_altitude_m / temperature_k, 1.0f / APP_BARO_ALT_POW);
+                s_anchor_temperature_k = (float)s_temperature_x10 / 10.0f + 273.15f;
             }
             else
             {
-                reference_pressure_pa = (float)s_sea_level_pa *
-                    powf(1.0f - (float)s_calibration_altitude_m / APP_BARO_ALT_SCALE, 1.0f / APP_BARO_ALT_POW);
+                s_anchor_temperature_k = 288.15f - APP_BARO_LAPSE_K_PER_M * (float)s_anchor_altitude_m;
             }
-            s_pressure_correction_pa = reference_pressure_pa - (float)ppa;
+            s_baro_data.calibrated_from_phone = s_calibration_from_phone;
             s_baro_data.calibration_state = APP_BARO_CAL_APPLIED;
         }
         /* 有效帧清零连续总线失败计数，并刷新最近成功采样时刻(ms)。 */
@@ -299,7 +316,7 @@ void App_Baro_Service(void)
     }
     if (s_baro_data.calibration_state == APP_BARO_CAL_PENDING)
     {
-        /* 本次采样失败时结束请求，保留此前的校准偏差，等待用户重新提交。 */
+        /* 本次采样失败时结束请求，保留此前的校准点，等待用户重新提交。 */
         s_baro_data.calibration_state = APP_BARO_CAL_FAILED;
     }
     baro_unlock();
@@ -330,15 +347,15 @@ void app_baro_set_reference(uint32_t pressure_pa, int16_t temperature_x10, uint8
     s_temperature_x10 = temperature_x10;
     s_baro_data.temperature_corrected = temperature_valid;
     /* 参考气压或温补状态变化且已有气压读数时，立即重算当前海拔供UI即时刷新。 */
-    if (changed != 0 && s_baro_data.pressure_pa > 0)
+    if (changed != 0 && s_anchor_pressure_pa == 0 && s_baro_data.pressure_pa > 0)
     {
         s_baro_data.alt_m = baro_altitude((float)s_baro_data.pressure_pa);
     }
     baro_unlock();
 }
 
-/* 提交已知海拔(-1000..9000m)校准请求，需先同步手机海平面气压；返回0=已受理，1=越界或未同步。 */
-uint8_t app_baro_calibrate_altitude(int16_t altitude_m)
+/* 已知高度与本表实测气压配对即可校准，手机气象数据仅用于估算温度。 */
+uint8_t app_baro_calibrate_altitude(int16_t altitude_m, uint8_t from_phone)
 {
     /* 限制输入海拔在-1000..9000m合理范围内。 */
     if (altitude_m < -1000 || altitude_m > 9000)
@@ -346,14 +363,9 @@ uint8_t app_baro_calibrate_altitude(int16_t altitude_m)
         return 1;
     }
     baro_lock();
-    /* 必须先收到手机海平面气压参考才能校准。 */
-    if (s_baro_data.reference_ready == 0)
-    {
-        baro_unlock();
-        return 1;
-    }
-    /* 记录目标海拔并置等待态，由sensor任务下一轮新采样计算压力偏差。 */
     s_calibration_altitude_m = altitude_m;
+    s_calibration_from_phone = from_phone;
+    s_calibration_requested_ms = HAL_GetTick();
     s_baro_data.calibration_state = APP_BARO_CAL_PENDING;
     baro_unlock();
     return 0;
@@ -364,16 +376,18 @@ uint8_t app_baro_calibration_pending(void)
 {
     uint8_t pending;
     baro_lock();
+    baro_expire_phone_calibration();
     pending = s_baro_data.calibration_state == APP_BARO_CAL_PENDING;
     baro_unlock();
     return pending;
 }
 
-/* 清除本次开机的压力校准偏差与待处理请求，并按当前参考重新计算海拔。 */
+/* 清除本次开机的校准点与待处理请求，并按当前气象参考重新计算海拔。 */
 void app_baro_reset_calibration(void)
 {
     baro_lock();
-    s_pressure_correction_pa = 0.0f;
+    s_anchor_pressure_pa = 0;
+    s_baro_data.calibrated_from_phone = 0;
     s_baro_data.calibration_state = APP_BARO_CAL_NONE;
     s_baro_data.alt_m = baro_altitude((float)s_baro_data.pressure_pa);
     baro_unlock();

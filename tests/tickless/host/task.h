@@ -8,4 +8,5 @@ typedef enum
 } eSleepModeStatus;
 eSleepModeStatus eTaskConfirmSleepModeStatus(void);
 void vTaskStepTick(TickType_t ticks);
+int xTaskIncrementTick(void);
 #endif

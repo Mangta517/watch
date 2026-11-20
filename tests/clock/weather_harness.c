@@ -14,6 +14,7 @@ int main(void)
     const char *invalid[] = {"WEATHER,100,263,80\n",   "WEATHER,3,1001,80\n", "WEATHER,3,263,101\n",
                              "WEATHER,3,263,80junk\n", "WEATHER,3,,80\n",     "WEATHER,9999999999999999999999999999999999999,0,0\n"};
     app_weather_struct weather;
+    int16_t altitude_m;
     app_weather_restore(NULL);
     unsigned split, i;
     app_weather_get_snapshot(&weather);
@@ -50,6 +51,23 @@ int main(void)
     app_weather_service(99);
     app_weather_get_snapshot(&weather);
     assert(weather.code == 99 && weather.temperature_x10 == -1000 && weather.humidity_rh == 100);
+    feed("BARO,ALT,-", 200);
+    assert(app_weather_take_altitude(&altitude_m, 200) != 0);
+    feed("50\r\n", 225);
+    assert(app_weather_take_altitude(&altitude_m, 225) == 0 && altitude_m == -50);
+    assert(app_weather_take_altitude(&altitude_m, 225) != 0);
+    feed("BARO,ALT,9001\nBARO,ALT,-1001\nBARO,ALT,120,4\n", 225);
+    assert(app_weather_take_altitude(&altitude_m, 225) != 0);
+    feed("BARO,ALT,120", 300);
+    app_weather_service(500);
+    assert(app_weather_take_altitude(&altitude_m, 500) != 0);
+    feed("BARO,ALT,120\n", UINT32_MAX - 99U);
+    assert(app_weather_take_altitude(&altitude_m, 2900) != 0);
+    feed("BARO,ALT,9000\n", 4000);
+    assert(app_weather_take_altitude(&altitude_m, 4000) == 0 && altitude_m == 9000);
+    feed("BARO,ALT,120\n", 4100);
+    app_weather_reset_receive();
+    assert(app_weather_take_altitude(&altitude_m, 4100) != 0);
     assert(strcmp(app_weather_description(0), "CLEAR") == 0);
     assert(strcmp(app_weather_description(3), "OVERCAST") == 0);
     assert(strcmp(app_weather_description(61), "RAIN") == 0);

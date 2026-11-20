@@ -33,6 +33,7 @@ if float(records[0]["CH7"]) != 0:
 with tempfile.TemporaryDirectory(prefix="watch-heart-replay-") as temporary:
     executable = str(Path(temporary) / "heart-replay.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                    "-DAPP_DEBUG_TELEMETRY=1",
                     "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Iapplication", "-Icommon",
                     "tests/sensors/heart_replay.c", "-lm", "-o", executable], cwd=root, check=True)
     subprocess.run([executable, str(source), str(output)], cwd=root, check=True)

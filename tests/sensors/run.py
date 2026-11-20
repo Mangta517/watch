@@ -76,10 +76,12 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
                     "-o", heart_exe], cwd=root, check=True)
     subprocess.run([heart_exe], cwd=root, check=True)
     service_exe = str(Path(out) / "heart-service.exe")
-    subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
-                    "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Iapplication", "-Icommon",
-                    "tests/sensors/heart_harness.c", "application/app_heart.c",
-                    "-lm", "-o", service_exe], cwd=root, check=True)
+    heart_args = [gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                  "-Itests/sensors/host", "-ICore/Inc", "-Iinterface", "-Iapplication", "-Icommon",
+                  "tests/sensors/heart_harness.c", "application/app_heart.c", "-lm", "-o", service_exe]
+    subprocess.run(heart_args, cwd=root, check=True)
+    subprocess.run([service_exe, "telemetry_off"], cwd=root, check=True)
+    subprocess.run(heart_args + ["-DAPP_DEBUG_TELEMETRY=1"], cwd=root, check=True)
     subprocess.run([service_exe], cwd=root, check=True)
     subprocess.run([service_exe, "store"], cwd=root, check=True)
     subprocess.run([service_exe, "allocation_failed"], cwd=root, check=True)

@@ -18,8 +18,14 @@ def build_command(image):
 
 def wait_reply(connection, expected):
     deadline = time.monotonic() + 60
+    pending = bytearray()
     while time.monotonic() < deadline:
-        line = connection.readline().strip()
+        chunk = connection.readline()
+        pending.extend(chunk)
+        if not chunk.endswith(b"\n"):
+            continue
+        line = pending.strip()
+        pending.clear()
         if line.startswith((b"app rec error", b"Invalid")):
             raise RuntimeError(line.decode("ascii", errors="replace"))
         if expected.startswith(b"OTA,LAYOUT,") and line.startswith(b"OTA,LAYOUT,") and line != expected:

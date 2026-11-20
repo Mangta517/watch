@@ -621,6 +621,7 @@ void App_IMU_MagCalibrate(uint8_t start)
 static uint32_t host_sea_level_pa;
 static int16_t host_baro_temperature_x10, host_calibration_altitude_m;
 static uint8_t host_baro_temperature_valid;
+static uint8_t host_baro_from_phone;
 static app_baro_calibration_state host_baro_calibration;
 void app_baro_set_reference(uint32_t pressure_pa, int16_t temperature_x10, uint8_t temperature_valid)
 {
@@ -631,13 +632,10 @@ void app_baro_set_reference(uint32_t pressure_pa, int16_t temperature_x10, uint8
     host_baro_temperature_x10 = temperature_x10;
     host_baro_temperature_valid = temperature_valid;
 }
-uint8_t app_baro_calibrate_altitude(int16_t altitude_m)
+uint8_t app_baro_calibrate_altitude(int16_t altitude_m, uint8_t from_phone)
 {
-    if (host_sea_level_pa == 0)
-    {
-        return 1;
-    }
     host_calibration_altitude_m = altitude_m;
+    host_baro_from_phone = from_phone;
     host_baro_calibration = APP_BARO_CAL_PENDING;
     return 0;
 }
@@ -653,6 +651,7 @@ uint8_t App_Baro_GetSnapshot(app_baro_struct *baro)
     baro->alt_m = host_altitude;
     baro->reference_ready = host_sea_level_pa != 0;
     baro->temperature_corrected = host_baro_temperature_valid;
+    baro->calibrated_from_phone = host_baro_from_phone;
     baro->calibration_state = host_baro_calibration;
     return host_online;
 }
@@ -1809,11 +1808,11 @@ static void battery_page_tests(void)
     host_battery = (app_battery_struct){.voltage_mv = 4002, .adc_raw = 2483, .valid = 1, .percent = 35};
     tap(180, 36);
     assert(s_page == PAGE_BATTERY);
-    assert(s_battery_plot.low_mv == 3860);
+    assert(s_battery_plot.low_mv == 3613);
     assert(strcmp(lv_label_get_text(s_view.battery_detail.voltage), "4.00") == 0);
     assert(strcmp(lv_label_get_text(s_view.battery_detail.millivolts), "4002 mV") == 0);
     assert(strcmp(lv_label_get_text(s_view.battery_detail.percent), "~35%") == 0);
-    assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 84%") == 0);
+    assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 91%") == 0);
     assert(strcmp(lv_label_get_text(s_view.battery_detail.status), "NORMAL") == 0);
     plot_card = lv_obj_get_parent(s_view.battery_detail.plot);
     assert(strcmp(lv_label_get_text(lv_obj_get_child(plot_card, 0)), "CURVE") == 0);
@@ -1836,7 +1835,7 @@ static void battery_page_tests(void)
     lv_obj_get_coords(s_view.battery_detail.plot, &plot);
     {
         lv_coord_t x = plot.x1 + battery_plot_x(4002, 3500, 4050);
-        lv_coord_t y = plot.y1 + battery_plot_y(84);
+        lv_coord_t y = plot.y1 + battery_plot_y(91);
         lv_coord_t watch_y = plot.y1 + battery_plot_y(35);
         assert(framebuffer[y * 240 + x].full == lv_color_hex(UI_BATTERY_GREEN).full);
         assert(framebuffer[watch_y * 240 + x].full == lv_color_hex(UI_AMBER).full);
@@ -1849,9 +1848,10 @@ static void battery_page_tests(void)
     assert(host_battery_log_reads == 0);
     assert(strcmp(lv_label_get_text(s_view.battery_detail.raw), "RAW --") == 0);
 
-    low_key = lv_obj_get_child(s_view.battery_detail.keys, 5); /* 3850 mV */
+    low_key = lv_obj_get_child(s_view.battery_detail.keys, 10); /* 3600 mV */
     normal_key = lv_obj_get_child(s_view.battery_detail.keys, 2); /* 4000 mV */
-    host_battery.voltage_mv = 3860;
+    assert(strcmp(lv_label_get_text(low_key), "3.60V  18%") == 0);
+    host_battery.voltage_mv = 3613;
     refresh_data();
     assert(lv_obj_get_style_text_color(low_key, 0).full == lv_color_hex(UI_MUTED).full);
     assert(lv_obj_get_style_text_color(normal_key, 0).full == lv_color_hex(UI_MUTED).full);
@@ -1914,13 +1914,13 @@ static void battery_page_tests(void)
     refresh_data();
     assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 100%") == 0);
     screenshot("battery_page_full");
-    host_battery.voltage_mv = 3860;
+    host_battery.voltage_mv = 3613;
     host_battery.percent = 20;
     refresh_data();
     assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 20%") == 0);
     assert(strcmp(lv_label_get_text(s_view.battery_detail.status), "LOW BATT") == 0);
     screenshot("battery_page_low");
-    host_battery.voltage_mv = 3861;
+    host_battery.voltage_mv = 3614;
     host_battery.percent = 21;
     refresh_data();
     assert(strcmp(lv_label_get_text(s_view.battery_detail.curve_value), "CURVE 21%") == 0);
@@ -2813,33 +2813,28 @@ int main(int argc, char **argv)
         assert(lv_spinbox_get_value(s_view.baro.altitude_input) == 111);
         tap_object(decrement);
         assert(lv_spinbox_get_value(s_view.baro.altitude_input) == 110);
-        tap_object(calibrate);
-        assert(strcmp(lv_label_get_text(s_view.baro.calibration_status), "SYNC PHONE TO CALIBRATE") == 0);
-        host_sea_level_pa = 101325;
+        host_sea_level_pa = 0;
         tap_object(calibrate);
         assert(host_calibration_altitude_m == 110 && host_baro_calibration == APP_BARO_CAL_PENDING);
         assert(strcmp(lv_label_get_text(s_view.baro.calibration_status), "CALIBRATING...") == 0);
         host_baro_calibration = APP_BARO_CAL_APPLIED;
         host_altitude = 110.0f;
         advance(120);
-        assert(strcmp(lv_label_get_text(s_view.baro.calibration_status), "CALIBRATED / PHONE TEMP") == 0);
+        assert(strcmp(lv_label_get_text(s_view.baro.calibration_status), "CALIBRATED / MANUAL") == 0);
         assert(trend_latest(&s_view.baro.trend) == 110);
         assert(host_baro_history.altitude_m[23] == 123);
         assert(host_baro_history.sequence == history_sequence);
         assert(s_view.baro.trend.series->y_points[22] == previous_altitude);
-        /* 手机参考变化只更新快照，NOW仍须更新，不等待下一次历史落柱。 */
+        /* 新气压更新快照，NOW随最新高度刷新，不等待下一次历史落柱。 */
         host_altitude = 125.0f;
         advance_active(5000);
         assert(trend_latest(&s_view.baro.trend) == 125);
         assert(host_baro_history.sequence == history_sequence);
         assert(s_view.baro.trend.series->y_points[22] == previous_altitude);
-        host_baro_temperature_valid = 0;
+        host_baro_from_phone = 1;
         s_view.baro.refresh_tick = lv_tick_get() - UI_BARO_REFRESH_MS;
         refresh_data();
-        assert(strcmp(lv_label_get_text(s_view.baro.calibration_status), "CALIBRATED / STANDARD") == 0);
-        host_baro_temperature_valid = 1;
-        s_view.baro.refresh_tick = lv_tick_get() - UI_BARO_REFRESH_MS;
-        refresh_data();
+        assert(strcmp(lv_label_get_text(s_view.baro.calibration_status), "CALIBRATED / PHONE GPS") == 0);
         screenshot("altitude_calibration");
         host_altitude = 123.0f;
         tap_object(reset);

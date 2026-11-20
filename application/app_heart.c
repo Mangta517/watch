@@ -1171,7 +1171,6 @@ uint16_t app_heart_read_samples(app_heart_sample_struct *samples, uint16_t size)
 uint8_t app_heart_service(void)
 {
     app_heart_struct data;
-    app_heart_sample_struct sample;
     em7028_result result;
     uint16_t raw;
     uint32_t now; /* 取得快照锁后读取本轮时间基准，单位ms。 */
@@ -1339,34 +1338,34 @@ uint8_t app_heart_service(void)
         {
             s_sleep_no_signal_ms = 0;
         }
-        /* 组装一条原始波形样本：时间戳、原始值、滤波值、背景基线。 */
-        sample.elapsed_ms = (uint32_t)(now - sample_start_tick);
-        sample.raw = raw;
-        sample.filtered = detector.filtered;
-        sample.dc = detector.dc;
-        /* 带上本帧心率、周期与状态。 */
-        sample.bpm = data.bpm;
-        sample.interval_ms = data.interval_ms;
-        sample.state = data.state;
-        /* 样本序号递增，供接收端检查连续性。 */
-        sample.sequence = sample_sequence++;
-        /* 仅成功读数入队；与UI共用快照锁，UART发送时不占此锁。 */
-        xSemaphoreTake(heart_mutex, portMAX_DELAY);
-        if (requested != 0 && s_sleep_mode == 0 && s_sport_mode == 0)
+        if (APP_DEBUG_TELEMETRY != 0)
         {
-            /* 只在亮屏手动测量时保留波形，熄屏/运动不导出。 */
-            if (sample_count == APP_HEART_SAMPLE_COUNT)
+            app_heart_sample_struct sample;
+
+            sample.elapsed_ms = (uint32_t)(now - sample_start_tick);
+            sample.raw = raw;
+            sample.filtered = detector.filtered;
+            sample.dc = detector.dc;
+            sample.bpm = data.bpm;
+            sample.interval_ms = data.interval_ms;
+            sample.state = data.state;
+            sample.sequence = sample_sequence++;
+            /* 只在亮屏手动测量时保留波形；UART发送时不占快照锁。 */
+            xSemaphoreTake(heart_mutex, portMAX_DELAY);
+            if (requested != 0 && s_sleep_mode == 0 && s_sport_mode == 0)
             {
-                /* 队列已满：丢弃最旧一条并计数溢出，再写入新样本。 */
-                app_diag_heart_queue(1);
-                sample_head = (uint16_t)((sample_head + 1) % APP_HEART_SAMPLE_COUNT);
-                --sample_count;
+                if (sample_count == APP_HEART_SAMPLE_COUNT)
+                {
+                    /* 队列已满时丢弃最旧样本，保留最新波形。 */
+                    app_diag_heart_queue(1);
+                    sample_head = (uint16_t)((sample_head + 1) % APP_HEART_SAMPLE_COUNT);
+                    --sample_count;
+                }
+                heart_samples[(sample_head + sample_count) % APP_HEART_SAMPLE_COUNT] = sample;
+                ++sample_count;
             }
-            /* 把样本追加到队尾。 */
-            heart_samples[(sample_head + sample_count) % APP_HEART_SAMPLE_COUNT] = sample;
-            ++sample_count;
+            xSemaphoreGive(heart_mutex);
         }
-        xSemaphoreGive(heart_mutex);
     }
     /* 采样期间UI可能切入运动模式；按当前模式决定是否结束后台窗口。 */
     xSemaphoreTake(heart_mutex, portMAX_DELAY);

@@ -1721,7 +1721,7 @@ static void baro_calibration_cb(lv_event_t *event)
     {
         lv_spinbox_increment(s_view.baro.altitude_input);
     }
-    /* 2="CALIBRATE"：运动模式禁止校准；先检查参考气压是否已同步，受理后进入等待态。 */
+    /* 2="CALIBRATE"：运动模式禁止校准；受理后等待sensor新一帧气压。 */
     else if (action == 2)
     {
         if (s_sport_mode != 0)
@@ -1729,15 +1729,15 @@ static void baro_calibration_cb(lv_event_t *event)
             ui_set_label_text(s_view.baro.calibration_status, "EXIT SPORT TO CALIBRATE");
             return;
         }
-        if (app_baro_calibrate_altitude((int16_t)lv_spinbox_get_value(s_view.baro.altitude_input)) != 0)
+        if (app_baro_calibrate_altitude((int16_t)lv_spinbox_get_value(s_view.baro.altitude_input), 0) != 0)
         {
-            ui_set_label_text(s_view.baro.calibration_status, "SYNC PHONE TO CALIBRATE");
+            ui_set_label_text(s_view.baro.calibration_status, "CHECK ALTITUDE");
             return;
         }
         s_view.baro.calibration_waiting = 1;
         ui_set_label_text(s_view.baro.calibration_status, "CALIBRATING...");
     }
-    /* 3="RESET"：清除本次开机的校准偏差与等待状态。 */
+    /* 3="RESET"：清除本次开机的校准点与等待状态。 */
     else
     {
         app_baro_reset_calibration();
@@ -1821,7 +1821,7 @@ static void baro_page(void)
             lv_obj_add_event_cb(control, baro_calibration_cb, LV_EVENT_LONG_PRESSED_REPEAT, (void *)(uintptr_t)i);
         }
     }
-    s_view.baro.calibration_status = ui_label(card, "SYNC PHONE TO CALIBRATE", 8, 122, &lv_font_montserrat_10, UI_MUTED);
+    s_view.baro.calibration_status = ui_label(card, "ENTER KNOWN ALTITUDE", 8, 122, &lv_font_montserrat_10, UI_MUTED);
     lv_obj_set_width(s_view.baro.calibration_status, 196);
     ui_note(s_body, "Tap a digit, then use +/- to set known altitude. Calibration resets at restart.", y + 394);
     ui_note(s_body, "Fresh phone temperature corrects altitude. SPL006 / sample every 5 min.", y + 458);
@@ -3751,18 +3751,18 @@ static void refresh_baro(void)
         }
         else if (baro.calibration_state == APP_BARO_CAL_APPLIED)
         {
-            if (baro.temperature_corrected != 0)
+            if (baro.calibrated_from_phone != 0)
             {
-                ui_set_label_text(s_view.baro.calibration_status, "CALIBRATED / PHONE TEMP");
+                ui_set_label_text(s_view.baro.calibration_status, "CALIBRATED / PHONE GPS");
             }
             else
             {
-                ui_set_label_text(s_view.baro.calibration_status, "CALIBRATED / STANDARD");
+                ui_set_label_text(s_view.baro.calibration_status, "CALIBRATED / MANUAL");
             }
         }
         else if (baro.reference_ready == 0)
         {
-            ui_set_label_text(s_view.baro.calibration_status, "SYNC PHONE TO CALIBRATE");
+            ui_set_label_text(s_view.baro.calibration_status, "ENTER KNOWN ALTITUDE");
         }
         else if (baro.temperature_corrected != 0)
         {

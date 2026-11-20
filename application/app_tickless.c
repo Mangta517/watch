@@ -103,8 +103,8 @@ void app_tickless_sleep(uint32_t expected_ticks)
     /* control 保存 SysTick 原 CTRL 配置；remaining 为停表时剩余计数；rtc_start/rtc_end 为一分钟内计数；
      * elapsed_counts 为折算出的总 CPU 周期；phase 为停表时已走过的当前 tick 相位。 */
     uint32_t control, remaining, rtc_start, rtc_end, elapsed_counts, phase;
-    /* complete_ticks 为折算出的完整 tick 数；pend_tick 标记收尾是否需要补置 pending。 */
-    uint32_t complete_ticks, pend_tick = 0;
+    /* complete_ticks 为实测完整tick，step_ticks 为期限前可直接推进的部分。 */
+    uint32_t complete_ticks, step_ticks;
     /* DWT周期戳：停表时刻、进入等待前时刻，以及两次RTC读取前的采样戳。 */
     uint32_t stopped_cycle, resumed_cycle, rtc_start_cycle, rtc_end_cycle;
     /* STOP 相关：唤醒计数、TIM2 起止计数值与停钟期间应补的计数。 */
@@ -198,7 +198,6 @@ void app_tickless_sleep(uint32_t expected_ticks)
         use_stop = 0;
     }
 
-    /* 在最近任务截止时间唤醒；到期的最后一个tick交ISR处理，step不越过解阻塞点。 */
     /* 记录进入等待前的 DWT 周期戳（仅回退路径会用到）。 */
     resumed_cycle = DWT->CYCCNT;
     /* STOP 路径：屏蔽 MPU 数据就绪中断后深睡，醒来先恢复 PLL。 */
@@ -363,17 +362,13 @@ void app_tickless_sleep(uint32_t expected_ticks)
         ++complete_ticks;
         remaining = counts_per_tick;
     }
-    /* 实测达到或超过期望时长时，只补到最后一拍之前，把最后一拍留给正常 ISR。 */
-    if (complete_ticks >= expected_ticks)
+    /* 直接跳过的节拍必须早于任务解阻塞点。 */
+    step_ticks = complete_ticks;
+    if (step_ticks >= expected_ticks)
     {
-        complete_ticks = expected_ticks - 1;
-        /* 标记收尾需要补置 pending，让 ISR 处理这最后一拍。 */
-        pend_tick = 1;
+        step_ticks = expected_ticks - 1;
     }
 
-    /* 收尾一次性补齐时间：长SysTick自己产生的pending不是普通的1ms节拍，先清掉；
-     * 按实测周期数装回SysTick，uwTick与RTOS tick同步加上，LOAD随后恢复成1ms；
-     * 若实测已达到expected_ticks，只补到最后一拍之前，留下的pending交给正常ISR解除阻塞。 */
     /* 清除长 SysTick 期间产生的到期标志，避免被当成普通节拍重复计数。 */
     SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
     /* 先按剩余周期数装载 SysTick，使下一拍在正确相位到期。 */
@@ -385,16 +380,14 @@ void app_tickless_sleep(uint32_t expected_ticks)
     __DSB(); /* 确保当前周期先装载短尾段，再恢复标准重装值。 */
     /* HAL 毫秒计数一次性补上折算出的完整 tick 数。 */
     uwTick += complete_ticks;
-    /* RTOS tick 同步推进同样的 tick 数。 */
-    vTaskStepTick((TickType_t)complete_ticks);
+    vTaskStepTick((TickType_t)step_ticks);
     /* 恢复 1ms 的标准重装值，回到正常节拍。 */
     SysTick->LOAD = counts_per_tick - 1;
-    /* 若有一拍留给 ISR，补置 pending 让正常节拍中断随后处理。 */
-    if (pend_tick != 0)
+    /* IDLE此时已挂起调度器。到期及超期的节拍记入内核，恢复调度时逐拍处理任务期限。 */
+    for (; step_ticks < complete_ticks; ++step_ticks)
     {
-        SCB->ICSR = SCB_ICSR_PENDSTSET_Msk;
+        (void)xTaskIncrementTick();
     }
-    /* UART/DMA/EXTI中断第一次执行时，HAL和RTOS时间已经补齐。 */
     /* 屏障保证补时与装载对后续中断可见。 */
     __DSB();
     /* 清流水线，避免执行切换前的旧指令。 */

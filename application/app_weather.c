@@ -12,6 +12,9 @@ static char s_frame[32];
 static uint8_t s_length;
 static uint8_t s_overflow;
 static uint32_t s_last_byte_ms;
+static int16_t s_phone_altitude_m;
+static uint32_t s_phone_altitude_ms;
+static uint8_t s_phone_altitude_pending;
 
 void app_weather_reset_receive(void)
 {
@@ -19,6 +22,22 @@ void app_weather_reset_receive(void)
     s_length = 0;
     /* 清超长标记，避免上一段残帧的溢出结论影响下一帧。 */
     s_overflow = 0;
+    s_phone_altitude_pending = 0;
+}
+
+uint8_t app_weather_take_altitude(int16_t *altitude_m, uint32_t now_ms)
+{
+    if (s_phone_altitude_pending == 0)
+    {
+        return 1;
+    }
+    s_phone_altitude_pending = 0;
+    if ((uint32_t)(now_ms - s_phone_altitude_ms) >= 3000)
+    {
+        return 1;
+    }
+    *altitude_m = s_phone_altitude_m;
+    return 0;
 }
 
 /* 解析可选负号与限定宽度的十进制数；游标停在结束处，0=已取value。 */
@@ -62,13 +81,13 @@ static uint8_t parse_number(const char **cursor, int32_t *value, uint8_t max_dig
     return digits == 0;
 }
 
-/* 校验整帧：支持BARO,REF,<Pa>(80000..120000)或WEATHER,<码>,<温度x10>,<湿度>(0..99/±1000/0..100)。 */
-static void finish_frame(void)
+/* 定位校准指令必须完整换行；接收空闲只可收尾天气和旧气压参考。 */
+static void finish_frame(uint8_t terminated)
 {
     /* 游标从"WEATHER,"之后的第8字节开始，依次读取三个数字字段。 */
     const char *cursor = s_frame + 8;
     /* code为WMO天气码，temperature为摄氏温度乘10的整数，humidity为相对湿度百分比。 */
-    int32_t code, temperature, humidity, sea_level_pa;
+    int32_t code, temperature, humidity, sea_level_pa, altitude_m;
     /* 在有效长度处补字符串结束符，供memcmp与游标判断使用。 */
     s_frame[s_length] = '\0';
     /* 整帧条件：未溢出且长度至少8；前缀为"WEATHER,"；依次解析码/温度/湿度且逗号位置正确；
@@ -81,6 +100,17 @@ static void finish_frame(void)
             sea_level_pa >= 80000 && sea_level_pa <= 120000)
         {
             s_weather.sea_level_pa = (uint32_t)sea_level_pa;
+        }
+    }
+    else if (terminated != 0 && !s_overflow && s_length >= 9 && memcmp(s_frame, "BARO,ALT,", 9) == 0)
+    {
+        cursor = s_frame + 9;
+        if (parse_number(&cursor, &altitude_m, 4) == 0 && cursor == s_frame + s_length &&
+            altitude_m >= -1000 && altitude_m <= 9000)
+        {
+            s_phone_altitude_m = (int16_t)altitude_m;
+            s_phone_altitude_ms = s_last_byte_ms;
+            s_phone_altitude_pending = 1;
         }
     }
     else if (!s_overflow && s_length >= 8 && memcmp(s_frame, "WEATHER,", 8) == 0 && parse_number(&cursor, &code, 4) == 0 && *cursor++ == ',' &&
@@ -113,7 +143,7 @@ void app_weather_service(uint32_t now_ms)
     /* 有在制字节或已溢出时，计算距最近非结束符字节的毫秒差；达到200ms空闲即收尾本帧。 */
     if ((s_length || s_overflow) && (uint32_t)(now_ms - s_last_byte_ms) >= 200)
     {
-        finish_frame();
+        finish_frame(0);
     }
 }
 
@@ -135,7 +165,7 @@ void app_weather_receive(const uint8_t *data, uint16_t size, uint32_t now_ms)
         /* CR或LF表示一帧结束：立即校验并更新快照，随后由finish_frame清空在制帧。 */
         if (data[i] == '\r' || data[i] == '\n')
         {
-            finish_frame();
+            finish_frame(1);
         }
         else
         {

@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 /** 用最小旧master桩验证连接捕获、成功恢复、取消和超时的收尾。 */
@@ -36,6 +37,12 @@ public final class OtaBridgeTest
         public int disconnects;
         public int delayedState = -1;
         public boolean mismatch;
+        public byte[] sent;
+
+        public void sendWatchSync(byte[] command)
+        {
+            sent = command;
+        }
 
         public void connect(BluetoothDevice device)
         {
@@ -150,6 +157,31 @@ public final class OtaBridgeTest
         check(master.rx_characteristic != null);
         check(master.tx_characteristic != null);
         check(master.deviceConnected == watch);
+    }
+
+    private static void calibrationConnection() throws Exception
+    {
+        FakeMaster master = new FakeMaster();
+        FakeActivity activity = install(master);
+        master.gatt = new BluetoothGatt();
+        check(OtaBridge.calibrationLink(activity) == null);
+        master.state = 3;
+        master.tx_characteristic = new BluetoothGattCharacteristic(TX, 0);
+        BluetoothGatt link = OtaBridge.calibrationLink(activity);
+        check(link == master.gatt);
+        OtaBridge.sendCalibration(activity, link, -50);
+        check(new String(master.sent, StandardCharsets.US_ASCII).equals("BARO,ALT,-50\n"));
+        master.gatt = new BluetoothGatt();
+        master.sent = null;
+        try
+        {
+            OtaBridge.sendCalibration(activity, link, 110);
+            throw new AssertionError();
+        }
+        catch (IOException expected)
+        {
+            check(master.sent == null);
+        }
     }
 
     private static void restoreRejectsMainThread() throws Exception
@@ -342,6 +374,7 @@ public final class OtaBridgeTest
     public static void main(String[] args) throws Exception
     {
         connectedDeviceCapture();
+        calibrationConnection();
         restoreSucceeds();
         restoreRejectsMainThread();
         restoreCancelBeforeConnect();

@@ -42,11 +42,12 @@ extern "C"
     typedef struct
     {
         int32_t pressure_pa; /* 温度补偿后气压 (Pa) */
-        float alt_m;         /* 气压海拔(m)，采用手机参考、环境温度和本次校准偏差。 */
+        float alt_m;         /* 气压海拔(m)，优先使用与本表气压配对的校准点。 */
         int32_t press_raw;   /* 原始压力计数 (24bit 补码) */
         int32_t temp_raw;    /* 原始温度计数 (24bit 补码) */
-        uint8_t reference_ready; /* 已收到手机海平面气压，可开始已知海拔校准。 */
+        uint8_t reference_ready; /* 已收到手机海平面气压。 */
         uint8_t temperature_corrected; /* 1=使用手机环境温度；0=标准大气模型。 */
+        uint8_t calibrated_from_phone; /* 当前校准点取自手机定位。 */
         app_baro_calibration_state calibration_state;
     } app_baro_struct;
 
@@ -78,11 +79,11 @@ extern "C"
     uint8_t App_Baro_GetSnapshot(app_baro_struct *baro);
     /* LVGL同步参考和天气温度(0.1摄氏度)；pressure_pa=0保留当前参考，温度无效时使用标准模型。 */
     void app_baro_set_reference(uint32_t pressure_pa, int16_t temperature_x10, uint8_t temperature_valid);
-    /* LVGL提交已知海拔(-1000..9000m)，sensor用下一次新采样校准；0=受理、1=范围错误或尚未同步手机。 */
-    uint8_t app_baro_calibrate_altitude(int16_t altitude_m);
+    /* 提交已知海拔(-1000..9000m)，sensor用新采样校准；手机定位请求只在短时间内有效。 */
+    uint8_t app_baro_calibrate_altitude(int16_t altitude_m, uint8_t from_phone);
     /* 查询是否有待处理的已知海拔校准请求: 1=等待下一次采样校准; 0=无。 */
     uint8_t app_baro_calibration_pending(void);
-    /* 清除本次开机的校准偏差和待处理请求，参考气压及环境温度继续使用。 */
+    /* 清除本次开机的校准点和待处理请求，回到气象参考。 */
     void app_baro_reset_calibration(void);
 
 #ifdef __cplusplus

@@ -81,6 +81,22 @@ class SenderTest(unittest.TestCase):
             sender.send_image(connection, self.image)
         self.assertEqual(connection.writes, [b"OTA,INFO\n"])
 
+    def test_fragmented_replies_wait_for_newline(self):
+        for expected in [b"OTA,LAYOUT,08010000,00050000", b"Flash erased, ready to receive data...", b"ok,len:2313"]:
+            with self.subTest(expected=expected):
+                connection = Connection(self.image)
+                chunks = [expected[:11], b"", expected[11:], b"\r", b"\n"]
+                with patch.object(connection, "readline", side_effect=chunks) as read:
+                    sender.wait_reply(connection, expected)
+                self.assertEqual(read.call_count, len(chunks))
+
+    def test_unterminated_ack_is_not_success(self):
+        expected = b"ok,len:2313"
+        connection = Connection(self.image, expected)
+        with patch.object(sender.time, "monotonic", side_effect=[0, 1, 61]):
+            with self.assertRaises(TimeoutError):
+                sender.wait_reply(connection, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

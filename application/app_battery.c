@@ -28,11 +28,11 @@ static uint8_t s_last_percent;     /* 本次开机已发布的电量下限(只�
 static uint8_t s_error_streak;
 static uint8_t s_sleep_mode;       /* sensor任务写入的熄屏标志，决定当轮周期档位 */
 
-/* 2026-11-19保留3.50~3.85V低段节点，高段按表端4.05V满电锚点重拟合，见docs/battery-log.md。 */
+/* 3.50～4.05V按显示端点线性取值，每50mV的节点四舍五入为整数百分比。 */
 static const app_battery_curve_point_struct s_curve[] =
 {
-    {3500, 0}, {3550, 2}, {3600, 5}, {3650, 7}, {3700, 10}, {3750, 13}, {3800, 15}, {3850, 17},
-    {3900, 34}, {3950, 48}, {4000, 83}, {4050, 100}
+    {3500, 0}, {3550, 9}, {3600, 18}, {3650, 27}, {3700, 36}, {3750, 45},
+    {3800, 55}, {3850, 64}, {3900, 73}, {3950, 82}, {4000, 91}, {4050, 100}
 };
 
 const app_battery_curve_point_struct *app_battery_get_curve(uint8_t *count)

@@ -255,8 +255,8 @@ def build(args, work, keystore):
     manifest_path.write_text(manifest, encoding="utf-8")
     yaml_path = decoded / "apktool.yml"
     yaml = yaml_path.read_text(encoding="utf-8")
-    yaml = re.sub(r"(?m)^  versionCode:.*$", "  versionCode: 26", yaml)
-    yaml = re.sub(r"(?m)^  versionName:.*$", "  versionName: 1.95-wave.21-ota-fixes", yaml)
+    yaml = re.sub(r"(?m)^  versionCode:.*$", "  versionCode: 27", yaml)
+    yaml = re.sub(r"(?m)^  versionName:.*$", "  versionName: 1.95-wave.22-altitude", yaml)
     yaml_path.write_text(yaml, encoding="utf-8")
     patch_ble_mode(decoded)
     patch_weather_pressure(decoded)

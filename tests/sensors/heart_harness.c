@@ -930,6 +930,17 @@ int main(int argc, char **argv)
         store_tests();
         return 0;
     }
+    if (argc > 1 && strcmp(argv[1], "telemetry_off") == 0)
+    {
+        app_heart_init();
+        begin();
+        wave(60, 12000, 80.0f);
+        app_heart_get_snapshot(&heart);
+        assert(heart.state == APP_HEART_VALID && heart.bpm == 60);
+        assert(app_heart_read_samples(samples, 32) == 0);
+        puts("PASS: default build measures BPM without filling the waveform queue.");
+        return 0;
+    }
     app_heart_get_snapshot(&heart);
     assert(heart.state == APP_HEART_ERROR && heart.bpm == 0);
     read_fault = (em7028_fault){EM7028_FAULT_CONFIG, 0x0D, 0xFF};

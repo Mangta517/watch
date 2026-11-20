@@ -8,7 +8,7 @@ static RTC_HandleTypeDef watch_rtc;
 static uint8_t rtc_ready;
 static uint8_t rtc_configured;
 static uint32_t rtc_start_ms;
-static uint8_t rtc_waiting_lse;
+static uint8_t rtc_init_active;
 static HAL_StatusTypeDef rtc_start_status = HAL_ERROR;
 
 /* RTC异步标志按DWT限1ms并用次数兜底；IDLE屏蔽中断时不依赖HAL tick。 */
@@ -64,7 +64,7 @@ void watch_rtc_init_begin(void)
     /* 记录启动时刻，供 watch_rtc_init_service 计算 5s 超时 */
     rtc_start_ms = HAL_GetTick();
     /* 标记启动流程尚未完成，后续由 service 逐拍推进 */
-    rtc_waiting_lse = 1;
+    rtc_init_active = 1;
     /* 初始状态设为 BUSY，表示正在等待 LSE 起振 */
     rtc_start_status = HAL_BUSY;
 }
@@ -72,17 +72,15 @@ void watch_rtc_init_begin(void)
 HAL_StatusTypeDef watch_rtc_init_service(void)
 {
     /* 没有待完成的启动流程时，直接返回上一次记录的启动结果 */
-    if (rtc_waiting_lse == 0)
+    if (rtc_init_active == 0)
     {
         return rtc_start_status;
     }
-    /* LSE 已就绪：执行完整 RTC 配置并结束等待 */
+    /* LSE就绪后尝试配置；INITF或RSF超时后由LVGL按正常节拍重试。 */
     if (__HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) != 0)
     {
-        /* 记录配置结果，供后续调用直接查询 */
         rtc_start_status = watch_rtc_init();
-        /* 启动流程结束，不再重复配置 */
-        rtc_waiting_lse = 0;
+        rtc_init_active = rtc_start_status == HAL_TIMEOUT;
     }
     /* LSE 尚未就绪，检查是否已超过 5s 启动超时 */
     else if (rtc_start_status == HAL_BUSY && (uint32_t)(HAL_GetTick() - rtc_start_ms) >= LSE_STARTUP_TIMEOUT)
@@ -96,8 +94,8 @@ HAL_StatusTypeDef watch_rtc_init_service(void)
 
 uint8_t watch_rtc_init_is_pending(void)
 {
-    /* 只有首次等待窗口计入启动阶段，超时后以正常任务节拍检查LSE。 */
-    return rtc_waiting_lse != 0 && rtc_start_status == HAL_BUSY;
+    /* 只有首次起振等待计入启动阶段，各类超时后恢复正常任务节拍。 */
+    return rtc_init_active != 0 && rtc_start_status == HAL_BUSY;
 }
 
 HAL_StatusTypeDef watch_rtc_init(void)

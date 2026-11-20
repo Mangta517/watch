@@ -43,6 +43,7 @@ static uint16_t host_heart_samples_count;
 static uint32_t host_heart_tx_ok, host_heart_tx_error;
 static uint8_t host_temperature_valid;
 static int16_t host_temperature_x10;
+static unsigned host_altitude_requests;
 unsigned host_diag_rx_resets;
 
 uint8_t watch_rtc_init_is_pending(void)
@@ -62,6 +63,13 @@ void app_baro_set_reference(uint32_t pressure_pa, int16_t temperature_x10, uint8
     (void)pressure_pa;
     host_temperature_x10 = temperature_x10;
     host_temperature_valid = temperature_valid;
+}
+
+uint8_t app_baro_calibrate_altitude(int16_t altitude_m, uint8_t from_phone)
+{
+    assert(altitude_m == -34 && from_phone == 1);
+    ++host_altitude_requests;
+    return 0;
 }
 
 uint16_t app_heart_read_samples(app_heart_sample_struct *samples, uint16_t size)
@@ -483,6 +491,11 @@ static void receive_power_tests(void)
     assert(weather.received_ms == xTaskGetTickCount());
     assert(host_temperature_valid != 0 && host_temperature_x10 == 263);
     assert(host_snapshot().log_revision != before.log_revision);
+    host_feed("BARO,ALT,-34\n");
+    host_service(1, 0);
+    assert(host_altitude_requests == 1);
+    host_service(1, 0);
+    assert(host_altitude_requests == 1);
     app_ble_update_power(0, 0, 1);
     host_tick += 29999; /* 前面的完整校时已确认手机，使用30秒窗口。 */
     app_ble_update_power(0, 0, 0);
@@ -503,7 +516,7 @@ static void receive_power_tests(void)
     host_tick += 2000;
     app_ble_update_power(0, 0, 0);
     assert(host_snapshot().enabled != 0);
-    puts("PASS: independent RX/CLEAR/loss recovery, timebase offset, AT/RTC guards, ECO grace, KEEP CONNECTED and weather expiry while powered off.");
+    puts("PASS: one-shot altitude delivery, RX/CLEAR/loss recovery, timebase offset, AT/RTC guards and ECO power policy.");
 }
 
 int main(int argc, char **argv)
