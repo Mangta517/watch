@@ -4,6 +4,7 @@
 #include "battery_adc.h"
 #include "semphr.h"
 #include <assert.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -11,6 +12,9 @@ ADC_HandleTypeDef hadc1;
 Host_ADC_TypeDef host_adc1;
 uint8_t host_adc_clock_enabled;
 static uint32_t primask;
+GPIO_TypeDef host_gpio_a;
+static jmp_buf shutdown_wait;
+static uint8_t shutdown_stage, shutdown_expected;
 
 uint32_t __get_PRIMASK(void)
 {
@@ -25,6 +29,38 @@ void __disable_irq(void)
 void __set_PRIMASK(uint32_t value)
 {
     primask = value;
+}
+
+void HAL_Delay(uint32_t ms)
+{
+    assert(shutdown_expected != 0 && shutdown_stage == 0 && ms >= 3 && primask == 0 && host_adc_clock_enabled == 0);
+    shutdown_stage = 1;
+}
+
+void tps3823_disable(void)
+{
+    assert(shutdown_stage == 1 && primask != 0);
+    shutdown_stage = 2;
+}
+
+void HAL_SuspendTick(void)
+{
+    assert(shutdown_stage == 2 && primask != 0);
+    shutdown_stage = 3;
+}
+
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
+{
+    assert(port == POWER_EN_GPIO_Port && pin == POWER_EN_Pin && state == GPIO_PIN_RESET);
+    assert(shutdown_stage == 3 && primask != 0);
+    shutdown_stage = 4;
+}
+
+void HAL_PWR_EnterSLEEPMode(uint32_t regulator, uint8_t entry)
+{
+    assert(regulator == PWR_MAINREGULATOR_ON && entry == PWR_SLEEPENTRY_WFI);
+    assert(shutdown_stage == 4 && primask != 0);
+    longjmp(shutdown_wait, 1);
 }
 
 void host_adc_clock_set(uint8_t enabled)
@@ -137,6 +173,51 @@ static void next_sample(void)
     app_battery_service();
 }
 
+static void check_shutdown(uint8_t sleep)
+{
+    unsigned i;
+
+    reference_value = 1548; /* VDDA=3198mV，ADC 2081正好折算为3250mV。 */
+    now_ms = UINT32_MAX - 12000;
+    app_battery_init();
+    if (sleep != 0)
+    {
+        adc_value = 2497;
+        for (i = 0; i < 8; ++i)
+        {
+            next_sample();
+        }
+        app_battery_set_sleep_mode(1);
+    }
+    adc_value = 2081;
+    now_ms += APP_BATTERY_SLEEP_PERIOD_MS;
+    app_battery_service();
+    next_sample();
+    adc_value = 2082; /* 3252mV，清除已有两次的低压计数。 */
+    next_sample();
+
+    adc_value = 2081;
+    now_ms += APP_BATTERY_SLEEP_PERIOD_MS;
+    app_battery_service();
+    next_sample();
+    poll_result = HAL_TIMEOUT;
+    next_sample(); /* ADC失败中断连续有效采样。 */
+    poll_result = HAL_OK;
+
+    now_ms += APP_BATTERY_SLEEP_PERIOD_MS;
+    app_battery_service();
+    next_sample();
+    assert(shutdown_stage == 0);
+    shutdown_expected = 1;
+    if (setjmp(shutdown_wait) == 0)
+    {
+        next_sample();
+        assert(0); /* 第三次有效低压采样后不会返回。 */
+    }
+    assert(shutdown_stage == 4 && locked == 0);
+    puts("PASS: 3250mV requires three consecutive valid readings, including across tick wrap, then releases PA3.");
+}
+
 static void check_failure(HAL_StatusTypeDef result, uint8_t valid)
 {
     app_battery_struct snapshot;
@@ -234,7 +315,7 @@ static void check_full_voltage(void)
     /* 通过真实ADC换算与启动均值核对所有节点、各段中点、限幅和取整边界。 */
     static const app_battery_curve_point_struct expected[] =
     {
-        {0, 0}, {3400, 0}, {3499, 0}, {3500, 0}, {3502, 0}, {3503, 1},
+        {3400, 0}, {3499, 0}, {3500, 0}, {3502, 0}, {3503, 1},
         {3525, 5}, {3550, 9}, {3575, 14}, {3600, 18}, {3613, 20}, {3614, 21}, {3625, 23},
         {3650, 27}, {3675, 32}, {3700, 36}, {3725, 41}, {3750, 45}, {3775, 50}, {3800, 55},
         {3825, 60}, {3850, 64}, {3875, 69}, {3900, 73}, {3925, 78}, {3950, 82},
@@ -246,6 +327,7 @@ static void check_full_voltage(void)
     unsigned i, sample;
     const uint32_t supply_mv = 3198; /* VREFINT读数1548反算所得，可精确量化测试表中的每个电压。 */
     assert(count == 12 && points[0].voltage_mv == 3500 && points[count - 1].voltage_mv == 4050);
+    assert(app_battery_voltage_to_percent(0) == 0);
     for (i = 0; i < count; ++i)
     {
         assert(points[i].voltage_mv == 3500 + i * 50);
@@ -408,6 +490,11 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "calibration") == 0)
     {
         check_reference_calibration();
+        return 0;
+    }
+    if (argc > 1 && (strcmp(argv[1], "shutdown") == 0 || strcmp(argv[1], "shutdown_sleep") == 0))
+    {
+        check_shutdown(strcmp(argv[1], "shutdown_sleep") == 0);
         return 0;
     }
     if (argc > 1)

@@ -12,7 +12,7 @@ Host_Cycle_Type host_cycles;
 uint32_t SystemCoreClock = 84000000;
 uint32_t host_rtc_source;
 static uint8_t init_registers, fresh_init, mismatch_ssr;
-static uint32_t saved_prer;
+static uint32_t saved_prer, saved_date;
 #define backup host_rtc.BKP0R
 static uint32_t rtc_subsecond, prescaler_changes;
 static uint32_t tick, lse_ready, tick_reads;
@@ -120,6 +120,7 @@ void host_write_protection(RTC_HandleTypeDef *rtc, uint8_t enabled)
         runtime_set_active = rtc->State == HAL_RTC_STATE_BUSY;
         set_phase_nops = set_elapsed_nops = 0;
         saved_prer = RTC->PRER;
+        saved_date = RTC->DR;
         fresh_init = backup != 0x52544330U && backup != 0x52544331U;
     }
     else if (runtime_set_active != 0)
@@ -150,6 +151,13 @@ void host_write_protection(RTC_HandleTypeDef *rtc, uint8_t enabled)
             assert(hours < 24 && minutes < 60 && seconds < 60);
             rtc_seconds = hours * 3600 + minutes * 60 + seconds;
             rtc_subsecond = 0;
+            if (RTC->DR != saved_date)
+            {
+                calendar.Year = ((RTC->DR >> 20) & 15) * 10 + ((RTC->DR >> 16) & 15);
+                calendar.WeekDay = (RTC->DR >> 13) & 7;
+                calendar.Month = ((RTC->DR >> 12) & 1) * 10 + ((RTC->DR >> 8) & 15);
+                calendar.Date = ((RTC->DR >> 4) & 3) * 10 + (RTC->DR & 15);
+            }
             ++set_calls;
         }
         runtime_set_active = 0;
@@ -184,7 +192,7 @@ HAL_StatusTypeDef HAL_RTC_GetTime(RTC_HandleTypeDef *rtc, RTC_TimeTypeDef *time,
     {
         return get_status;
     }
-    shadow_locked = 1;
+    shadow_locked = (RTC->CR & RTC_CR_BYPSHAD) == 0;
     time->Hours = rtc_seconds / 3600;
     time->Minutes = rtc_seconds / 60 % 60;
     time->Seconds = rtc_seconds % 60;
@@ -198,7 +206,7 @@ HAL_StatusTypeDef HAL_RTC_GetTime(RTC_HandleTypeDef *rtc, RTC_TimeTypeDef *time,
 }
 HAL_StatusTypeDef HAL_RTC_GetDate(RTC_HandleTypeDef *rtc, RTC_DateTypeDef *date, uint32_t format)
 {
-    assert(rtc->Instance == RTC && format == RTC_FORMAT_BIN && shadow_locked);
+    assert(rtc->Instance == RTC && format == RTC_FORMAT_BIN && (shadow_locked || (RTC->CR & RTC_CR_BYPSHAD) != 0));
     shadow_locked = 0;
     *date = calendar;
     if (mismatch_ssr != 0)
@@ -638,6 +646,31 @@ int main(int argc, char **argv)
     assert(watch_rtc_is_synced() && rtc_seconds == 10921 && set_calls == calls);
     puts("PASS: staged LSE wait, late startup after timeout/tick wrap, automatic retry after shadow sync timeout and retained time.");
     bounded_set_time_tests();
+    {
+        uint16_t day;
+        calendar = (RTC_DateTypeDef){.Year = 24, .Month = 2, .Date = 28, .WeekDay = 3};
+        rtc_seconds = 23 * 3600 + 59 * 60;
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 8825);
+        feed("00:01:00\n", 3000);
+        assert(app_clock_get_result() == APP_CLOCK_SYNCED && rtc_seconds == 60);
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 8826);
+        assert(calendar.Date == 29 && calendar.WeekDay == 4 && (RTC->CR & RTC_CR_BYPSHAD) == 0);
+        feed("23:59:50\n", 3100);
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 8825);
+        assert(calendar.Date == 28 && calendar.WeekDay == 3);
+        feed("00:00:01\n", 3200);
+        assert(watch_rtc_get_day_key(&day) == 0 && day == 8826);
+
+        calendar = (RTC_DateTypeDef){.Year = 24, .Month = 12, .Date = 31, .WeekDay = 2};
+        rtc_seconds = 23 * 3600 + 59 * 60;
+        feed("00:02\n", 3300);
+        assert(calendar.Year == 25 && calendar.Month == 1 && calendar.Date == 1 && calendar.WeekDay == 3);
+        feed("23:59\n", 3400);
+        assert(calendar.Year == 24 && calendar.Month == 12 && calendar.Date == 31 && calendar.WeekDay == 2);
+        feed("00:05\n", 3500);
+        assert(calendar.Year == 24 && calendar.Month == 12 && calendar.Date == 31 && calendar.WeekDay == 2);
+        puts("PASS: phone time frames correct both midnight directions, including leap day and year rollover.");
+    }
     if (argc > 1)
     {
         char frames[128];

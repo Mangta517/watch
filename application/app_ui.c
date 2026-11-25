@@ -1362,7 +1362,7 @@ static void compass_draw_cb(lv_event_t *event)
     {
         return;
     }
-    /* 航向是12点相对磁北的顺时针角，磁北在表盘上的方位取负角。 */
+    /* 航向是12点相对北向基准的顺时针角，指针在表盘上的方位取负角。 */
     sine = -lv_trigo_sin(s_view.motion.compass_heading);
     cosine = lv_trigo_cos(s_view.motion.compass_heading);
     /* 左右两个侧点位于与指针垂直的方向，距圆心8像素。 */
@@ -1377,7 +1377,7 @@ static void compass_draw_cb(lv_event_t *event)
     /* 四个三角面组成双色菱形指针，不增加位图或常驻控件。 */
     for (angle = 0; angle < 2; ++angle)
     {
-        /* 第0轮画指向磁北的半段，用s_compass_color。 */
+        /* 第0轮画北端，用s_compass_color。 */
         if (angle == 0)
         {
             tip.x = center.x + sine * 30 / LV_TRIGO_SIN_MAX;
@@ -1605,7 +1605,14 @@ static void compass_update(const app_imu_struct *imu)
         {
             color = UI_RED;
             status_color = UI_GREEN;
-            ui_set_label_text(s_view.motion.compass_status, "MAG NORTH");
+            if (fabsf(imu->mag_declination_deg) >= 0.05f)
+            {
+                ui_set_label_text(s_view.motion.compass_status, "TRUE NORTH");
+            }
+            else
+            {
+                ui_set_label_text(s_view.motion.compass_status, "MAG NORTH");
+            }
         }
         else
         {
@@ -1624,13 +1631,17 @@ static void compass_update(const app_imu_struct *imu)
             status_color = UI_ORANGE;
             ui_set_label_text(s_view.motion.compass_status, "CALIBRATING");
         }
-        else if (!imu->mag_online)
-        {
-            ui_set_label_text(s_view.motion.compass_status, "NO MAG DATA");
-        }
         else if (imu->compass_state == APP_COMPASS_FIELD_RANGE)
         {
             ui_set_label_text(s_view.motion.compass_status, "FIELD RANGE");
+        }
+        else if (imu->compass_state == APP_COMPASS_INTERFERENCE)
+        {
+            ui_set_label_text(s_view.motion.compass_status, "MAG INTERFERENCE");
+        }
+        else if (!imu->mag_online)
+        {
+            ui_set_label_text(s_view.motion.compass_status, "NO MAG DATA");
         }
         else if (imu->compass_state == APP_COMPASS_HORIZONTAL_WEAK)
         {
@@ -3149,8 +3160,7 @@ static void mag_calibration_status(const app_imu_struct *imu)
         switch (imu->mag_persist_state)
         {
         case APP_MAG_PERSIST_RESTORED:
-            /* 本次校准来自开机从EEPROM恢复的记录，已经可用于磁融合。 */
-            ui_set_label_text(s_view.motion.cal_status, "CAL RESTORED / EEPROM\nReady for magnetic fusion");
+            ui_set_label_text(s_view.motion.cal_status, "CAL RESTORED / EEPROM\nReady for compass");
             return;
         case APP_MAG_PERSIST_SAVING:
             /* 结果已算出，正在写EEPROM。 */
@@ -3177,7 +3187,8 @@ static void mag_calibration_status(const app_imu_struct *imu)
     }
     /* 显示帧数与三轴覆盖幅度，保留失败证据，方便再次旋转校准。 */
     /* 三轴跨度单位uT，用于判断旋转时各轴是否都覆盖到足够幅度。 */
-    ui_set_label_text_fmt(s_view.motion.cal_status, "%s: %u samples\nX/Y/Z span: %ld/%ld/%ld uT", result, (unsigned)imu->mag_cal_samples,
+    ui_set_label_text_fmt(s_view.motion.cal_status, "%s: %u (COV %u%%)\nX/Y/Z span: %ld/%ld/%ld uT", result,
+                       (unsigned)imu->mag_cal_samples, (unsigned)imu->mag_cal_coverage_pct,
                        (long)imu->mag_cal_span_uT[0], (long)imu->mag_cal_span_uT[1], (long)imu->mag_cal_span_uT[2]);
 }
 

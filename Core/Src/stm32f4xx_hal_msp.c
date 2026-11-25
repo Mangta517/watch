@@ -73,9 +73,9 @@ void HAL_MspInit(void)
   /* System interrupt init*/
 
   /* USER CODE BEGIN MspInit 1 */
-    /* 四个固件目标共用：PVD最高档约2.9V，Flash操作前查询，不修改Option Bytes。 */
+    /* DS10314：PVD6下降门限2.85～2.99V，高于x32 Flash擦除所需的2.70V。 */
     PWR_PVDTypeDef pvd = {0};
-    pvd.PVDLevel = PWR_PVDLEVEL_7;
+    pvd.PVDLevel = PWR_PVDLEVEL_6;
     pvd.Mode = PWR_PVD_MODE_NORMAL;
     HAL_PWR_ConfigPVD(&pvd);
     HAL_PWR_EnablePVD();

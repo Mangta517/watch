@@ -2,28 +2,29 @@
 
 基于 STM32F411CEU6、FreeRTOS 和 LVGL 的手表工程，包含 RTC 表盘、蓝牙校时与天气同步、运动与环境传感器、心率采集（手动START/STOP及熄屏每10或1分钟定时）和电池显示。
 
-本页汇总截至 2026-11-19 的固件实现，涵盖三程序 OTA（主引导、独立保底与升级 APP）、默认 ECO 低功耗、电量与复位日志及运行诊断等已完成改动。普通 APP 和升级 APP 共用业务源码，包含低功耗调度、计步与辅助抬腕、日常 BLE 通信、复位和电压日志，以及主引导／保底的 BLE 控制与 SPP OTA 传输。2026-11-04 起 OTA 采用 BLE 控制与 SPP 正文传输，保底同时开启 BLE/SPP。仅支持 BLE 的旧保底须先通过 SWD 更新。实板烧录与手机实测仍待完成。本次涉及的文件、具体改动、优化效果及验证结果见[更新记录](#更新记录)。后面的历史条目保留各原始提交的交付记录，部分提交来自其他职责分支；当前行为包括蓝牙默认ECO、心率熄屏自动测量周期默认10分钟，可选1分钟并保存到EEPROM、正常熄屏下sensor按25ms读取加速度，LVGL按200ms基础周期服务、AHT采样窗口收尾及触摸休眠成功后才等待通知。MPU DATA_RDY/PB12 EXTI自启动屏蔽，sensor轮询取帧，PA4与RTC仍可唤醒；Sleep/STOP全程保持TPS3823超时检测，RTC/LSE停振时仍保留硬件复位通路。实际电流与佩戴效果仍待实测，当前行为以本页首节及当前源码为准。
+普通 APP 和升级 APP 共用低功耗、计步、抬腕、蓝牙及日志源码。默认采用 ECO 省电和静止熄屏 20 Hz MOT，支持 MAG2 椭球磁校准、3250 mV 低压软关机和 STOP 唤醒故障快照。三程序 OTA 由主引导、独立保底和升级 APP 组成，使用 BLE 控制和 SPP 传输固件。各版本的交付记录见[更新记录](#更新记录)，实际电流及佩戴效果待实板测量。
 
 ## 当前低功耗策略
 
 | 项目 | 当前行为 |
 | --- | --- |
 | 主频与电压档 | APP 固定84MHz / Scale2，Flash 2等待周期；APB1=42MHz、APB2=84MHz、SPI1=42MHz，背光PWM仍约3.32kHz |
-| CPU Sleep / STOP | 默认ECO熄屏关闭BLE、外设空闲时进入低功耗稳压器STOP（RTC请求上限400ms，正常熄屏受25ms传感器任务期限约束）；选择保连时BLE常开使用Sleep，其单次Sleep受SysTick 24位容量限制为最多199ms；启用Flash掉电及稳压器低电压模式，醒后恢复84MHz |
+| CPU Sleep / STOP | 默认 ECO 熄屏关闭 BLE、外设空闲时进入 STOP。运动时按 25ms 期限采样，静止 MOT 的心跳上限为 400ms。BLE 保连时使用 Sleep，单次最多 199ms。STOP 启用 Flash 掉电与稳压器低电压模式，醒后恢复 84MHz |
 | GPIO与外设停钟 | 空闲PA0/PA6/PA7/PB10/PC13为模拟无上下拉，PA2充电指示保持数字输入无上下拉；PA3和屏幕控制/心率LED推挽输出移除内部下拉；熄屏后停止TIM3并关闭TIM3/SPI1/DMA2时钟，ADC在Sleep期间停钟 |
 | 手机性能诊断 | 现有App诊断页发送DIAG,1加换行开启、DIAG,0关闭；采集lvgl/sensor/touch/IDLE及传感器、内存和UART指标，默认静默，心率波形仍关闭 |
 | 无触摸待机 | 仅表盘连续 10 秒无操作后自动熄屏；APPS 菜单及功能详情页常亮，返回表盘重新计时，切页动画期间不自动熄屏。所有页面仍可用 PA4 手动熄屏，共用处理：背光 0%、默认ECO关闭蓝牙供电/UART（选择保连时保留）、暂停绘图，LCD/触摸芯片休眠且仅在休眠成功后阻塞等待PA4，失败时首次立即、其后按500ms退避；PA4 或辅助抬腕亮屏，恢复原亮度、当前 RTC 时间和原页面 |
 | 显示与触摸轮询 | 活跃目标周期 10ms；熄屏无按键时等待 PA4/UART/sensor 通知或200ms期限，按键消抖/按住期间保持 20ms，触摸休眠后阻塞 |
-| MPU6050 | 普通亮屏和熄屏使用40Hz加速度采样，sensor按25ms推进计步及抬腕，关闭陀螺仪及温度。心率参考需要时切到100Hz加速度，计步仍以平均40Hz消费。指南针由LSM303DLHC独立提供 |
-| 磁力计 | 心率与SPORT使用加速度参考时关闭磁力计，40Hz后台同样休眠；仅姿态页/校准按完整IMU档位恢复（活动/校准30Hz），不再随运动/心率场景开启 |
+| MPU6050 | 普通档 40Hz 加速度，sensor 每 25ms 取帧用于计步和抬腕。静止熄屏满足条件后进入 20Hz MOT，PB12 或 400ms 心跳唤醒处理。心率需要参考时切到 100Hz，计步按平均 40Hz 消费 |
+| 磁力计 | 指南针页和磁校准启用 LSM303DLHC 加速度与磁场，其他页面和后台休眠。MAG2 椭球校准记录存于 EEPROM，见[磁航向与校准](docs/magnetometer.md) |
 | 心率读取 | 测量期间sensor目标10ms，PPG读取下限30ms；MPU配置100Hz、校准50Hz；心率页通过`10 MIN`/`1 MIN`选择熄屏后台周期并保存到EEPROM，每次测最多10秒、有效BPM即停，与手动START/STOP及SPORT强制连续互不干扰；实际循环率受串行读取和抢占影响，以手机诊断为准 |
 | 温湿度采样 | 所有亮屏页面每1秒采样，熄屏每10分钟采样；AHT测量窗口在采样及恢复完成后即收尾（保留恢复与读回超时），普通待机和SPORT遵守同一屏幕策略，切页不重置周期 |
 | 零偏校准 | 保留 100 帧静止确认和 100 帧平均，50Hz 下约 4 秒；两个阶段超时分别为 6 秒、4 秒 |
 | 电池估算 | 按3.50V/0%和4.05V/100%线性生成12个节点，3.70V为36%、3.80V为55%、3.90V为73%。慢滤波电压3613mV查表为20%，3614mV为21%。电压经VREFINT校准，启动末4次均值初始化1/8、1/256双低通，本次开机百分比只降不升。详见[当前电量曲线](docs/battery-log.md#2026-11-19-电量曲线) |
+| 低压软关机 | 连续 3 次有效原始电压不高于 3250 mV 时，等待在途 EEPROM 页写完成，再释放 PA3 电源锁存。首次低压后每秒复查 |
 
-Tickless保留1ms逻辑节拍，单次请求上限400ms，实际等待受最近任务截止时间及唤醒条件约束，使用RTC测量并补齐HAL / FreeRTOS时间；RTC未就绪时退回1ms Sleep。`application/app_tickless.h`中的`APP_TICKLESS_ENABLE_STOP`默认1。默认ECO在熄屏、当前命令和TX完成且接收队列清空后留1秒安静期，再关闭蓝牙供电与UART；外设空闲时进入STOP，正常熄屏按25ms传感器期限唤醒采样，静止时保持该节拍。选择保连时BLE常开，BLE/USART时钟保留，只使用Sleep，单次受SysTick 24位容量限制最多199ms，超过时分多次完成。STOP额外启用Flash掉电及稳压器低电压模式，醒后恢复84MHz，再补齐时间并开放中断；STOP期间保留PA4/RTC唤醒，退出时按保存值恢复EXTI屏蔽状态。实际功耗和采样裕量需上板测量。自动待机与 PA4 手动熄屏行为一致；ECO熄屏后关闭PA8供电及PA9/PA10 UART，保连保留，支持 PA4 或放下后抬腕亮屏。LCD 先等在途 DMA 完成或超时安全收尾再进入休眠，亮屏发 Sleep Out 后至少等待 120ms，发送失败时恢复显示停钟和SPI引脚高阻。触摸恢复由独立任务复位并等待约 310ms，不阻塞 sensor。亮屏时电池约1秒采样一次、温湿度每1秒触发一次、气压每5分钟一次；熄屏电池稳定后约10秒一次，温湿度每10分钟测量，无姿态需求时 MPU 自主进行 40Hz 加速度采样，sensor 每 25ms 读取新帧。每日步数保存在Flash sector 7尾部，写满后继续在RAM中计步，见[电压与计步日志](docs/battery-log.md)。首页脚印环下显示步数，温湿度环支持点击进入CLIMATE。活动、运动和心率所需采样频率保持原配置。
+Tickless 保留 1ms 逻辑节拍，通过 RTC 补齐 HAL 和 FreeRTOS 时间。RTC 未就绪时退回 1ms Sleep。PA4 和 RTC 保持唤醒能力，PB12 只在 MPU 武装 MOT 时开放。ECO 熄屏后等待通信空闲，再关闭蓝牙电源及 UART。未确认手机通信时等待 1 秒，收到合法校时后等待 30 秒。LCD 收尾 DMA 后休眠，触摸由独立任务恢复。采样与唤醒细节见[低功耗策略](docs/low-power.md)。每日步数保存在 Flash sector 7 尾部，校时跨零点处理见[蓝牙协议](docs/bluetooth.md)。
 
-TPS3823启用后，PB2/WDI在Sleep/STOP及唤醒恢复期间始终保持推挽输出，PB1/WDG_EN保持低电平接通复位；IDLE不暂停计时，也不额外喂狗。只有LVGL与sensor都有真实进度时才按原条件喂狗。RTC/LSE停振且无其它唤醒时，外部看门狗仍可超时复位。取消1秒慢待机后，静止时唤醒次数增加，电流与佩戴效果仍需实测，详见[看门狗说明](docs/watchdog.md)。
+TPS3823 启用后，Sleep、STOP 及唤醒恢复期间保持外部复位通路，LVGL 与 sensor 都有进度才喂狗。STOP 唤醒失败可通过复位快照区分欠压、时钟恢复和 RTC 补时故障。MOT 下的最长喂狗间隔仍待实板测量。详见[看门狗说明](docs/watchdog.md)和[复位诊断](docs/reset-diagnostics.md)。
 
 心率测量已恢复约 30ms 读取，40～200 BPM 合成回归在稳定段逐帧检查有效输出，包含 200 BPM；范围外的估算仍不钳位。实板心率精度、总线时序及功耗尚需测量。具体实现见 [界面与低功耗说明](docs/watch-ui.md)。
 
@@ -33,7 +34,7 @@ TPS3823启用后，PB2/WDI在Sleep/STOP及唤醒恢复期间始终保持推挽�
 
 复位期间连续按住KEY_1（PA5，低电平）满2000ms即进入独立保底；APP向量无效、EEPROM读取失败，或EEPROM记录以BL前缀标记升级中/畸形时，主引导也进入保底。记录为空白或非BL遗留标志且APP向量有效时，主引导正常启动APP。当前手机流程经 SPP 向保底发送升级 APP BIN，使用`start:长度:CRC32`协议，收到 ready 后发送正文，连续 30 秒无进展才复位等待。手机先查询并确认 APP 布局，BIN 按 256 字节外层块组织，块间保留 40ms 暂停，最后一块之后直接等待设备回执。SPP 按字节流发送，只有设备回传匹配长度的`ok,len:N`才算固件校验通过。断连或整机复位后一律完整重传，不续传、不回滚。OTA 只擦写 sector 4..6，主引导、保底和日志保留。完整部署见[Bootloader说明](docs/bootloader.md)。
 
-2026-11-02启用主引导＋独立保底＋手表APP三程序结构。升级APP的日常BLE入口为`OTA,START`加实际换行，sensor保存并读回EEPROM标志后复位进入保底，回执为`OTA,REBOOTING,SPP`。手机 APK 基于旧波形 App 扩充，当前版为`1.95-wave.21-ota-fixes` / code26，产物`work/confirmed-review-20261119/Bluetooth-Wave-OTA-Fixes.apk`；源码和重建脚本见[tools/android-ota](tools/android-ota/README.md)。原签名密钥缺失，扩充版与旧波形版并存。首次使用需通过SWD部署主引导和独立保底，旧`0x08008000`的APP BIN不可沿用；仅支持 BLE 的旧保底须先通过 SWD 写入支持 SPP 的`F411-OTA-Recovery.bin`。现有保底支持 SPP 且分区一致时可直接使用手机升级 APP。
+升级 APP 收到 `OTA,START` 加换行后，sensor 保存并读回 EEPROM 标志，再回复 `OTA,REBOOTING,SPP` 并复位进入保底。手机端当前海拔测试版为 `1.95-wave.23-altitude` / code28，使用独立包名。源码、测试版 APK 路径及重建方式见[Android OTA 工具](tools/android-ota/README.md)。首次部署经 SWD 写入主引导与支持 SPP 的独立保底。现有保底支持 SPP 且分区一致时，可直接用手机更新 APP。
 
 ## 海拔温度修正与已知海拔校准
 
@@ -59,6 +60,8 @@ TPS3823启用后，PB2/WDI在Sleep/STOP及唤醒恢复期间始终保持推挽�
 | [f411ceu6_upgrade_app](MDK-ARM/f411ceu6_upgrade_app.uvprojx) | `0x08010000` | 320KiB | 三程序结构的手表APP，向量表偏移`0x10000` |
 
 四个目标默认由构建后命令生成BIN，工具路径使用Keil安装目录宏。输出分别为`MDK-ARM/f411ceu6/f411ceu6.bin`、`MDK-ARM/bootloader/f411_bootloader.bin`、`MDK-ARM/recovery/f411_recovery.bin`、`MDK-ARM/f411ceu6_upgrade_app/f411ceu6_upgrade_app.bin`。APP为84MHz，主引导与保底为100MHz。工程中的Flash范围和链接分区已对齐。CubeMX RTC分频与运行时统一为0/32767。2026-11-16的逐项核查、全量构建与BIN交付见[审查修复记录](work/document-review-20261116/审查与修复结果.md)。
+
+CubeMX 重新生成后，运行 `python -X utf8 tests/startup/run.py` 检查启动入口。四个目标共用的 `SystemInit()` 在 C 运行库初始化前保持 PA3 电源锁存并屏蔽 PB1 外部复位。APP 由 `watch_system_clock_config()` 启动 HSI/PLL，LSE 在首帧后独立等待。
 
 最后128KiB（sector 7）保留给电压历史；普通APP/升级APP及Bootloader均已限制边界，旧Bootloader和只支持SPP接收的旧保底均须通过SWD同步更新，手机OTA不能替换这两个程序。下载时使用按扇区擦除，整片擦除会清掉日志。
 

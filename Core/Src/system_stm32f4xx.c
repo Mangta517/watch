@@ -166,6 +166,16 @@ const uint8_t APBPrescTable[8]  = {0, 0, 0, 0, 1, 2, 3, 4};
   */
 void SystemInit(void)
 {
+#if defined(STM32F411xE)
+    /* 在C运行库初始化前保持PA3供电，并用PB1屏蔽外部复位线。 */
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOBEN;
+    (void)RCC->AHB1ENR;
+    GPIOA->BSRR = GPIO_BSRR_BS3;
+    GPIOA->MODER = (GPIOA->MODER & ~GPIO_MODER_MODER3) | GPIO_MODER_MODER3_0;
+    GPIOB->BSRR = GPIO_BSRR_BS1;
+    GPIOB->MODER = (GPIOB->MODER & ~GPIO_MODER_MODER1) | GPIO_MODER_MODER1_0;
+#endif
+
   /* FPU settings ------------------------------------------------------------*/
   #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
     SCB->CPACR |= ((3UL << 10*2)|(3UL << 11*2));  /* set CP10 and CP11 Full Access */

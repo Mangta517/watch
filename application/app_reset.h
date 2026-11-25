@@ -47,7 +47,7 @@ void app_reset_watchdog_feed(uint32_t now_ms);
 /* stack为异常入口的原始MSP/PSP；记录后由调用方主动复位。
    只有非栈类故障且压栈帧完整落在SRAM内时才采信帧内PC/LR/xPSR。 */
 void app_reset_capture_fault(uint32_t kind, const uint32_t *stack, uint32_t exc_return);
-/* 无硬件帧的停机记录：pc可为0，task_tag为栈溢出钩子压入的前4个任务名字节。 */
+/* 无硬件帧的停机记录：pc为返回地址或诊断值，task_tag为任务名或故障标签。 */
 void app_reset_capture_stop(uint32_t kind, uint32_t pc, uint32_t task_tag);
 /* LVGL断言记录调用者地址后主动复位。 */
 void app_reset_assert_stop(void);

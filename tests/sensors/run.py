@@ -13,7 +13,7 @@ if not gcc:
 sources = ["common/platform_delay.c", "tests/sensors/sensor_harness.c", "interface/lsm303dlhc.c",
            "interface/mpu6050.c", "interface/spl006.c",
            "interface/bl24c02.c", "application/app_mag_store.c", "application/app_imu_store.c", "application/app_uptime.c",
-           "common/common_imu.c", "common/common_activity.c", "application/app_imu.c", "application/app_baro.c"]
+           "common/common_imu.c", "common/common_mag_cal.c", "common/common_activity.c", "application/app_imu.c", "application/app_baro.c"]
 with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     battery_exe = str(Path(out) / "battery.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -24,6 +24,8 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
     subprocess.run([battery_exe, "percentage"], cwd=root, check=True)
     subprocess.run([battery_exe, "calibration"], cwd=root, check=True)
     subprocess.run([battery_exe, "allocation_failed"], cwd=root, check=True)
+    subprocess.run([battery_exe, "shutdown"], cwd=root, check=True)
+    subprocess.run([battery_exe, "shutdown_sleep"], cwd=root, check=True)
     i2c_exe = str(Path(out) / "i2c.exe")
     subprocess.run([gcc, "tests/diagnostics/diag_stub.c", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-include", "tests/sensors/host/i2c_platform.h",
@@ -58,8 +60,9 @@ with tempfile.TemporaryDirectory(prefix="watch-sensors-") as out:
             "-include", "tests/sensors/host/platform.h"]
     args += ["-I" + p for p in ["tests/sensors/host", "Core/Inc", "application", "interface", "common"]]
     subprocess.run(args + sources + ["-lm", "-o", exe], cwd=root, check=True)
-    for mode in ["compass", "accel_warmup", "independent", "day_cold", "day_retained", "mag_calibration", "mag_save_failed", "mag_calibration_reference",
-                 "activity", "activity_high_rate", "uptime", "async_save", "mpu_stale", "mpu_sleep_recovery", "mag_sleep_recovery", "recovery"]:
+    for mode in ["compass", "mag_ellipsoid", "accel_warmup", "independent", "day_cold", "day_retained", "mag_calibration", "mag_save_failed", "mag_calibration_reference",
+                 "activity", "activity_high_rate", "uptime", "async_save", "mpu_stale", "mpu_mot",
+                 "mpu_sleep_recovery", "mag_sleep_recovery", "mag_screen_off", "recovery"]:
         subprocess.run([exe, mode], cwd=root, check=True)
     subprocess.run([exe], cwd=root, check=True)
     driver_exe = str(Path(out) / "drivers.exe")

@@ -19,7 +19,9 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
         ("app_heart", ["app_heart_init_hw"]),
     ])
     (Path(out) / "sensor_lifecycle.inc").write_text(lifecycle, encoding="utf-8")
-    # Execute the actual main startup prefix, without duplicating its GPIO setup.
+    # Execute the real SystemInit and main prefix in startup order.
+    system_init = extract_functions(root / "Core/Src/system_stm32f4xx.c", ["SystemInit"])
+    (Path(out) / "system_init.inc").write_text(system_init, encoding="utf-8")
     main_source = (root / "Core/Src/main.c").read_text(encoding="utf-8")
     entry = main_source.index("int main(void)")
     prefix = main_source[main_source.index("{", entry) + 1:main_source.index("  MX_DMA_Init();", entry)]
@@ -43,7 +45,8 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
         "tests/startup/startup_harness.c", "application/app_uptime.c", "application/app_weather.c",
         "application/app_weather_store.c", "tests/diagnostics/diag_stub.c", "-o", exe,
     ], cwd=root, check=True)
-    for mode in ["mpu_cooldown", "mpu_cooldown_wrap", "mpu_cooldown_window", "mpu_cooldown_window_wrap",
+    for mode in ["mot_irq", "mot_screen", "mot_sport", "mot_heart", "mot_heart_fast", "mot_health", "mot_baro", "mot_poll", "mot_compass_offline",
+                 "mpu_cooldown", "mpu_cooldown_wrap", "mpu_cooldown_window", "mpu_cooldown_window_wrap",
                  "late_lse", "activity_cadence", "activity_cadence_wrap", "sample_retry", "sample_retry_sleep",
                  "sample_retry_success", "sample_retry_success_sleep", "sample_retry_wrap", "ok", "devices_failed",
                  "display_alloc_failed", "sensor_alloc_failed", "restored", "load_error",
@@ -53,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="watch-startup-") as out:
                  "first_frame_deadline", "first_frame_sparse", "runtime_slow", "runtime_sparse",
                  "runtime_sensor_stalled", "runtime_deadline", "baro_cadence", "baro_calibration", "baro_calibration_boundary", "baro_calibration_boundary_wrap",
                  "environment_policy", "environment_policy_wrap", "environment_policy_sleep_retry",
-                 "reference_recovery", "environment_policy_early", "touch_alloc_failed", "touch_overrun",
+                 "reference_recovery", "environment_policy_early", "touch_alloc_failed", "touch_overrun", "planned_reset",
                  "power_background", "power_idle", "power_motion", "power_heart", "power_calibration", "power_heart_calibration",
                  "sleep_cycle", "sleep_wrap", "sleep_calibration", "sleep_heart_early", "sleep_heart_offset",
                  "sleep_stationary", "sleep_stationary_wrap", "sleep_stationary_recovery", "sleep_stationary_wake", "sleep_stationary_heart",

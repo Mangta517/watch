@@ -43,8 +43,15 @@ extern Host_Debug_Type host_debug;
 #define SCB_SCR_SLEEPDEEP_Msk (1UL << 2)
 typedef struct
 {
-    uint32_t CCR3, CNT, CR2, SR, CR, CFGR, APB2ENR, ODR, IMR, PR, CSR;
+    uint32_t CCR3, CNT, CR2, SR, CR, CFGR, APB2ENR, ODR, IMR, PR, CSR, BDCR;
 } Host_Peripheral_Type;
+typedef struct
+{
+    uint32_t ISR, SSR, TR, DR;
+} Host_Rtc_Type;
+extern Host_Rtc_Type host_rtc;
+#define RTC (&host_rtc)
+#define RTC_ISR_WUTF (1U << 10)
 extern Host_Peripheral_Type host_tim2, host_tim3, host_rcc, host_spi, host_dma, host_adc, host_gpio, host_exti;
 #define TIM2 (&host_tim2)
 #define TIM3 (&host_tim3)

@@ -22,9 +22,23 @@ import android.widget.Toast;
 /** 用户发起时短时定位，将海平面海拔交给手表与新气压配对。 */
 final class AltitudeCalibration
 {
-    private static final int GNSS_TIMEOUT_MS = 20000;
+    private static final int GNSS_TIMEOUT_MS = 30000;
     private static final int MAX_FIX_AGE_MS = 8000;
     private static final String BUTTON_TEXT = "用手机定位校准手表海拔";
+
+    private static final class MslResult
+    {
+        final double altitudeM;
+        final float mslAccuracyM;
+        final String errorMessage;
+
+        MslResult(double altitudeM, float mslAccuracyM, String errorMessage)
+        {
+            this.altitudeM = altitudeM;
+            this.mslAccuracyM = mslAccuracyM;
+            this.errorMessage = errorMessage;
+        }
+    }
 
     private AltitudeCalibration()
     {
@@ -66,18 +80,45 @@ final class AltitudeCalibration
         }
 
         Handler handler = new Handler(Looper.getMainLooper());
-        boolean use_nmea = Build.VERSION.SDK_INT < 34;
+        boolean require_nmea = Build.VERSION.SDK_INT < 34;
+        AltitudeFixSelector<Location> selector = new AltitudeFixSelector<>(require_nmea);
         class CalibrationListener implements LocationListener, OnNmeaMessageListener
         {
             private boolean stopped;
-            private Location fix;
-            private long gga_time_ms;
-            private double gga_altitude_m = Double.NaN;
+            private boolean nmea_registered;
+            private boolean converge_scheduled;
+            private String last_status = "正在搜星，请站定...";
+            private final Runnable converge_check = () ->
+            {
+                converge_scheduled = false;
+                if (stopped)
+                {
+                    return;
+                }
+                long now_ms = SystemClock.elapsedRealtime();
+                AltitudeFixSelector.Selected<Location> ready = selector.onConvergeTimer(now_ms);
+                if (ready != null)
+                {
+                    send_selected(ready);
+                    return;
+                }
+                schedule_converge(now_ms);
+            };
             private final Runnable timeout = () ->
             {
+                if (stopped)
+                {
+                    return;
+                }
+                AltitudeFixSelector.Selected<Location> fallback = selector.onTimeout(SystemClock.elapsedRealtime());
+                if (fallback != null)
+                {
+                    send_selected(fallback);
+                    return;
+                }
                 if (stop())
                 {
-                    finish(activity, button, "定位精度不足，请到开阔处站定后重试");
+                    finish(activity, button, selector.timeoutMessage());
                 }
             };
 
@@ -88,16 +129,38 @@ final class AltitudeCalibration
                     return false;
                 }
                 stopped = true;
+                converge_scheduled = false;
                 handler.removeCallbacks(timeout);
+                handler.removeCallbacks(converge_check);
                 manager.removeUpdates(this);
-                if (use_nmea)
+                if (nmea_registered)
                 {
+                    nmea_registered = false;
                     manager.removeNmeaListener(this);
                 }
                 return true;
             }
 
-            private void send_fix(Location location, double nmea_altitude_m)
+            private void schedule_converge(long now_ms)
+            {
+                long remaining_ms = selector.remainingConvergeMs(now_ms);
+                if (remaining_ms < 0L)
+                {
+                    if (converge_scheduled)
+                    {
+                        converge_scheduled = false;
+                        handler.removeCallbacks(converge_check);
+                    }
+                    return;
+                }
+                if (!converge_scheduled)
+                {
+                    converge_scheduled = true;
+                    handler.postDelayed(converge_check, remaining_ms);
+                }
+            }
+
+            private void send_selected(AltitudeFixSelector.Selected<Location> selected)
             {
                 if (!activity.hasWindowFocus())
                 {
@@ -106,15 +169,17 @@ final class AltitudeCalibration
                     return;
                 }
                 stop();
-                new Thread(() -> send(activity, button, link, location, nmea_altitude_m), "watch-altitude").start();
+                button.setText("正在发送海拔...");
+                new Thread(() -> send(activity, button, link, selected), "watch-altitude").start();
             }
 
-            private void pair_gga()
+            private void update_status()
             {
-                if (fix != null && fix_age_ms(fix) <= 2000 && fix_age_ms(fix) >= 0 &&
-                    Math.abs(fix.getTime() - gga_time_ms) <= 1500 && !Double.isNaN(gga_altitude_m))
+                String status = selector.statusLabel();
+                if (!status.equals(last_status))
                 {
-                    send_fix(fix, gga_altitude_m);
+                    last_status = status;
+                    button.setText(status);
                 }
             }
 
@@ -131,25 +196,16 @@ final class AltitudeCalibration
                     finish(activity, button, "校准已取消");
                     return;
                 }
-                long age_ms = fix_age_ms(location);
-                if (age_ms < 0 || age_ms > 2000 || location.isFromMockProvider() || !location.hasAltitude() || !location.hasAccuracy() ||
-                    !location.hasVerticalAccuracy() || !(location.getAccuracy() <= 15.0f) ||
-                    !(location.getVerticalAccuracyMeters() <= 12.0f) ||
-                    !location.hasSpeed() || !(location.getSpeed() <= 1.0f))
+                long now_ms = SystemClock.elapsedRealtime();
+                AltitudeFixSelector.Sample<Location> sample = to_sample(location, now_ms);
+                AltitudeFixSelector.Selected<Location> selected = selector.onLocation(sample, now_ms);
+                if (selected != null)
                 {
-                    fix = null;
+                    send_selected(selected);
                     return;
                 }
-
-                if (use_nmea)
-                {
-                    fix = location;
-                    pair_gga();
-                }
-                else
-                {
-                    send_fix(location, Double.NaN);
-                }
+                update_status();
+                schedule_converge(now_ms);
             }
 
             @Override
@@ -159,13 +215,15 @@ final class AltitudeCalibration
                 {
                     return;
                 }
-                double altitude_m = GgaAltitude.parse(sentence);
-                if (!Double.isNaN(altitude_m))
+                long now_ms = SystemClock.elapsedRealtime();
+                AltitudeFixSelector.Selected<Location> selected = selector.onNmea(sentence, timestamp, now_ms);
+                if (selected != null)
                 {
-                    gga_altitude_m = altitude_m;
-                    gga_time_ms = timestamp;
-                    pair_gga();
+                    send_selected(selected);
+                    return;
                 }
+                update_status();
+                schedule_converge(now_ms);
             }
 
             @Override
@@ -189,17 +247,32 @@ final class AltitudeCalibration
 
             void begin()
             {
-                if (use_nmea && !manager.addNmeaListener(this, handler))
+                if (require_nmea)
                 {
-                    finish(activity, button, "手机未提供 GNSS 海拔数据，可在手表手动校准");
-                    return;
+                    nmea_registered = manager.addNmeaListener(this, handler);
+                    if (!nmea_registered)
+                    {
+                        finish(activity, button, "手机未提供 GNSS 海拔数据，可在手表手动校准");
+                        return;
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        nmea_registered = manager.addNmeaListener(this, handler);
+                    }
+                    catch (RuntimeException ignored)
+                    {
+                        nmea_registered = false;
+                    }
                 }
                 manager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 0, this, handler.getLooper());
                 handler.postDelayed(timeout, GNSS_TIMEOUT_MS);
             }
         }
         button.setEnabled(false);
-        button.setText("正在获取海拔，请站定");
+        button.setText("正在搜星，请站定...");
         CalibrationListener listener = new CalibrationListener();
         try
         {
@@ -212,22 +285,57 @@ final class AltitudeCalibration
         }
     }
 
+    private static AltitudeFixSelector.Sample<Location> to_sample(Location location, long now_ms)
+    {
+        boolean has_vertical = location.hasVerticalAccuracy();
+        float vertical_m = has_vertical ? location.getVerticalAccuracyMeters() : Float.NaN;
+        boolean has_speed = location.hasSpeed();
+        float speed_mps = has_speed ? location.getSpeed() : Float.NaN;
+        return new AltitudeFixSelector.Sample<>(
+            location,
+            location.getElapsedRealtimeNanos() / 1000000L,
+            now_ms,
+            location.getTime(),
+            location.isFromMockProvider(),
+            location.hasAltitude(),
+            location.hasAccuracy(),
+            location.hasAccuracy() ? location.getAccuracy() : Float.NaN,
+            has_vertical,
+            vertical_m,
+            has_speed,
+            speed_mps
+        );
+    }
+
     private static long fix_age_ms(Location location)
     {
         return (SystemClock.elapsedRealtimeNanos() - location.getElapsedRealtimeNanos()) / 1000000L;
     }
 
-    private static void send(Activity activity, Button button, BluetoothGatt link, Location location, double altitude_m)
+    private static void send(Activity activity, Button button, BluetoothGatt link,
+        AltitudeFixSelector.Selected<Location> selected)
     {
+        Location location = selected.sample.payload;
+        double altitude_m = selected.nmeaAltitudeM;
+        float msl_accuracy_m = Float.NaN;
         String result;
         try
         {
+            String msl_error = null;
             if (Build.VERSION.SDK_INT >= 34)
             {
-                altitude_m = mean_sea_level_altitude(activity, location);
+                MslResult msl = mean_sea_level_altitude(activity, location, selected.nmeaAltitudeM);
+                altitude_m = msl.altitudeM;
+                msl_accuracy_m = msl.mslAccuracyM;
+                msl_error = msl.errorMessage;
             }
             long age_ms = fix_age_ms(location);
-            if (age_ms < 0 || age_ms > MAX_FIX_AGE_MS || !(altitude_m >= -1000 && altitude_m <= 9000))
+            if (msl_error != null)
+            {
+                result = msl_error;
+            }
+            else if (age_ms < AltitudeFixSelector.MIN_LIVE_FIX_AGE_MS || age_ms > MAX_FIX_AGE_MS ||
+                !(altitude_m >= -1000 && altitude_m <= 9000))
             {
                 result = "未取得精度合格的新海拔，请站定后重试";
             }
@@ -235,7 +343,7 @@ final class AltitudeCalibration
             {
                 long rounded_m = Math.round(altitude_m);
                 OtaBridge.sendCalibration(activity, link, (int)rounded_m);
-                result = "已发送 " + rounded_m + " m，请在手表气压页确认";
+                result = AltitudeFixSelector.formatSuccess(rounded_m, selected.sample, msl_accuracy_m);
             }
         }
         catch (Exception error)
@@ -247,17 +355,38 @@ final class AltitudeCalibration
     }
 
     @android.annotation.TargetApi(34)
-    private static double mean_sea_level_altitude(Activity activity, Location location) throws java.io.IOException
+    private static MslResult mean_sea_level_altitude(Activity activity, Location location, double fallback_nmea_m)
     {
-        if (!location.hasMslAltitude() || !location.hasMslAltitudeAccuracy())
+        try
         {
-            new AltitudeConverter().addMslAltitudeToLocation(activity, location);
+            if (!location.hasMslAltitude() || !location.hasMslAltitudeAccuracy())
+            {
+                new AltitudeConverter().addMslAltitudeToLocation(activity, location);
+            }
+            if (location.hasMslAltitude())
+            {
+                if (location.hasMslAltitudeAccuracy())
+                {
+                    float accuracy_m = location.getMslAltitudeAccuracyMeters();
+                    if (Float.isFinite(accuracy_m) && accuracy_m <= AltitudeFixSelector.MAX_MSL_ACCURACY_M)
+                    {
+                        return new MslResult(location.getMslAltitudeMeters(), accuracy_m, null);
+                    }
+                    return new MslResult(Double.NaN, accuracy_m,
+                        "海平面海拔换算精度不足(垂直±" + Math.round(accuracy_m) + "m)，请到开阔处重试");
+                }
+                return new MslResult(location.getMslAltitudeMeters(), Float.NaN, null);
+            }
         }
-        if (location.hasMslAltitude() && location.hasMslAltitudeAccuracy() && location.getMslAltitudeAccuracyMeters() <= 12.0f)
+        catch (Exception ignored)
         {
-            return location.getMslAltitudeMeters();
+            // 部分精简ROM缺少离线大地水准面表时回退到已配对的NMEA GGA正高。
         }
-        return Double.NaN;
+        if (!Double.isNaN(fallback_nmea_m))
+        {
+            return new MslResult(fallback_nmea_m, Float.NaN, null);
+        }
+        return new MslResult(Double.NaN, Float.NaN, "系统未能换算海平面海拔，可在手表手动校准");
     }
 
     private static void finish(Activity activity, Button button, String text)

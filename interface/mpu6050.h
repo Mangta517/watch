@@ -34,6 +34,7 @@ extern "C"
 #define MPU6050_GYRO_CONFIG  0x1B /* 陀螺仪配置寄存器       */
 #define MPU6050_ACCEL_CONFIG 0x1C /* 加速度计配置寄存器     */
 #define MPU6050_MOT_THR      0x1F /* 运动检测阈值           */
+#define MPU6050_MOT_DUR      0x20 /* 运动检测持续时间，单位ms */
 #define MPU6050_FIFO_EN      0x23 /* FIFO 使能              */
 #define MPU6050_I2C_MST_CTRL 0x24 /* I2C 主机控制           */
 #define MPU6050_INT_PIN_CFG  0x37 /* 中断引脚配置           */
@@ -58,6 +59,7 @@ extern "C"
 #define MPU6050_GYRO_ZOUT_L 0x48
 
 #define MPU6050_SIGNAL_PATH_RESET 0x68 /* 信号路径复位           */
+#define MPU6050_MOT_DETECT_CTRL    0x69 /* 加速度上电延时及检测计数递减 */
 #define MPU6050_USER_CTRL         0x6A /* 用户控制               */
 #define MPU6050_PWR_MGMT_1        0x6B /* 电源管理 1             */
 #define MPU6050_PWR_MGMT_2        0x6C /* 电源管理 2             */
@@ -88,6 +90,7 @@ extern "C"
 #define MPU6050_ACCEL_RANGE      MPU6050_ACCEL_RANGE_4G
 #define MPU6050_SAMPLE_PERIOD_MS 25   /* 上电默认40Hz低功耗加速度循环。 */
 #define MPU6050_DLPF_CFG         0x03 /* 陀螺仪42Hz、加速度44Hz */
+#define MPU6050_REFERENCE_PERIOD_MS 10 /* 心率和SPORT的100Hz参考。 */
 
     /* ------------------------------------------------------------ 接口函数 */
     /* 返回值约定：0=成功，1=失败（总线 NACK/超时）                             */
@@ -98,6 +101,12 @@ extern "C"
     uint8_t my_mpu6050_set_sample_period(uint32_t period_ms);
     /* accel_reference=1连续采加速度，陀螺仪/温度待机；25ms使用40Hz循环。 */
     uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference);
+    uint8_t my_mpu6050_enter_mot_sleep(void);
+    uint8_t my_mpu6050_read_mot(Accel_struct *accel, uint8_t *motion);
+    uint8_t my_mpu6050_mot_health_check(void);
+    uint8_t my_mpu6050_mot_armed(void);
+    uint8_t my_mpu6050_mot_woken(void);
+    void my_mpu6050_set_mot_callback(void (*callback)(void));
     uint8_t my_mpu6050_set_sleep(uint8_t sleeping);
     /* 仅sensor任务：begin使数据无效，step每拍至多一笔事务；0=就绪，1=失败冷却，2=推进中。 */
     void my_mpu6050_recover_begin(void);

@@ -3,7 +3,7 @@
  * @file    mpu6050.c
  * @brief   MPU6050 驱动实现 —— 软件 I2C (common/my_i2c.c, SENSOR 总线)
  *          移植自旧工程 flight_hal/interface/my_mpu6050.c：
- *          手表加速度±4g；初始化5Hz低功耗，心率/SPORT切到100Hz，陀螺仪和温度保持待机。
+ *          手表加速度±4g；初始化40Hz低功耗，心率/SPORT切到100Hz，陀螺仪和温度保持待机。
  *          数据就绪中断: 器件 DATA_RDY 输出仍使能 —— INT_ENABLE(0x38)=0x01，
  *          INT_PIN_CFG=0xC0 (低有效/开漏/50µs脉冲)，空闲释放外部4.7k上拉，避免持续灌电流；
  *          main 启动即持续屏蔽 PB12 EXTI（早于稍后的 sensor 初始化，避免倒置时序），
@@ -21,6 +21,30 @@
 /* MPU6050 挂在软件 I2C 的传感器总线上 */
 #define MPU6050_I2C_BUS MY_I2C_BUS_SENSOR
 #define MPU6050_DEVICE_ID 0x68
+#define MPU6050_INT_MOT 0x40
+#define MPU6050_MOT_THRESHOLD 18 /* 原始寄存器值，按实板误唤醒和慢抬腕结果标定。 */
+#define MPU6050_MOT_DURATION_MS 1
+#define MPU6050_MOT_HP_HOLD 0x07
+#define MPU6050_MOT_POWER_2 0x87 /* 20Hz循环、三轴陀螺仪待机。 */
+
+enum
+{
+    MPU6050_MOT_OFF,
+    MPU6050_MOT_ARMED,
+    MPU6050_MOT_WOKEN
+};
+static volatile uint8_t mpu6050_mot_state;
+static void (*mpu6050_mot_callback)(void);
+
+static void mpu6050_mask_mot(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    EXTI->IMR &= ~MPU6050_INT_Pin;
+    mpu6050_mot_state = MPU6050_MOT_OFF;
+    __HAL_GPIO_EXTI_CLEAR_IT(MPU6050_INT_Pin);
+    __set_PRIMASK(primask);
+}
 
 static int16_t mpu6050_clamp_raw(int32_t value)
 {
@@ -113,6 +137,10 @@ static struct
 
 void my_mpu6050_recover_begin(void)
 {
+    if (mpu6050_mot_state != MPU6050_MOT_OFF)
+    {
+        mpu6050_mask_mot();
+    }
     /* 先让数据接口失效：重配期间读到的帧不再对外发布。 */
     mpu6050_ready = 0;
     /* 采样周期回到上电默认的40Hz加速度循环。 */
@@ -172,6 +200,10 @@ uint8_t my_mpu6050_recover_step(uint32_t now_ms)
     /* 已经就绪时不再重配，只在两种异常下重新开始恢复流程。 */
     if (mpu6050_ready != 0)
     {
+        if (mpu6050_mot_state != MPU6050_MOT_OFF)
+        {
+            return 0; /* MOT等待期间不取帧，无帧超时暂停。 */
+        }
         /* 连续1s无新帧也重配，覆盖器件复位后仍ACK但停采样的情况。 */
         /* 条件一：最近一次读取未就绪且距有效帧已满 1s；
          * 条件二：累计 3 次读失败且距首次满 3 次已满 1s。 */
@@ -352,12 +384,14 @@ uint8_t my_mpu6050_set_sample_period(uint32_t period_ms)
 uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference)
 {
     uint8_t power_2 = 0x07, power_1 = 0x08;
+    uint8_t int_status;
+    uint8_t from_mot = mpu6050_mot_state != MPU6050_MOT_OFF;
     (void)accel_reference;
-    if ((period_ms != 10 && period_ms != MPU6050_SAMPLE_PERIOD_MS) || mpu6050_ready == 0)
+    if ((period_ms != MPU6050_REFERENCE_PERIOD_MS && period_ms != MPU6050_SAMPLE_PERIOD_MS) || mpu6050_ready == 0)
     {
         return 1;
     }
-    if (period_ms == s_mpu_period_ms)
+    if (period_ms == s_mpu_period_ms && from_mot == 0)
     {
         return 0;
     }
@@ -366,11 +400,18 @@ uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference)
         power_2 = 0xC7;
         power_1 = 0x28;
     }
+    if (from_mot != 0)
+    {
+        mpu6050_mask_mot();
+    }
     if (my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x08) != 0 ||
+        (from_mot != 0 && (my_mpu6050_write_reg(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE) != 0 ||
+                           my_mpu6050_write_reg(MPU6050_INT_ENABLE, 0x01) != 0)) ||
         my_mpu6050_write_reg(MPU6050_PWR_MGMT_2, power_2) != 0 ||
         my_mpu6050_write_reg(MPU6050_CONFIG, MPU6050_DLPF_CFG) != 0 ||
         my_mpu6050_write_reg(MPU6050_SMPLRT_DIV, 9) != 0 ||
-        my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, power_1) != 0)
+        my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, power_1) != 0 ||
+        (from_mot != 0 && my_mpu6050_read_reg(MPU6050_INT_STATUS, &int_status) != 0))
     {
         my_mpu6050_recover_begin();
         return 1;
@@ -378,7 +419,87 @@ uint8_t my_mpu6050_set_sample_mode(uint32_t period_ms, uint8_t accel_reference)
     s_mpu_period_ms = period_ms;
     mpu_recovery.sample_ms = HAL_GetTick();
     mpu_recovery.no_data = 0;
+    if (from_mot != 0)
+    {
+        mpu_recovery.faults = 0;
+    }
     return 0;
+}
+
+/* PS-MPU-6000A-00 Rev3.3 §8.1：加速度连续运行时复位HPF、等待样本，再锁存静止基准。 */
+uint8_t my_mpu6050_enter_mot_sleep(void)
+{
+    uint8_t int_status;
+    uint32_t primask;
+    if (mpu6050_ready == 0 || mpu_recovery.sleeping != 0 || s_mpu_period_ms != MPU6050_SAMPLE_PERIOD_MS)
+    {
+        return 1;
+    }
+    mpu6050_mask_mot();
+    if (my_mpu6050_write_reg(MPU6050_INT_ENABLE, 0x00) != 0 ||
+        my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x08) != 0 ||
+        my_mpu6050_write_reg(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE) != 0 ||
+        my_mpu6050_write_reg(MPU6050_CONFIG, 0x00) != 0 ||
+        my_mpu6050_write_reg(MPU6050_MOT_DETECT_CTRL, 0x11) != 0 || /* 附加1ms、MOT计数递减1。 */
+        my_mpu6050_write_reg(MPU6050_MOT_THR, MPU6050_MOT_THRESHOLD) != 0 ||
+        my_mpu6050_write_reg(MPU6050_MOT_DUR, MPU6050_MOT_DURATION_MS) != 0 ||
+        my_mpu6050_write_reg(MPU6050_INT_PIN_CFG, 0xC0) != 0)
+    {
+        my_mpu6050_recover_begin();
+        return 1;
+    }
+    platform_delay_min_ms(6); /* 默认4ms + 附加1ms，再留至少1ms采样建立静止基准。 */
+    if (my_mpu6050_write_reg(MPU6050_ACCEL_CONFIG, MPU6050_ACCEL_RANGE | MPU6050_MOT_HP_HOLD) != 0 ||
+        my_mpu6050_write_reg(MPU6050_PWR_MGMT_2, MPU6050_MOT_POWER_2) != 0 ||
+        my_mpu6050_read_reg(MPU6050_INT_STATUS, &int_status) != 0)
+    {
+        my_mpu6050_recover_begin();
+        return 1;
+    }
+
+    /* 在打开器件MOT之前清陈旧下降沿；此后不清PR，防止擦掉刚到的首个事件。 */
+    primask = __get_PRIMASK();
+    __disable_irq();
+    __HAL_GPIO_EXTI_CLEAR_IT(MPU6050_INT_Pin);
+    mpu6050_mot_state = MPU6050_MOT_ARMED;
+    EXTI->IMR |= MPU6050_INT_Pin;
+    __set_PRIMASK(primask);
+    if (my_mpu6050_write_reg(MPU6050_INT_ENABLE, MPU6050_INT_MOT) != 0 ||
+        my_mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x28) != 0)
+    {
+        my_mpu6050_recover_begin();
+        return 1;
+    }
+    return 0;
+}
+
+uint8_t my_mpu6050_mot_health_check(void)
+{
+    uint8_t power[2], int_enable;
+    /* 检查MOT配置是否仍在，覆盖器件复位后地址仍应答的情况。 */
+    if (mpu6050_bus_read(MPU6050_PWR_MGMT_1, power, sizeof(power)) != 0 ||
+        power[0] != 0x28 || power[1] != MPU6050_MOT_POWER_2 ||
+        my_mpu6050_read_reg(MPU6050_INT_ENABLE, &int_enable) != 0 || int_enable != MPU6050_INT_MOT)
+    {
+        my_mpu6050_recover_begin();
+        return 1;
+    }
+    return 0;
+}
+
+uint8_t my_mpu6050_mot_armed(void)
+{
+    return mpu6050_mot_state == MPU6050_MOT_ARMED;
+}
+
+uint8_t my_mpu6050_mot_woken(void)
+{
+    return mpu6050_mot_state == MPU6050_MOT_WOKEN;
+}
+
+void my_mpu6050_set_mot_callback(void (*callback)(void))
+{
+    mpu6050_mot_callback = callback;
 }
 
 /* ---------------------------------------------------------------- 零偏校准 */
@@ -740,6 +861,28 @@ uint8_t my_mpu6050_get_gyro(Gyro_struct *gyro)
     return 0;
 }
 
+/* 高低字节拼接后减去零偏，Z轴仍包含重力。 */
+static void mpu6050_decode_accel(Accel_struct *accel, const uint8_t *buf)
+{
+    accel->Accel_x = mpu6050_clamp_raw((int16_t)((buf[0] << 8) | buf[1]) - (int32_t)s_mpu_offset.accel[0]);
+    accel->Accel_y = mpu6050_clamp_raw((int16_t)((buf[2] << 8) | buf[3]) - (int32_t)s_mpu_offset.accel[1]);
+    accel->Accel_z = mpu6050_clamp_raw((int16_t)((buf[4] << 8) | buf[5]) - (int32_t)s_mpu_offset.accel[2]);
+}
+
+/* 一笔读MOT状态与最新加速度，不使用DATA_RDY判定，也不发布计步帧。 */
+uint8_t my_mpu6050_read_mot(Accel_struct *accel, uint8_t *motion)
+{
+    uint8_t packet[7];
+    if (mpu6050_bus_read(MPU6050_INT_STATUS, packet, sizeof(packet)) != 0)
+    {
+        my_mpu6050_recover_begin();
+        return 1;
+    }
+    *motion = (packet[0] & MPU6050_INT_MOT) != 0;
+    mpu6050_decode_accel(accel, packet + 1);
+    return 0;
+}
+
 /**
  * @brief 读取三轴加速度 (已减零偏；抖动较严重，必要时上层再滤波)
  * @return 0=成功, 1=总线失败(数据未更新)
@@ -762,23 +905,18 @@ uint8_t my_mpu6050_get_accel(Accel_struct *accel)
         return 1;
     }
 
-    /* 高低字节拼接成有符号 16 位原始值，再减去对应轴零偏（Z 轴零偏不含重力）。 */
-    accel->Accel_x = mpu6050_clamp_raw((int16_t)((buf[0] << 8) | buf[1]) - (int32_t)s_mpu_offset.accel[0]);
-    accel->Accel_y = mpu6050_clamp_raw((int16_t)((buf[2] << 8) | buf[3]) - (int32_t)s_mpu_offset.accel[1]);
-    accel->Accel_z = mpu6050_clamp_raw((int16_t)((buf[4] << 8) | buf[5]) - (int32_t)s_mpu_offset.accel[2]);
-    /* 三轴都写入后返回成功。 */
+    mpu6050_decode_accel(accel, buf);
     return 0;
 }
 
-/* 一笔读状态与六轴；加速度模式只读0x3A..0x40，无新帧不覆盖输出。 */
+/* 一笔读0x3A..0x40的状态与加速度，不使用FIFO，无新帧不覆盖输出。 */
 uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
 {
     uint8_t packet[7];
-    const uint8_t *buf = packet + 1;
     uint32_t started_ms;
 
     /* 输出指针为空或器件未就绪时直接返回失败。 */
-    if (data == NULL || mpu6050_ready == 0)
+    if (data == NULL || mpu6050_ready == 0 || mpu6050_mot_state != MPU6050_MOT_OFF)
     {
         return 1;
     }
@@ -800,11 +938,7 @@ uint8_t my_mpu6050_get_data(Accel_Gyro_struct *data)
         return MPU6050_DATA_NOT_READY;
     }
 
-    /* 跳过0x41/0x42温度；完整读成功且DATA_RDY有效后才发布。 */
-    /* 加速度三轴：buf[0..5] 为 0x3B..0x40，拼接后减去零偏。 */
-    data->Accel.Accel_x = mpu6050_clamp_raw((int16_t)((buf[0] << 8) | buf[1]) - (int32_t)s_mpu_offset.accel[0]);
-    data->Accel.Accel_y = mpu6050_clamp_raw((int16_t)((buf[2] << 8) | buf[3]) - (int32_t)s_mpu_offset.accel[1]);
-    data->Accel.Accel_z = mpu6050_clamp_raw((int16_t)((buf[4] << 8) | buf[5]) - (int32_t)s_mpu_offset.accel[2]);
+    mpu6050_decode_accel(&data->Accel, packet + 1);
     memset(&data->Gyro, 0, sizeof(data->Gyro));
     /* 记录最近有效帧的读取开始时刻，并刷新恢复状态机的无帧基准。 */
     mpu_sample_ms = started_ms;
@@ -820,12 +954,7 @@ uint32_t my_mpu6050_sample_ms(void)
     return mpu_sample_ms;
 }
 
-/* ------------------------------------------------------------ 数据就绪中断 */
-/* 器件 DATA_RDY 输出使能 (INT_ENABLE=0x01, INT_PIN_CFG=0xC0)；main 启动即持续屏蔽 PB12 EXTI，
- * 正常运行不再进入本回调，以下 ISR 边沿计数与标志 API 仅为兼容旧调用方保留。
- * HAL 已清 STM32 EXTI PR；这里只记事件，绝不抢 SENSOR 总线。
- * INT脚每次输出50µs低脉冲，DATA_RDY状态在sensor读取0x3A时清除。
- * 两次轮询间的多次DATA_RDY合并，主机边沿计数不作为器件采样率。 */
+/* 轮询档由main/驱动屏蔽PB12。MOT档只接收第一个低脉冲，HAL负责清PR。 */
 
 /**
  * @brief HAL GPIO EXTI 回调 (强符号覆盖 hal_gpio.c 中的 __weak 版本)
@@ -839,6 +968,15 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         mpu6050_int_edges++;
         /* 置“发生过数据就绪”标志，由任务侧原子查询并清除。 */
         mpu6050_int_flag = 1;
+        if (mpu6050_mot_state == MPU6050_MOT_ARMED)
+        {
+            EXTI->IMR &= ~MPU6050_INT_Pin;
+            mpu6050_mot_state = MPU6050_MOT_WOKEN;
+            if (mpu6050_mot_callback != NULL)
+            {
+                mpu6050_mot_callback();
+            }
+        }
     }
 }
 

@@ -5,6 +5,7 @@
  *        由主引导据标志选择跳转保底收固件；只有映射到0x08010000的APP才提供此能力。
  */
 #include "app_ota.h"
+#include "app_task.h"
 #include "boot_layout.h"
 #include "int_bootloader.h"
 #include "bl24c02.h"
@@ -42,54 +43,48 @@ void app_ota_reset_receive(void)
 
 void app_ota_receive(const uint8_t *data, uint16_t size, uint32_t now_ms)
 {
-    /* i为本批数据的字节下标。 */
     uint16_t i;
-    /* 1秒无新字节视为上一段命令作废，避免断连前的半行接到新会话上。 */
+    uint8_t byte;
+
+    /* 空闲满 1 秒就丢弃半行，避免跨连接拼成升级命令。 */
     if ((uint32_t)(now_ms - s_ota.rx_ms) >= 1000)
     {
         app_ota_reset_receive();
     }
-    /* 刷新本批字节的接收时刻，作为下一次1秒超时的基准。 */
     s_ota.rx_ms = now_ms;
-    /* 逐字节累积命令行：换行触发命令判断，非法字符或超长置溢出。 */
     for (i = 0; i < size; ++i)
     {
-        /* CR或LF表示一行结束：补结束符后判断是否为完整OTA命令。 */
-        if (data[i] == '\r' || data[i] == '\n')
+        byte = data[i];
+        if (byte != '\r' && byte != '\n')
         {
-            /* 在当前长度处补字符串结束符，供strcmp比较。 */
-            s_ota.line[s_ota.length] = '\0';
-            /* 仅当未溢出、整行等于"OTA,START"、当前没有待发回执且没有在途发送时受理。 */
-            if (s_ota.overflow == 0 && strcmp(s_ota.line, "OTA,START") == 0 && s_ota.reply == NULL && s_ota.pending == 0)
+            if (byte < 32 || byte > 126 || s_ota.length >= sizeof(s_ota.line) - 1)
             {
-#if defined(VECT_TAB_OFFSET) && VECT_TAB_OFFSET == (APP_START_ADDR - BOOTLOADER_START_ADDR)
-                /* 进入短临界区，与sensor任务对存储状态做互斥交接。 */
-                taskENTER_CRITICAL();
-                /* 仅在存储状态空闲时把请求置为已请求，避免覆盖进行中的升级流程。 */
-                if (s_store_state == OTA_STORE_IDLE)
-                {
-                    s_store_state = OTA_STORE_REQUESTED;
-                }
-                /* 退出临界区，后续EEPROM写入交给sensor任务。 */
-                taskEXIT_CRITICAL();
-#else
-                /* 独立普通APP占用0x08000000，不能复位后误入不存在的Bootloader。 */
-                s_ota.reply = "OTA,UNAVAILABLE,INSTALL_BOOTLOADER_AND_UPGRADE_APP\r\n";
-#endif
+                s_ota.overflow = 1;
             }
-            /* 一行处理完，清空长度与溢出标记准备下一行。 */
-            app_ota_reset_receive();
+            else
+            {
+                s_ota.line[s_ota.length++] = (char)byte;
+            }
+            continue;
         }
-        /* 非可打印ASCII或缓冲已满(留1字节结束符)：本行作废，只置溢出标记。 */
-        else if (data[i] < 32 || data[i] > 126 || s_ota.length >= sizeof(s_ota.line) - 1)
+
+        s_ota.line[s_ota.length] = '\0';
+        if (s_ota.overflow == 0 && strcmp(s_ota.line, "OTA,START") == 0 && s_ota.reply == NULL && s_ota.pending == 0)
         {
-            s_ota.overflow = 1;
+#if defined(VECT_TAB_OFFSET) && VECT_TAB_OFFSET == (APP_START_ADDR - BOOTLOADER_START_ADDR)
+            /* 与 sensor 交接请求，避免覆盖进行中的升级。 */
+            taskENTER_CRITICAL();
+            if (s_store_state == OTA_STORE_IDLE)
+            {
+                s_store_state = OTA_STORE_REQUESTED;
+            }
+            taskEXIT_CRITICAL();
+#else
+            /* 普通 APP 位于 0x08000000，无法通过主引导进入保底。 */
+            s_ota.reply = "OTA,UNAVAILABLE,INSTALL_BOOTLOADER_AND_UPGRADE_APP\r\n";
+#endif
         }
-        else
-        {
-            /* 合法可打印字符：追加到行尾并后移长度。 */
-            s_ota.line[s_ota.length++] = (char)data[i];
-        }
+        app_ota_reset_receive();
     }
 }
 
@@ -197,6 +192,7 @@ uint8_t app_ota_service(uint8_t ready, uint32_t now_ms)
         (s_ota.replied == 0 && (uint32_t)(now_ms - s_ota.reply_ms) >= 2000)))
     {
         /* 即使手机断开/回执失败，已确认的升级标志仍必须交给Bootloader处理。 */
+        app_task_prepare_reset();
         NVIC_SystemReset();
         return 1;
     }

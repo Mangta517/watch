@@ -7,6 +7,7 @@
  */
 #include "app_battery_log.h"
 #include "app_battery.h"
+#include "app_task.h"
 #include "int_battery_log.h"
 #include "kt6368a.h"
 #include "tps3823.h"
@@ -552,6 +553,7 @@ void app_battery_log_clear_and_reset(void)
     {
         return;
     }
+    app_task_prepare_reset();
     tps3823_enable(); /* 保持外部超时/欠压复位接通，SRAM擦除循环在有限期限内喂狗。 */
     __disable_irq(); /* 关闭中断，使擦除与重启之间不被其它任务打断。 */
     tps3823_feed(); /* 擦除前刷新WDI，使SRAM首个100ms间隔从本次喂狗起算。 */

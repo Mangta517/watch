@@ -35,6 +35,7 @@
 #endif
 
 void HAL_GPIO_EXTI_Callback(uint16_t pin);
+sensor_host_exti_struct sensor_host_exti;
 static uint8_t regs[128][256] = {[MPU6050_ADDR] = {[MPU6050_WHO_AM_I] = 0x68}};
 static TickType_t tick;
 static uint8_t mpu_auto_ready = 1;
@@ -53,6 +54,9 @@ static unsigned spl_reads, spl_writes;
 static unsigned mpu_reads, mpu_writes;
 static uint16_t mpu_last_frame_size;
 static int mpu_fail_read_at = -1, mpu_fail_write_at = -1;
+static uint8_t mpu_mot_test, mpu_mot_edge_on_enable;
+static uint8_t mpu_write_trace[16][2];
+static unsigned mpu_mot_notifications;
 static uint8_t spl_reset_status = SPL06_SENSOR_RDY | SPL06_COEF_RDY;
 static TickType_t motion_at_tick;
 static uint8_t eeprom[BL24C02_CAPACITY_BYTES];
@@ -164,7 +168,10 @@ static void bus_enter(my_i2c_bus_t bus)
     tick += transfer_ms;
     ++bus_transactions;
     bus_active = 1;
-    HAL_GPIO_EXTI_Callback(MPU6050_INT_Pin);
+    if (mpu_mot_test == 0)
+    {
+        HAL_GPIO_EXTI_Callback(MPU6050_INT_Pin);
+    }
     assert(bus_active && !primask); /* ISR cannot nest an I2C transaction. */
 }
 void my_i2c_init(my_i2c_bus_t bus)
@@ -283,6 +290,11 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, const uin
     error = (fail_dev == dev && (fail_reg < 0 || fail_reg == reg));
     if (dev == MPU6050_ADDR)
     {
+        if (mpu_mot_test != 0 && mpu_writes < sizeof(mpu_write_trace) / sizeof(mpu_write_trace[0]))
+        {
+            mpu_write_trace[mpu_writes][0] = reg;
+            mpu_write_trace[mpu_writes][1] = data[0];
+        }
         error |= (int)mpu_writes++ == mpu_fail_write_at;
     }
     if (dev == SPL006_ADDR)
@@ -322,6 +334,11 @@ uint8_t my_i2c_write_bytes(my_i2c_bus_t bus, uint8_t dev, uint8_t reg, const uin
     {
         uint8_t spl_ready = regs[SPL006_ADDR][SPL06_MEAS_CFG] & (SPL06_SENSOR_RDY | SPL06_COEF_RDY);
         memcpy(&regs[dev][reg], data, len);
+        if (mpu_mot_edge_on_enable != 0 && dev == MPU6050_ADDR && reg == MPU6050_INT_ENABLE && data[0] == 0x40)
+        {
+            assert((EXTI->IMR & MPU6050_INT_Pin) != 0 && EXTI->PR == (1U << 4));
+            HAL_GPIO_EXTI_Callback(MPU6050_INT_Pin);
+        }
         if (dev == SPL006_ADDR && reg == SPL06_MEAS_CFG)
         {
             regs[dev][reg] |= spl_ready; /* SENSOR_RDY/COEF_RDY为只读位，写standby不会清除。 */
@@ -351,9 +368,9 @@ static void word(uint8_t dev, uint8_t reg, int16_t value)
 }
 static void magnetic(float x, float y, float z)
 {
-    word(LSM303DLHC_MAG_ADDR, 3, (int16_t)lroundf(x * 11.0f));
-    word(LSM303DLHC_MAG_ADDR, 5, (int16_t)lroundf(z * 9.8f));
-    word(LSM303DLHC_MAG_ADDR, 7, (int16_t)lroundf(y * 11.0f));
+    word(LSM303DLHC_MAG_ADDR, 3, (int16_t)lroundf(x * 6.7f));
+    word(LSM303DLHC_MAG_ADDR, 5, (int16_t)lroundf(z * 6.0f));
+    word(LSM303DLHC_MAG_ADDR, 7, (int16_t)lroundf(y * 6.7f));
     regs[LSM303DLHC_MAG_ADDR][9] = 1;
 }
 static float angle_error(float a, float b)
@@ -385,11 +402,11 @@ static void driver_tests(void)
     assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_ERROR);
     fail_dev = fail_reg = -1;
     assert(lsm303dlhc_mag_init() == 0);
-    assert(regs[0x1E][0] == 0x18 && regs[0x1E][1] == 0x20 && regs[0x1E][2] == 0);
+    assert(regs[0x1E][0] == 0x18 && regs[0x1E][1] == 0x60 && regs[0x1E][2] == 0);
     assert(mag_config_writes >= 3);
     magnetic(50, -25, 30);
     assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_OK);
-    assert(mag.raw[0] == 550 && mag.raw[1] == -275 && mag.raw[2] == 294);
+    assert(mag.raw[0] == 335 && mag.raw[1] == -168 && mag.raw[2] == 180);
     assert(fabsf(mag.field_uT[0] - 50) < .01f && fabsf(mag.field_uT[2] - 30) < .01f);
     previous = mag;
     assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_NOT_READY);
@@ -405,7 +422,7 @@ static void driver_tests(void)
     assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_OK);
     magnetic(0, 0, 0);
     word(0x1E, 3, -4096);
-    assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_ERROR);
+    assert(lsm303dlhc_mag_read(&mag) == LSM303DLHC_MAG_OVERFLOW);
     assert(memcmp(&previous, &mag, sizeof(mag)) == 0);
     magnetic(50, -25, 30);
     fail_dev = 0x1E;
@@ -698,11 +715,25 @@ static void compass_tests(void)
 
 
 
+static void test_record_crc(uint8_t *record, unsigned offset);
+
+static uint8_t mag_params_match(const common_mag_cal_params_struct *a, const common_mag_cal_params_struct *b)
+{
+    return memcmp(a->offset_uT, b->offset_uT, sizeof(a->offset_uT)) == 0 &&
+           memcmp(a->soft_sym, b->soft_sym, sizeof(a->soft_sym)) == 0 &&
+           a->dip_valid == b->dip_valid && a->dip_ref_deg == b->dip_ref_deg;
+}
+
+static uint8_t mag_records_match(const app_mag_calibration_struct *a, const app_mag_calibration_struct *b)
+{
+    return a->is_ellipsoid == b->is_ellipsoid && mag_params_match(&a->params, &b->params);
+}
+
 static void eeprom_tests(void)
 {
     uint8_t data[20], readback[20], previous[96];
-    app_mag_calibration_struct a = {{10, -5, 7}, {1.25f, 1.0f, .8333333f}};
-    app_mag_calibration_struct b = {{12, -3, 9}, {1.1f, .9f, 1.05f}}, loaded;
+    app_mag_calibration_struct a = {{{10, -5, 7}, {1.25f, 1.0f, .8333333f, -0.1f, 0.2f, 0.1f}, 0.0f, 0}, 1};
+    app_mag_calibration_struct b = {{{12, -3, 9}, {1.1f, .9f, 1.05f, 0.2f, 0.1f, -0.1f}, -40.0f, 1}, 1}, loaded;
     unsigned i, before;
     TickType_t start;
     memset(eeprom, 0xFF, sizeof(eeprom));
@@ -726,27 +757,49 @@ static void eeprom_tests(void)
     fail_dev = -1;
     memset(eeprom, 0xFF, sizeof(eeprom));
     assert(app_mag_store_load(&loaded) == APP_MAG_STORE_EMPTY);
-    assert(app_mag_store_save(&a) == APP_MAG_STORE_OK);
-    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && memcmp(&loaded, &a, sizeof(a)) == 0);
+    before = eeprom_writes;
+    assert(app_mag_store_save(&a) == APP_MAG_STORE_OK && eeprom_writes == before + 3);
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && mag_records_match(&loaded, &a));
     memcpy(previous, eeprom, sizeof(previous));
     eeprom_fail_write_after = 1;
     assert(app_mag_store_save(&b) == APP_MAG_STORE_ERROR);
     eeprom_fail_write_after = -1;
-    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && memcmp(&loaded, &a, sizeof(a)) == 0);
-    assert(memcmp(previous, eeprom, 36) == 0); /* Active copy survives a torn target write. */
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && mag_records_match(&loaded, &a));
+    assert(memcmp(previous, eeprom, 48) == 0); /* Active copy survives a torn target write. */
     assert(app_mag_store_save(&b) == APP_MAG_STORE_OK);
-    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && memcmp(&loaded, &b, sizeof(b)) == 0);
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && mag_records_match(&loaded, &b));
     eeprom[48 + 8] ^= 1; /* Reject latest bad CRC, recover older valid copy. */
-    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && memcmp(&loaded, &a, sizeof(a)) == 0);
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && mag_records_match(&loaded, &a));
     eeprom_write_protected = 1;
     assert(app_mag_store_save(&b) == APP_MAG_STORE_ERROR); /* ACK is not proof of persisted data. */
     eeprom_write_protected = 0;
-    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && memcmp(&loaded, &a, sizeof(a)) == 0);
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && mag_records_match(&loaded, &a));
     fail_dev = BL24C02_ADDR;
     assert(app_mag_store_save(&b) == APP_MAG_STORE_ERROR);
     fail_dev = -1;
-    b.scale[0] = NAN;
+    b.params.soft_sym[3] = 10.0f; /* Positive diagonal alone is insufficient. */
     assert(app_mag_store_save(&b) == APP_MAG_STORE_ERROR);
+    b.params.soft_sym[3] = 0.2f;
+    b.params.soft_sym[0] = NAN;
+    assert(app_mag_store_save(&b) == APP_MAG_STORE_ERROR);
+    b.params.soft_sym[0] = 1.1f;
+    eeprom[4] = eeprom[5] = 0xFF;
+    test_record_crc(eeprom, 44);
+    assert(app_mag_store_save(&b) == APP_MAG_STORE_OK);
+    assert(eeprom[52] == 0 && eeprom[53] == 0);
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && mag_records_match(&loaded, &b));
+
+    /* 将槽0改为旧版记录，验证跨版本优先级和CRC损坏回退。 */
+    eeprom[3] = '1';
+    eeprom[4] = eeprom[5] = eeprom[6] = eeprom[7] = 0xFF;
+    test_record_crc(eeprom, 32);
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && loaded.is_ellipsoid);
+    eeprom[48 + 44] ^= 1;
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && !loaded.is_ellipsoid && !loaded.params.dip_valid);
+    assert(loaded.params.offset_uT[0] == 10.0f && loaded.params.soft_sym[0] == 1.25f);
+    assert(loaded.params.soft_sym[3] == 0.0f && loaded.params.soft_sym[4] == 0.0f && loaded.params.soft_sym[5] == 0.0f);
+    assert(app_mag_store_save(&b) == APP_MAG_STORE_OK);
+    assert(app_mag_store_load(&loaded) == APP_MAG_STORE_OK && loaded.is_ellipsoid && loaded.params.dip_ref_deg == -40.0f);
     for (i = 96; i < sizeof(eeprom); ++i)
     {
         assert(eeprom[i] == 0xFF); /* Other settings region is untouched. */
@@ -757,10 +810,10 @@ static void eeprom_tests(void)
 }
 
 /* 独立按逐位多项式重算测试记录，构造CRC正确但量程/序号变化的数据。 */
-static void imu_test_crc(uint8_t *record)
+static void test_record_crc(uint8_t *record, unsigned offset)
 {
     uint32_t crc = UINT32_MAX;
-    for (unsigned i = 0; i < 24; ++i)
+    for (unsigned i = 0; i < offset; ++i)
     {
         crc ^= record[i];
         for (unsigned bit = 0; bit < 8; ++bit)
@@ -776,7 +829,7 @@ static void imu_test_crc(uint8_t *record)
     crc ^= UINT32_MAX;
     for (unsigned i = 0; i < 4; ++i)
     {
-        record[24 + i] = (uint8_t)(crc >> (8 * i));
+        record[offset + i] = (uint8_t)(crc >> (8 * i));
     }
 }
 
@@ -784,7 +837,7 @@ static void imu_eeprom_tests(void)
 {
     mpu6050_offset_struct a = {{20, -10, 30}, {66, -33, 99}};
     mpu6050_offset_struct b = {{-21, 11, -31}, {-67, 34, -100}}, loaded, runtime;
-    app_mag_calibration_struct mag = {{10, -5, 7}, {1.25f, 1.0f, .8333333f}}, mag_loaded;
+    app_mag_calibration_struct mag = {{{10, -5, 7}, {1.25f, 1.0f, .8333333f}, 0.0f, 0}, 1}, mag_loaded;
     uint8_t preserved_mag[96], preserved_imu[64];
     unsigned writes_before;
     uint16_t stable, average;
@@ -821,7 +874,7 @@ static void imu_eeprom_tests(void)
     fail_dev = -1;
     memcpy(preserved_imu, eeprom + 0x60, sizeof(preserved_imu));
     assert(app_mag_store_save(&mag) == APP_MAG_STORE_OK);
-    assert(app_mag_store_load(&mag_loaded) == APP_MAG_STORE_OK && memcmp(&mag_loaded, &mag, sizeof(mag)) == 0);
+    assert(app_mag_store_load(&mag_loaded) == APP_MAG_STORE_OK && mag_records_match(&mag_loaded, &mag));
     assert(memcmp(preserved_imu, eeprom + 0x60, sizeof(preserved_imu)) == 0);
     for (unsigned i = 0xA0; i < sizeof(eeprom); ++i)
     {
@@ -832,12 +885,12 @@ static void imu_eeprom_tests(void)
     assert(app_imu_store_load(&loaded) == APP_IMU_STORE_OK && memcmp(&loaded, &a, sizeof(a)) == 0);
     eeprom[0x60 + 8] ^= 1;
     eeprom[0x80 + 8] ^= 1;
-    imu_test_crc(eeprom + 0x60);
-    imu_test_crc(eeprom + 0x80);
+    test_record_crc(eeprom + 0x60, 24);
+    test_record_crc(eeprom + 0x80, 24);
     assert(app_imu_store_load(&loaded) == APP_IMU_STORE_EMPTY); /* CRC正确仍拒绝旧量程。 */
     assert(app_imu_store_save(&a) == APP_IMU_STORE_OK);
     memset(eeprom + 0x60 + 4, 0xFF, 4); /* 活跃记录序号变为UINT32_MAX。 */
-    imu_test_crc(eeprom + 0x60);
+    test_record_crc(eeprom + 0x60, 24);
     assert(app_imu_store_save(&b) == APP_IMU_STORE_OK);
     assert(app_imu_store_load(&loaded) == APP_IMU_STORE_OK && memcmp(&loaded, &b, sizeof(b)) == 0);
     assert(app_imu_store_save(&a) == APP_IMU_STORE_OK);
@@ -1536,6 +1589,180 @@ static void recovery_tests(void)
     puts("PASS: real recovery steps use at most one transaction/no waits, tolerate reset NACK, retry failed boot/runtime faults, preserve offsets and survive tick wrap.");
 }
 
+static void mpu_mot_notify(void)
+{
+    assert(!primask && (EXTI->IMR & MPU6050_INT_Pin) == 0 && my_mpu6050_mot_woken() != 0);
+    ++mpu_mot_notifications;
+}
+
+static void mpu_mot_tests(void)
+{
+    const uint8_t enter[][2] = {
+        {0x38, 0}, {0x6B, 0x08}, {0x1C, 0x08}, {0x1A, 0}, {0x69, 0x11}, {0x1F, 18},
+        {0x20, 1}, {0x37, 0xC0}, {0x1C, 0x0F}, {0x6C, 0x87}, {0x38, 0x40}, {0x6B, 0x28}
+    };
+    const uint8_t exit_background[][2] = {
+        {0x6B, 0x08}, {0x1C, 0x08}, {0x38, 1}, {0x6C, 0xC7}, {0x1A, 3}, {0x19, 9}, {0x6B, 0x28}
+    };
+    Accel_Gyro_struct raw = {0};
+    unsigned before;
+    int failure;
+    assert(my_mpu6050_init() == 0);
+    my_mpu6050_set_mot_callback(mpu_mot_notify);
+    mpu_mot_test = mpu_mot_edge_on_enable = 1;
+    EXTI->IMR = 1U << 4;
+    EXTI->PR = MPU6050_INT_Pin | (1U << 4);
+    mpu_writes = 0;
+    before = tick;
+    assert(my_mpu6050_enter_mot_sleep() == 0 && tick > before);
+    assert(memcmp(enter, mpu_write_trace, sizeof(enter)) == 0 && mpu_writes == sizeof(enter) / sizeof(enter[0]));
+    assert(mpu_mot_notifications == 1 && my_mpu6050_mot_woken());
+    HAL_GPIO_EXTI_Callback(MPU6050_INT_Pin);
+    assert(mpu_mot_notifications == 1 && EXTI->IMR == (1U << 4));
+    before = mpu_reads;
+    tick += 10000;
+    assert(my_mpu6050_recover_step(tick) == 0 && my_mpu6050_get_data(&raw) == 1 && mpu_reads == before);
+    mpu_writes = 0;
+    assert(my_mpu6050_set_sample_mode(25, 0) == 0);
+    assert(memcmp(exit_background, mpu_write_trace, sizeof(exit_background)) == 0);
+    assert(my_mpu6050_get_data(&raw) == 0 && !my_mpu6050_mot_woken());
+
+    mpu_mot_edge_on_enable = 0;
+    assert(my_mpu6050_enter_mot_sleep() == 0 && my_mpu6050_mot_armed());
+    assert(my_mpu6050_set_sample_mode(10, 1) == 0 && EXTI->IMR == (1U << 4));
+    assert(regs[MPU6050_ADDR][0x6B] == 0x08 && regs[MPU6050_ADDR][0x6C] == 0x07);
+    assert(regs[MPU6050_ADDR][0x1A] == 0x03 && regs[MPU6050_ADDR][0x38] == 1 && regs[MPU6050_ADDR][0x1C] == 0x08);
+    assert(my_mpu6050_set_sample_mode(25, 0) == 0 && my_mpu6050_enter_mot_sleep() == 0);
+    tick += 60000;
+    assert(my_mpu6050_mot_health_check() == 0 && my_mpu6050_mot_armed());
+    regs[MPU6050_ADDR][0x38] = 0;
+    assert(my_mpu6050_mot_health_check() == 1 && !my_mpu6050_mot_armed() && EXTI->IMR == (1U << 4));
+    assert(my_mpu6050_recover_step(tick) == 2);
+
+    for (failure = 0; failure < (int)(sizeof(enter) / sizeof(enter[0])); ++failure)
+    {
+        assert(my_mpu6050_init() == 0);
+        mpu_writes = 0;
+        mpu_fail_write_at = failure;
+        assert(my_mpu6050_enter_mot_sleep() == 1 && !my_mpu6050_mot_armed() && EXTI->IMR == (1U << 4));
+        mpu_fail_write_at = -1;
+        assert(my_mpu6050_recover_step(tick) == 2);
+    }
+    for (failure = 0; failure < (int)(sizeof(exit_background) / sizeof(exit_background[0])); ++failure)
+    {
+        assert(my_mpu6050_init() == 0 && my_mpu6050_enter_mot_sleep() == 0);
+        mpu_writes = 0;
+        mpu_fail_write_at = failure;
+        assert(my_mpu6050_set_sample_mode(25, 0) == 1 && !my_mpu6050_mot_armed() && EXTI->IMR == (1U << 4));
+        mpu_fail_write_at = -1;
+        assert(my_mpu6050_recover_step(tick) == 2);
+    }
+    assert(my_mpu6050_init() == 0);
+    mpu_fail_read_at = (int)mpu_reads;
+    assert(my_mpu6050_enter_mot_sleep() == 1 && !my_mpu6050_mot_armed());
+    mpu_fail_read_at = -1;
+    assert(my_mpu6050_init() == 0 && my_mpu6050_enter_mot_sleep() == 0);
+    mpu_fail_read_at = (int)mpu_reads;
+    assert(my_mpu6050_set_sample_mode(25, 0) == 1 && !my_mpu6050_mot_armed());
+    mpu_fail_read_at = -1;
+    assert(my_mpu6050_init() == 0 && my_mpu6050_enter_mot_sleep() == 0);
+    mpu_fail_read_at = (int)mpu_reads;
+    assert(my_mpu6050_mot_health_check() == 1 && !my_mpu6050_mot_armed());
+    mpu_fail_read_at = -1;
+    assert(EXTI->IMR == (1U << 4) && my_mpu6050_recover_step(tick) == 2);
+    puts("PASS: 20 Hz MOT register sequence, first IRQ during arm, one-shot, no frame timeout, 40/100 Hz resume and I2C recovery.");
+}
+
+static void mpu_mot_fallback_tests(void)
+{
+    app_imu_struct snapshot;
+    unsigned before_reads;
+    uint32_t sample_ms;
+
+    mpu_auto_ready = 1;
+    assert(my_mpu6050_init() == 0);
+    App_IMU_Init();
+    word(MPU6050_ADDR, MPU6050_ACCEL_XOUT_H, -1000);
+    word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, 8192);
+    assert(App_IMU_Service(0) == 0);
+    sample_ms = my_mpu6050_sample_ms();
+    assert(app_imu_enter_mot() == 0 && my_mpu6050_mot_armed());
+    mpu_auto_ready = 0;
+    tick += 400;
+
+    before_reads = mpu_reads;
+    word(MPU6050_ADDR, MPU6050_ACCEL_XOUT_H, -1368);
+    assert(app_imu_mot_poll() == 0 && mpu_reads == before_reads + 1 && mpu_last_frame_size == 7);
+    word(MPU6050_ADDR, MPU6050_ACCEL_XOUT_H, -1369);
+    assert(app_imu_mot_poll() == 1 && !my_mpu6050_mot_woken());
+    word(MPU6050_ADDR, MPU6050_ACCEL_XOUT_H, -1000);
+    regs[MPU6050_ADDR][MPU6050_INT_STATUS] = 0x40;
+    assert(app_imu_mot_poll() == 1 && !my_mpu6050_mot_woken());
+    assert(app_imu_mot_poll() == 0 && my_mpu6050_sample_ms() == sample_ms);
+    assert(!App_IMU_GetSnapshot(&snapshot) && snapshot.raw.Accel.Accel_x == -1000 && snapshot.raw.Accel.Accel_z == 8192);
+
+    mpu_fail_read_at = (int)mpu_reads;
+    assert(app_imu_mot_poll() == 1 && !my_mpu6050_mot_armed() && !(EXTI->IMR & MPU6050_INT_Pin));
+    mpu_fail_read_at = -1;
+    assert(my_mpu6050_recover_step(tick) == 2);
+    puts("PASS: MOT fallback restores sampling for latched motion or raw acceleration without PB12, ignores quiet noise and recovers on NACK.");
+}
+
+static void mpu_mot_first_step_tests(void)
+{
+    app_imu_struct snapshot;
+    unsigned source, elapsed, reads;
+    int16_t z;
+
+    for (source = 0; source < 2; ++source)
+    {
+        mpu_auto_ready = 1;
+        assert(my_mpu6050_init() == 0);
+        App_IMU_Init();
+        word(MPU6050_ADDR, MPU6050_ACCEL_XOUT_H, 0);
+        word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, -8192);
+        for (elapsed = 0; elapsed <= 6000; elapsed += 25)
+        {
+            tick += 25;
+            assert(App_IMU_Service(0) == 0);
+        }
+        assert(app_imu_can_enter_mot(tick) && app_imu_enter_mot() == 0);
+        tick += 10000;
+        word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, -11141); /* 1.36g首个落地峰。 */
+        if (source == 0)
+        {
+            HAL_GPIO_EXTI_Callback(MPU6050_INT_Pin);
+            assert(my_mpu6050_mot_woken());
+        }
+        else
+        {
+            assert(app_imu_mot_poll() == 1);
+        }
+        reads = mpu_reads;
+        app_imu_exit_mot(0);
+        /* 一次读取清状态，另外只有EXTI路径需要读取动作帧。 */
+        assert(mpu_reads == reads + 2 - source);
+        for (elapsed = 25; elapsed < 1500; elapsed += 25)
+        {
+            z = -8192;
+            if (elapsed == 25)
+            {
+                z = -9667; /* 切回40Hz后只剩首个落地峰的尾部。 */
+            }
+            else if (elapsed >= 500 && elapsed % 500 < 125)
+            {
+                z = -10240;
+            }
+            tick += 25;
+            word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, z);
+            assert(App_IMU_Service(0) == 0);
+        }
+        App_IMU_GetSnapshot(&snapshot);
+        assert(snapshot.steps == 3);
+    }
+    puts("PASS: MPU MOT interrupt and fallback retain the first measured step across the 20/40Hz switch.");
+}
+
 static void mpu_stale_recovery_tests(void)
 {
     Accel_Gyro_struct raw;
@@ -2035,6 +2262,183 @@ static void activity_pulses(common_activity_struct *state, uint32_t *now, unsign
     }
 }
 
+static void activity_undercount_tests(void)
+{
+    common_activity_struct state;
+    uint32_t now = UINT32_MAX - 2000, result[8];
+    unsigned scenario, frame, step, phase, duration, count;
+    float magnitude, orientation;
+
+    for (scenario = 0; scenario < 8; ++scenario)
+    {
+        memset(&state, 0, sizeof(state));
+        orientation = -1.0f;
+        if (scenario == 1 || scenario == 2)
+        {
+            orientation = 1.0f;
+        }
+        for (frame = 0; frame < 241; ++frame)
+        {
+            activity_sample(&state, 0.0f, 0.0f, orientation, &now);
+        }
+        count = 40;
+        if (scenario == 4 || scenario == 5)
+        {
+            count = 3;
+        }
+        else if (scenario == 6)
+        {
+            count = 4;
+            now += 10000;
+            common_activity_resume_from_mot(&state, now);
+        }
+        else if (scenario == 7)
+        {
+            count = 20;
+        }
+        for (step = 0; step < count; ++step)
+        {
+            duration = 525;
+            if (scenario == 2)
+            {
+                duration = 775;
+            }
+            else if (scenario == 3)
+            {
+                duration = 400 + 300 * (step % 2);
+            }
+            else if (scenario == 5 && step == 0)
+            {
+                duration = 850;
+            }
+            else if (scenario == 7)
+            {
+                duration = 350;
+            }
+            for (phase = 0; phase < duration; phase += 25)
+            {
+                magnitude = 1.0f;
+                if (scenario == 0 || scenario == 4)
+                {
+                    float amplitude = 0.055f;
+                    if (scenario == 4)
+                    {
+                        amplitude = 0.13f;
+                    }
+                    magnitude += amplitude * sinf(6.2831853f * (float)phase / (float)duration);
+                }
+                else if (scenario == 7)
+                {
+                    if (phase < 75)
+                    {
+                        magnitude = 4.0f;
+                    }
+                    else if (phase < 150)
+                    {
+                        magnitude = 0.30f;
+                    }
+                }
+                else if (phase < 125)
+                {
+                    magnitude = 1.20f;
+                    if (scenario == 1 || scenario == 2)
+                    {
+                        magnitude = 1.16f;
+                        if (step % 2 != 0)
+                        {
+                            magnitude = 1.065f;
+                        }
+                    }
+                }
+                activity_sample(&state, 0.0f, 0.0f, orientation * magnitude, &now);
+            }
+        }
+        result[scenario] = state.steps;
+    }
+    printf("Step undercount: viewing=%lu, weak alternate=%lu/%lu, uneven=%lu, starts=%lu/%lu, MOT=%lu, clipped=%lu\n",
+           (unsigned long)result[0], (unsigned long)result[1], (unsigned long)result[2], (unsigned long)result[3],
+           (unsigned long)result[4], (unsigned long)result[5], (unsigned long)result[6], (unsigned long)result[7]);
+    fflush(stdout);
+    assert(result[0] >= 39 && result[0] <= 40);
+    assert(result[1] >= 39 && result[1] <= 40 && result[2] >= 39 && result[2] <= 40);
+    assert(result[3] == 40 && result[4] == 3 && result[5] == 3);
+    assert(result[6] == 4 && result[7] == 20);
+
+    memset(&state, 0, sizeof(state));
+    for (frame = 0; frame < 40; ++frame)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    activity_pulses(&state, &now, 5, 500, 0.25f);
+    for (frame = 0; frame < 20; ++frame)
+    {
+        float x = 0.055f * cosf(1.5707963f * (float)frame);
+        activity_sample(&state, x, 0.0f, -sqrtf(1.0f - x * x), &now);
+    }
+    activity_pulses(&state, &now, 2, 500, 0.25f);
+    assert(state.steps == 7 && state.walking_confirmed != 0);
+    puts("PASS: a missing peak during ongoing motion preserves gait and counts only the next two measured steps.");
+}
+
+static void activity_mot_tests(void)
+{
+    common_activity_struct state = {0};
+    uint32_t now = UINT32_MAX - 4000;
+    unsigned i;
+    state.steps = 42;
+    for (i = 0; i < 240; ++i)
+    {
+        activity_sample(&state, 0.0f, 1.0f, 0.0f, &now);
+    }
+    assert(state.wrist_armed && !common_activity_is_mot_ready(&state, now, 6000));
+    activity_sample(&state, 0.0f, 1.0f, 0.0f, &now);
+    assert(common_activity_is_mot_ready(&state, now, 6000));
+    assert(!common_activity_is_mot_ready(&state, now + 600, 6000));
+
+    now += 10000;
+    common_activity_resume_from_mot(&state, now);
+    for (i = 0; i < 20; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    assert(state.steps == 42 && state.wrist_sequence == 1 && !state.wrist_armed);
+    activity_pulses(&state, &now, 3, 500, 0.25f);
+    assert(state.steps == 45);
+
+    state.wrist_armed = 1;
+    now += 10000;
+    common_activity_resume_from_mot(&state, now);
+    for (i = 0; i < 125; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.8f, -0.6f, &now);
+    }
+    assert(state.steps == 45 && state.wrist_sequence == 1 && !state.wrist_armed);
+
+    /* 弱步态仍按原来5步确认，回补实际读到的候选。 */
+    common_activity_resume_from_mot(&state, now);
+    for (i = 0; i < 20; ++i)
+    {
+        activity_sample(&state, 0.0f, 0.0f, -1.0f, &now);
+    }
+    activity_pulses(&state, &now, 5, 500, 0.13f);
+    assert(state.steps == 50);
+    memset(&state, 0, sizeof(state));
+    for (i = 0; i < 240; ++i)
+    {
+        activity_sample(&state, 0.0f, 1.0f, 0.0f, &now);
+    }
+    activity_sample(&state, 0.0f, 0.15f, 0.0f, &now);
+    assert(!common_activity_is_mot_ready(&state, now, 6000));
+    for (i = 0; i < 239; ++i)
+    {
+        activity_sample(&state, 0.0f, 1.0f, 0.0f, &now);
+    }
+    assert(!common_activity_is_mot_ready(&state, now, 6000));
+    activity_sample(&state, 0.0f, 1.0f, 0.0f, &now);
+    assert(common_activity_is_mot_ready(&state, now, 6000));
+    puts("PASS: MOT quiet gate across wrap and after impact, first wrist raise after gap, grace expiry and 3/5-step backfill.");
+}
+
 static void activity_response_tests(void)
 {
     common_activity_struct state = {0};
@@ -2251,6 +2655,7 @@ static void activity_tests(void)
     assert(state.steps == 123 && state.wrist_sequence == 1);
     puts("PASS: 40Hz phase/cold-start gait, horizontal swing, 120ms pulses, 3.2g running, 17Hz rejection, impact, timed wrist, duplicate and gap/wrap checks.");
     activity_response_tests();
+    activity_undercount_tests();
 }
 
 static uint16_t boot_step_day, last_step_day;
@@ -2287,6 +2692,16 @@ static void independent_setup(void)
     regs[LSM303DLHC_ACCEL_ADDR][0x2B] = 0;
     regs[LSM303DLHC_ACCEL_ADDR][0x2C] = 0x40;
     regs[LSM303DLHC_ACCEL_ADDR][0x2D] = 0x1F;
+}
+
+static void compass_acceleration(const float gravity[3])
+{
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        uint16_t raw = (uint16_t)((int16_t)lroundf(gravity[axis] * 500.0f) * 16);
+        regs[LSM303DLHC_ACCEL_ADDR][0x28 + axis * 2] = (uint8_t)raw;
+        regs[LSM303DLHC_ACCEL_ADDR][0x29 + axis * 2] = (uint8_t)(raw >> 8);
+    }
 }
 
 static void accel_warmup_tests(void)
@@ -2371,21 +2786,52 @@ static void independent_tests(void)
     }
     App_IMU_GetSnapshot(&snapshot);
     assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 0.0f) < 0.1f);
-    /* 核对芯片倒装(Z=-1g)加180°刚体映射：倾斜与平放均保持一致航向。 */
-    regs[LSM303DLHC_ACCEL_ADDR][0x2C] = 0xC0;
-    regs[LSM303DLHC_ACCEL_ADDR][0x2D] = 0xE0; /* -8000 => -1g */
-    magnetic(-7, -40, -25);
+    compass_acceleration((float[3]){0.0f, 0.15f, 1.0f});
+    magnetic(-30, 0, 40);
     tick += 40;
     app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid && angle_error(snapshot.compass_deg, 0.0f) < 4.0f);
+    compass_acceleration((float[3]){0.0f, 0.0f, 1.0f});
+    for (i = 0; i < 12; ++i)
+    {
+        magnetic(-30, 0, 40);
+        tick += 40;
+        app_imu_compass_service(1, 1);
+    }
+    /* 1.16g的一帧横向扰动只以5%权重进入重力方向。 */
+    compass_acceleration((float[3]){0.0f, 0.58f, 1.0f});
+    magnetic(-30, 0, 40);
+    tick += 40;
+    app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid && angle_error(snapshot.compass_deg, 0.0f) < 3.0f);
+    compass_acceleration((float[3]){0.0f, 0.0f, 1.4f});
+    tick += 40;
+    app_imu_compass_service(1, 1);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(!snapshot.compass_valid && snapshot.compass_state == APP_COMPASS_ACCEL_INVALID);
+
+    /* 核对芯片倒装(Z=-1g)加180°刚体映射：倾斜与平放均保持一致航向。 */
+    compass_acceleration((float[3]){0.0f, 0.0f, -1.0f});
+    for (i = 0; i < 24; ++i)
+    {
+        magnetic(-7, -40, -25);
+        tick += 40;
+        app_imu_compass_service(1, 1);
+    }
     App_IMU_GetSnapshot(&snapshot);
     assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 279.93f) < 0.2f);
     regs[LSM303DLHC_ACCEL_ADDR][0x28] = 0xD0;
     regs[LSM303DLHC_ACCEL_ADDR][0x29] = 0xEE; /* -4400 => -0.55g */
     regs[LSM303DLHC_ACCEL_ADDR][0x2C] = 0x20;
     regs[LSM303DLHC_ACCEL_ADDR][0x2D] = 0xE6; /* -6624 => -0.828g */
-    magnetic(-24.84f, 0.0f, 16.5f); /* 俯仰时北向磁场投影，同步旋转后仍指向0° */
-    tick += 40;
-    app_imu_compass_service(1, 1);
+    for (i = 0; i < 24; ++i)
+    {
+        magnetic(-24.84f, 0.0f, 16.5f); /* 俯仰时北向磁场投影，同步旋转后仍指向0° */
+        tick += 40;
+        app_imu_compass_service(1, 1);
+    }
     App_IMU_GetSnapshot(&snapshot);
     assert(snapshot.compass_valid != 0 && angle_error(snapshot.compass_deg, 0.0f) < 0.5f);
     regs[LSM303DLHC_ACCEL_ADDR][0x28] = 0;
@@ -2422,7 +2868,9 @@ static void independent_tests(void)
 static void activity_high_rate_tests(void)
 {
     app_imu_struct snapshot;
-    unsigned frame;
+    unsigned frame, step, phase, period_ms = MPU6050_SAMPLE_PERIOD_MS;
+    uint32_t motion_before;
+    uint8_t reference;
     float magnitude;
     independent_setup();
     app_imu_set_accel_reference(1);
@@ -2449,7 +2897,6 @@ static void activity_high_rate_tests(void)
     {
         static const float rates[] = {1.25f, 1.5f, 1.8f, 2.0f, 2.2f, 2.5f};
         unsigned rate, phase, elapsed, lowest, highest;
-        uint32_t motion_before;
         for (rate = 0; rate < sizeof(rates) / sizeof(rates[0]); ++rate)
         {
             lowest = 100;
@@ -2494,6 +2941,34 @@ static void activity_high_rate_tests(void)
             assert(lowest >= 19 && highest <= 20);
         }
     }
+
+    independent_setup();
+    word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, -8192);
+    for (frame = 0; frame < 40; ++frame)
+    {
+        tick += 25;
+        assert(App_IMU_Service(0) == 0);
+    }
+    motion_before = heart_motion_frames;
+    for (step = 0; step < 20; ++step)
+    {
+        if (step % 5 == 0)
+        {
+            reference = (step / 5) % 2;
+            app_imu_set_accel_reference(reference);
+            period_ms = app_imu_set_sample_period(25);
+        }
+        for (phase = 0; phase < 500; phase += period_ms)
+        {
+            magnitude = 1.0f + 0.055f * sinf(6.2831853f * (float)phase / 500.0f);
+            word(MPU6050_ADDR, MPU6050_ACCEL_ZOUT_H, (int16_t)(-magnitude * 8192.0f));
+            tick += period_ms;
+            assert(App_IMU_Service(0) == 0);
+        }
+    }
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.steps >= 19 && snapshot.steps <= 20 && heart_motion_frames - motion_before == 500);
+    puts("PASS: low-amplitude face-up gait and raw PPG frames continue through 40/100Hz switches.");
 }
 
 static void day_tests(uint8_t retained)
@@ -2513,6 +2988,12 @@ static void day_tests(uint8_t retained)
     {
         assert(snapshot.steps == 1234 && last_step_day == 11 && last_steps == 1234);
     }
+    app_imu_set_day(10, retained);
+    app_imu_activity_service();
+    assert(last_step_day == 11 && last_steps == snapshot.steps);
+    app_imu_set_day(11, retained);
+    app_imu_activity_service();
+    assert(last_step_day == 11 && last_steps == snapshot.steps);
     app_imu_set_day(12, retained);
     app_imu_activity_service();
     App_IMU_GetSnapshot(&snapshot);
@@ -2520,11 +3001,84 @@ static void day_tests(uint8_t retained)
     puts("PASS: restored steps, retained-calendar day mismatch, cold-start first-sync binding and runtime midnight reset.");
 }
 
+static void distorted_field(const float field[3], float raw_uT[3])
+{
+    raw_uT[0] = 95.0f + 1.15f * field[0] + 0.24f * field[1] - 0.07f * field[2];
+    raw_uT[1] = -70.0f + 0.24f * field[0] + 0.91f * field[1] + 0.11f * field[2];
+    raw_uT[2] = 85.0f - 0.07f * field[0] + 0.11f * field[1] + 1.06f * field[2];
+}
+
+static void mag_ellipsoid_tests(void)
+{
+    common_mag_cal_struct cal = {0}, flat = {0}, oversized = {0};
+    common_mag_cal_params_struct params = {0}, saved;
+    static const float poses[][2] = {{0, 0}, {35, 25}, {-50, -40}, {80, 60}, {180, 0}, {-179, 15}};
+    Accel_Gyro_struct accel;
+    float gravity[3], field[3], raw_uT[3], corrected[3], heading, max_error = 0.0f;
+    for (unsigned i = 0; i < 800; ++i)
+    {
+        truth(i * 7.0f, 74.0f * sinf(i * 0.041f), i * 11.0f, &accel, field, gravity);
+        distorted_field(field, raw_uT);
+        raw_uT[0] += 0.18f * sinf(i * 1.2f);
+        raw_uT[1] += 0.18f * cosf(i * 0.7f);
+        if (i == 108)
+        {
+            raw_uT[0] += 95.0f;
+        }
+        if (i == 130 || i == 326)
+        {
+            raw_uT[2] += 12.0f;
+        }
+        common_mag_cal_collect(&cal, raw_uT, gravity, 0);
+
+        truth(0.0f, 0.0f, i * 11.0f, &accel, field, gravity);
+        distorted_field(field, raw_uT);
+        common_mag_cal_collect(&flat, raw_uT, gravity, 0);
+
+        truth(i * 7.0f, 74.0f * sinf(i * 0.041f), i * 11.0f, &accel, field, gravity);
+        distorted_field((float[3]){2.0f * field[0], 2.0f * field[1], 2.0f * field[2]}, raw_uT);
+        common_mag_cal_collect(&oversized, raw_uT, NULL, 0);
+    }
+    assert(cal.count == COMMON_MAG_CAL_MAX_POINTS && cal.coverage_pct >= 69);
+    assert(common_mag_cal_fit(&cal, &params) == 0);
+    assert(params.dip_valid && fabsf(params.dip_ref_deg - 53.13f) < 0.5f);
+    for (unsigned i = 0; i < sizeof(poses) / sizeof(poses[0]); ++i)
+    {
+        for (unsigned yaw = 0; yaw < 360; yaw += 15)
+        {
+            truth(poses[i][0], poses[i][1], (float)yaw, &accel, field, gravity);
+            distorted_field(field, raw_uT);
+            common_mag_cal_apply(&params, raw_uT, corrected);
+            assert(common_imu_compass_heading(&accel.Accel, corrected, &heading) == 0);
+            max_error = fmaxf(max_error, angle_error(heading, -(float)yaw));
+        }
+    }
+    assert(max_error < 1.0f);
+    saved = params;
+    assert(common_mag_cal_fit(&flat, &params) != 0);
+    assert(common_mag_cal_fit(&oversized, &params) != 0);
+    cal.samples = 99;
+    assert(common_mag_cal_fit(&cal, &params) != 0);
+    assert(mag_params_match(&saved, &params));
+    printf("PASS: hard/soft iron, noise/outliers, 144 poses max heading error %.3f deg, flat/oversized/short rejection.\n", max_error);
+}
+
+static void compass_field_sample(float x, float y, float z)
+{
+    float raw_uT[3];
+    distorted_field((float[3]){x, y, z}, raw_uT);
+    magnetic(raw_uT[0], raw_uT[1], raw_uT[2]);
+    tick += 40;
+    app_imu_compass_service(1, 1);
+}
+
 static void mag_calibration_tests(uint8_t fail_save, uint8_t reference)
 {
     app_imu_struct snapshot;
+    app_mag_calibration_struct saved;
+    Accel_Gyro_struct accel;
     unsigned i;
-    float value;
+    float field[3], gravity[3];
     independent_setup();
     if (reference != 0)
     {
@@ -2532,38 +3086,79 @@ static void mag_calibration_tests(uint8_t fail_save, uint8_t reference)
         assert(app_imu_set_sample_period(10) == 10);
     }
     App_IMU_MagCalibrate(1);
-    for (i = 0; i < 120; ++i)
+    for (i = 0; i < 640; ++i)
     {
-        value = -50.0f;
-        if ((i & 1) != 0)
-        {
-            value = 50.0f;
-        }
-        magnetic(value, value, value);
-        tick += 40;
-        app_imu_compass_service(1, 1);
+        truth(i * 5.0f, 74.0f * sinf(i * 0.041f), i * 7.0f, &accel, field, gravity);
+        compass_acceleration(gravity);
+        compass_field_sample(field[0], field[1], field[2]);
         App_IMU_Service(0);
     }
     App_IMU_GetSnapshot(&snapshot);
-    assert(snapshot.mag_cal_state == APP_MAG_CAL_RUNNING && snapshot.compass_valid == 0 && snapshot.mag_cal_samples == 120);
+    assert(snapshot.mag_cal_state == APP_MAG_CAL_RUNNING && snapshot.compass_valid == 0);
+    assert(snapshot.mag_cal_samples >= 100 && snapshot.mag_cal_coverage_pct >= 69);
     App_IMU_MagCalibrate(0);
     tick += 40;
     app_imu_compass_service(1, 0);
     App_IMU_GetSnapshot(&snapshot);
-    assert(snapshot.mag_calibrated != 0 && snapshot.mag_cal_state == APP_MAG_CAL_DONE && snapshot.mag_online == 0);
-    /* 校准完成后恢复100uT强磁拦截：>100uT报FIELD RANGE，正常50uT恢复READY。 */
-    magnetic(0, 120, 40);
-    tick += 40;
-    app_imu_compass_service(1, 1);
+    assert(snapshot.mag_calibrated && snapshot.mag_cal_is_ellipsoid && snapshot.mag_cal_state == APP_MAG_CAL_DONE && !snapshot.mag_online);
+    compass_acceleration((float[3]){0.0f, 0.0f, 1.0f});
+    compass_field_sample(0, 72, 40);
     App_IMU_GetSnapshot(&snapshot);
     assert(snapshot.mag_calibrated != 0 && snapshot.mag_online != 0 && snapshot.compass_valid == 0 &&
            snapshot.compass_state == APP_COMPASS_FIELD_RANGE);
-    magnetic(0, 30, 40);
+    for (i = 0; i < 4; ++i)
+    {
+        compass_field_sample(-21.6f, 0, 28.8f); /* 36μT已回外窗，未进入内窗。 */
+    }
+    App_IMU_GetSnapshot(&snapshot);
+    assert(!snapshot.compass_valid && snapshot.compass_state == APP_COMPASS_FIELD_RANGE);
+    for (i = 0; i < 3; ++i)
+    {
+        compass_field_sample(-30, 0, 40);
+        App_IMU_GetSnapshot(&snapshot);
+        if (i < 2)
+        {
+            assert(!snapshot.compass_valid && snapshot.compass_state == APP_COMPASS_FIELD_RANGE);
+        }
+    }
+    for (i = 0; i < 20; ++i)
+    {
+        compass_field_sample(-30, 0, 40);
+    }
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid && snapshot.mag_declination_deg == -2.0f && angle_error(snapshot.compass_deg, 358.0f) < 0.5f);
+    compass_field_sample(-30.0f * cosf(2.0f / RtA), -30.0f * sinf(2.0f / RtA), 40.0f);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid && angle_error(snapshot.compass_deg, 0.0f) < 0.5f);
+
+    compass_field_sample(-46.0f, 0, 19.6f); /* 模长约50μT，倾角与参考相差约30°。 */
+    App_IMU_GetSnapshot(&snapshot);
+    assert(!snapshot.compass_valid && snapshot.compass_state == APP_COMPASS_INTERFERENCE);
+    compass_field_sample(-30, 0, 40);
+    for (i = 0; i < 3; ++i)
+    {
+        tick += 5;
+        app_imu_compass_service(1, 0);
+    }
+    App_IMU_GetSnapshot(&snapshot);
+    assert(!snapshot.compass_valid && snapshot.compass_state == APP_COMPASS_INTERFERENCE);
+    compass_field_sample(-30, 0, 40);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(!snapshot.compass_valid && snapshot.compass_state == APP_COMPASS_INTERFERENCE);
+    compass_field_sample(-30, 0, 40);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid);
+    app_imu_set_declination(0.0f);
+    compass_field_sample(-30, 0, 40);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid && snapshot.mag_declination_deg == 0.0f && angle_error(snapshot.compass_deg, 0.0f) < 0.5f);
+
+    magnetic(0, 0, 0);
+    word(LSM303DLHC_MAG_ADDR, 3, -4096);
     tick += 40;
     app_imu_compass_service(1, 1);
     App_IMU_GetSnapshot(&snapshot);
-    assert(snapshot.mag_calibrated != 0 && snapshot.mag_online != 0 && snapshot.compass_valid != 0 &&
-           snapshot.compass_state == APP_COMPASS_READY && angle_error(snapshot.compass_deg, 270.0f) < 0.1f);
+    assert(!snapshot.compass_valid && !snapshot.mag_online && snapshot.compass_state == APP_COMPASS_FIELD_RANGE);
     if (fail_save != 0)
     {
         eeprom_fail_write_after = 0;
@@ -2581,7 +3176,19 @@ static void mag_calibration_tests(uint8_t fail_save, uint8_t reference)
     else
     {
         assert(snapshot.mag_persist_state == APP_MAG_PERSIST_SAVED);
+        assert(app_mag_store_load(&saved) == APP_MAG_STORE_OK && saved.is_ellipsoid && saved.params.dip_valid);
+        assert(fabsf(saved.params.dip_ref_deg - 53.13f) < 0.5f);
     }
+    App_IMU_MagCalibrate(1);
+    compass_field_sample(-30, 0, 40);
+    App_IMU_MagCalibrate(0);
+    app_imu_compass_service(1, 0);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.mag_cal_state == APP_MAG_CAL_FAILED && snapshot.mag_cal_is_ellipsoid);
+    assert(App_IMU_SaveService() == 0);
+    compass_field_sample(-30, 0, 40);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.compass_valid && angle_error(snapshot.compass_deg, 0.0f) < 0.5f);
     if (reference != 0)
     {
         assert(regs[MPU6050_ADDR][0x6B] == 0x08 && regs[MPU6050_ADDR][0x6C] == 0x07);
@@ -2590,7 +3197,65 @@ static void mag_calibration_tests(uint8_t fail_save, uint8_t reference)
     {
         assert(regs[MPU6050_ADDR][0x6B] == 0x28 && regs[MPU6050_ADDR][0x6C] == 0xC7);
     }
-    puts("PASS: standalone magnetic calibration span/sample gate, fresh-frame requirement and EEPROM save result without MPU high-rate mode.");
+    puts("PASS: MAG2 calibration, declination, field/dip hysteresis on fresh frames, immediate saturation and EEPROM save state.");
+}
+
+static void mag_screen_off_tests(void)
+{
+    app_imu_struct snapshot;
+    unsigned i;
+    regs[LSM303DLHC_MAG_ADDR][0x0A] = 0x48;
+    regs[LSM303DLHC_MAG_ADDR][0x0B] = 0x34;
+    regs[LSM303DLHC_MAG_ADDR][0x0C] = 0x33;
+    app_imu_init_mag_hw();
+    assert(regs[LSM303DLHC_MAG_ADDR][0x02] == 0x03);
+    App_IMU_Init();
+    App_IMU_MagCalibrate(1);
+    for (i = 0; i < 5; ++i)
+    {
+        app_imu_compass_service(1, 1);
+        tick += 40;
+    }
+    assert(app_imu_mag_cal_active() && regs[LSM303DLHC_MAG_ADDR][0x02] == 0);
+    app_imu_cancel_mag_calibration();
+    assert(app_imu_compass_service(0, 1) == 0);
+    App_IMU_GetSnapshot(&snapshot);
+    assert(snapshot.mag_cal_state == APP_MAG_CAL_FAILED && !app_imu_mag_cal_active() && !App_IMU_SaveService());
+    assert(regs[LSM303DLHC_MAG_ADDR][0x02] == 0x03 && regs[LSM303DLHC_ACCEL_ADDR][0x20] == 0);
+    lsm303dlhc_mag_recover_begin();
+    for (i = 0; i < 4; ++i)
+    {
+        app_imu_compass_service(0, 1);
+        assert(regs[LSM303DLHC_MAG_ADDR][0x02] == 0x03 && regs[LSM303DLHC_ACCEL_ADDR][0x20] == 0);
+    }
+    fail_dev = LSM303DLHC_MAG_ADDR;
+    lsm303dlhc_mag_recover_begin();
+    assert(app_imu_compass_service(0, 1) == APP_COMPASS_SERVICE_RETRY);
+    for (i = 0; i < 480; ++i)
+    {
+        app_compass_service_state work;
+        tick += 25;
+        work = app_imu_compass_service(0, 1);
+        if (work == APP_COMPASS_SERVICE_BUSY)
+        {
+            tick += 25;
+            ++i;
+            assert(app_imu_compass_service(0, 1) == APP_COMPASS_SERVICE_RETRY);
+        }
+        else
+        {
+            assert(work == APP_COMPASS_SERVICE_RETRY);
+        }
+    }
+    fail_dev = -1;
+    for (i = 0; i < 8; ++i)
+    {
+        tick += 400;
+        app_imu_compass_service(0, 1);
+    }
+    assert(app_imu_compass_service(0, 1) == APP_COMPASS_SERVICE_IDLE);
+    assert(regs[LSM303DLHC_MAG_ADDR][0x02] == 0x03 && regs[LSM303DLHC_ACCEL_ADDR][0x20] == 0);
+    puts("PASS: screen-off cancels unfinished magnetic calibration, allows MOT during compass cooldown and recovers the magnetometer asleep.");
 }
 
 int main(int argc, char **argv)
@@ -2600,6 +3265,10 @@ int main(int argc, char **argv)
         if (strcmp(argv[1], "compass") == 0)
         {
             compass_tests();
+        }
+        else if (strcmp(argv[1], "mag_ellipsoid") == 0)
+        {
+            mag_ellipsoid_tests();
         }
         else if (strcmp(argv[1], "accel_warmup") == 0)
         {
@@ -2637,6 +3306,17 @@ int main(int argc, char **argv)
         else if (strcmp(argv[1], "mpu_stale") == 0)
         {
             mpu_stale_recovery_tests();
+        }
+        else if (strcmp(argv[1], "mpu_mot") == 0)
+        {
+            mpu_mot_tests();
+            mpu_mot_fallback_tests();
+            mpu_mot_first_step_tests();
+            activity_mot_tests();
+        }
+        else if (strcmp(argv[1], "mag_screen_off") == 0)
+        {
+            mag_screen_off_tests();
         }
         else if (strcmp(argv[1], "mpu_sleep_recovery") == 0)
         {

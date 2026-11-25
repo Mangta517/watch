@@ -247,8 +247,7 @@ void EXTI15_10_IRQHandler(void)
   /* USER CODE END EXTI15_10_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(MPU6050_INT_Pin);
   /* USER CODE BEGIN EXTI15_10_IRQn 1 */
-    /* 入参: 无；返回: 无。上面清 PB12(MPU6050_INT，下降沿触发) 的挂起标志，
-     * 并由 HAL 调用 MPU6050 驱动里的 EXTI 回调累计边沿与数据就绪标志。 */
+    /* HAL 清除 PB12 挂起，MPU 驱动在首个 MOT 边沿屏蔽该线并通知 sensor。 */
   /* USER CODE END EXTI15_10_IRQn 1 */
 }
 

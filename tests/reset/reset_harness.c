@@ -383,6 +383,7 @@ static void test_stops(void)
         host_tick = 310U;
         app_reset_capture_stop(kind, 0x08004567U, 2U);
         assert(host_primask == 1);
+        app_reset_capture_stop(APP_RESET_ERROR_HANDLER, 0x08001234U, 0); /* 模拟Error_Handler的通用记录。 */
         app_reset_capture_fault(APP_RESET_HARDFAULT, NULL, 0);
         app_reset_watchdog_feed(500U);
         info = reboot(1U << 26);

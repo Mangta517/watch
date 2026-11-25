@@ -970,20 +970,24 @@ app_heart_auto_interval app_heart_get_auto_interval(void)
     return interval;
 }
 
-/* 供sensor判断本轮是否该提前收尾：在途测量/停测、后台窗口进行中或已到期都返回1；
- * 亮屏或尚未到期返回0。锁内取模式、周期与起点，避免读到半更新状态。 */
-uint8_t app_heart_sleep_pending(void)
+/* 0表示本轮有工作，UINT32_MAX表示当前无后台期限。 */
+uint32_t app_heart_sleep_wait_ms(void)
 {
     uint8_t sleep_mode; /* 当前亮/熄屏模式副本。 */
     uint8_t sleep_active; /* 后台窗口是否进行中。 */
     uint32_t cycle_ms; /* 后台周期起点副本，单位ms。 */
     uint32_t period_ms;
+    uint32_t elapsed_ms;
 
     /* 与UI更新周期起点使用同一把锁；在途采样/关闭仍须由sensor完成。 */
     if (heart_mutex == NULL)
     {
         /* 锁未建：只能看无锁的在途标志，有测量或待停就返回1。 */
-        return running != 0 || s_stop_pending != 0;
+        if (running != 0 || s_stop_pending != 0)
+        {
+            return 0;
+        }
+        return UINT32_MAX;
     }
     /* 锁内一次性取模式、窗口、周期和起点副本。 */
     xSemaphoreTake(heart_mutex, portMAX_DELAY);
@@ -996,24 +1000,31 @@ uint8_t app_heart_sleep_pending(void)
     if (s_stop_pending != 0)
     {
         /* 只在重试到期时唤醒总线，冷却期间允许其他设备采样或休眠。 */
-        return (uint32_t)(HAL_GetTick() - s_stop_retry_ms) >= APP_HEART_STOP_RETRY_MS;
+        cycle_ms = s_stop_retry_ms;
+        period_ms = APP_HEART_STOP_RETRY_MS;
     }
-    if (running != 0 || sleep_active != 0)
+    else if (running != 0 || sleep_active != 0)
     {
         /* 在途测量、待停或后台窗口进行中：sensor本轮需继续处理。 */
-        return 1;
-    }
-    if (sleep_mode == 0)
-    {
-        /* 亮屏：没有待收尾的后台测量。 */
         return 0;
     }
-    if ((uint32_t)(HAL_GetTick() - cycle_ms) >= period_ms)
+    else if (sleep_mode == 0)
+    {
+        /* 亮屏：没有待收尾的后台测量。 */
+        return UINT32_MAX;
+    }
+    elapsed_ms = HAL_GetTick() - cycle_ms;
+    if (elapsed_ms >= period_ms)
     {
         /* 所选周期到期，需要开始后台测量窗口。 */
-        return 1;
+        return 0;
     }
-    return 0;
+    return period_ms - elapsed_ms;
+}
+
+uint8_t app_heart_sleep_pending(void)
+{
+    return app_heart_sleep_wait_ms() == 0;
 }
 
 /* 运动模式强制连续测量并覆盖手动请求；样本队列同样清空(运动期间不导出原始波形)。 */

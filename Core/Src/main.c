@@ -116,19 +116,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-    /* 入参: 无；返回: 正常不返回。先自锁供电，再初始化复位记录、HAL、
-     * 时钟和片上外设，最后创建任务并启动调度器。 */
-    /* 局部 GPIO 配置模板：只用于把 PA3 配成推挽输出，字段填完即交给 HAL_GPIO_Init。 */
-    GPIO_InitTypeDef power_gpio = {0};
-
-    /* SW2短按先提供电源；立即拉高PA3保持TPS_EN，松手后继续完成初始化。 */
-    __HAL_RCC_GPIOA_CLK_ENABLE();                                     /* 先开 GPIOA 时钟，PA3 才能输出。 */
-    HAL_GPIO_WritePin(POWER_EN_GPIO_Port, POWER_EN_Pin, GPIO_PIN_SET); /* 先把输出锁存器置高，避免切输出瞬间掉电。 */
-    power_gpio.Pin = POWER_EN_Pin;                                    /* 选中 PA3(TPS_EN)。 */
-    power_gpio.Mode = GPIO_MODE_OUTPUT_PP;                            /* 推挽输出，能主动拉高保持使能。 */
-    power_gpio.Pull = GPIO_NOPULL;                                    /* 不用内部上下拉。 */
-    power_gpio.Speed = GPIO_SPEED_FREQ_LOW;                           /* 电源使能是慢信号，用低速档即可。 */
-    HAL_GPIO_Init(POWER_EN_GPIO_Port, &power_gpio);                   /* 写入配置，PA3 开始驱动高电平。 */
     app_reset_init(); /* 在HAL和RTC初始化前保存复位源及上次备份记录。 */
   /* USER CODE END 1 */
 
@@ -161,8 +148,7 @@ int main(void)
     /* STOP进一步降低Flash和低功耗稳压器功耗；唤醒时间由RTC补齐。 */
     HAL_PWREx_EnableFlashPowerDown();        /* 允许进入 STOP 时 Flash 进入掉电模式。 */
     HAL_PWREx_EnableLowRegulatorLowVoltage(); /* 允许低功耗稳压器工作在低电压档。 */
-    /* sensor 任务轮询 MPU 数据，启动时持续屏蔽未使用的 PB12 DATA_RDY EXTI。
-     * 只清该位，保留 PA4、其它 EXTI 线和共享 NVIC 组；STOP 唤醒恢复原掩码后仍保持关闭。 */
+    /* 普通采样轮询 DATA_RDY，启动时屏蔽 PB12。sensor 武装 MOT 时才打开该线。 */
     EXTI->IMR &= ~MPU6050_INT_Pin;
     /* main 只做 CubeMX 初始化; 任务归口 app_task, 背光/屏幕/触摸由应用层接管 */
     App_Task_Create();   /* 仅创建 LVGL 任务并初始化看门狗; sensor/touch 任务由 LVGL 任务首帧后内部创建 */

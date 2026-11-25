@@ -33,9 +33,9 @@ uint8_t app_battery_voltage_to_percent(uint32_t voltage_mv);
 
 /* ADC1 已由 MX_ADC1_Init 配置；以下初始化和采样只在 sensor 任务调用。 */
 void app_battery_init(void);
-/* sensor任务设置屏幕状态；启动8次有效采样仍保持1s，完成后熄屏改为10s。 */
+/* sensor任务设置屏幕状态；常态熄屏10s，启动和低压确认保持1s。 */
 void app_battery_set_sleep_mode(uint8_t sleeping);
-/* sensor每轮调用；到期时采内部参考和电池，各以2ms超时轮询，再更新滤波快照。 */
+/* 到期采内部参考和电池并更新滤波快照；连续3次有效电压≤3250mV时释放电源锁存。 */
 void app_battery_service(void);
 /* UI等消费方取一致快照(加锁整体复制)；NULL不处理，锁未建时输出全零。 */
 void app_battery_get_snapshot(app_battery_struct *snapshot);

@@ -5,12 +5,15 @@
 #include "app_battery.h"
 #include "app_diag.h"
 #include "battery_adc.h"
+#include "tps3823.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include <string.h>
 
 #define APP_BATTERY_ERROR_STREAK 3
 #define APP_BATTERY_MAX_MV 4500
+#define APP_BATTERY_SHUTDOWN_MV 3250
+#define APP_BATTERY_SHUTDOWN_SAMPLES 3
 #define APP_BATTERY_ADC_TIMEOUT_MS          2 /* 轮询上限：转换等待使用有限超时，失败则发布本轮错误状态 */
 #define APP_BATTERY_STARTUP_SAMPLES         8 /* 启动阶段采样次数 */
 #define APP_BATTERY_STARTUP_AVERAGE_SAMPLES 4 /* 取最后4次平均作为低通初值，丢掉上电头几帧 */
@@ -26,6 +29,7 @@ static uint32_t s_startup_sum_mv;  /* 启动末4次电压累加，用于低通�
 static uint8_t s_startup_samples;  /* 启动阶段已完成次数，等于8后滤波才生效 */
 static uint8_t s_last_percent;     /* 本次开机已发布的电量下限(只降不升) */
 static uint8_t s_error_streak;
+static uint8_t s_low_samples;     /* 连续低压有效采样次数，只有sensor任务访问。 */
 static uint8_t s_sleep_mode;       /* sensor任务写入的熄屏标志，决定当轮周期档位 */
 
 /* 3.50～4.05V按显示端点线性取值，每50mV的节点四舍五入为整数百分比。 */
@@ -82,6 +86,7 @@ void app_battery_init(void)
     /* 电量下限从 0 起，熄屏标志默认亮屏档(0)。 */
     s_last_percent = 0;
     s_error_streak = 0;
+    s_low_samples = 0;
     s_sleep_mode = 0;
     /* 诊断通道登记一次初始结果 0，表示尚无错误。 */
     app_diag_sensor_init(APP_DIAG_BATTERY, 0);
@@ -104,8 +109,8 @@ void app_battery_service(void)
     uint32_t read_started;           /* 采样开始时刻，仅用于诊断耗时。 */
     uint32_t period_ms = APP_BATTERY_PERIOD_MS; /* 当轮周期，默认亮屏/启动档 1s。 */
     uint32_t filter_steps;           /* 本次需要推进的低通步数，按经过的秒数折算。 */
-    /* 熄屏降频只在启动平均完成后生效，避免熄屏打断前8帧均值。 */
-    if (s_sleep_mode != 0 && s_startup_samples == APP_BATTERY_STARTUP_SAMPLES)
+    /* 启动及低压确认保持1s采样，常态熄屏才降至10s。 */
+    if (s_sleep_mode != 0 && s_startup_samples == APP_BATTERY_STARTUP_SAMPLES && s_low_samples == 0)
     {
         /* 熄屏且启动 8 帧已完成：周期放宽到 10s 一采。 */
         period_ms = APP_BATTERY_SLEEP_PERIOD_MS;
@@ -131,6 +136,27 @@ void app_battery_service(void)
             sample.voltage_mv = 0;
             sample.adc_raw = 0;
         }
+    }
+    /* 用本次换算电压确认低压，避免显示低通掩盖持续下跌。 */
+    if (sample.result == HAL_OK && sample.voltage_mv <= APP_BATTERY_SHUTDOWN_MV)
+    {
+        if (++s_low_samples >= APP_BATTERY_SHUTDOWN_SAMPLES)
+        {
+            /* SENSOR独占EEPROM，留5ms给上一笔页写完成内部编程。 */
+            HAL_Delay(5);
+            __disable_irq();
+            tps3823_disable(); /* 等待电源锁存释放期间避免外部看门狗重新启动。 */
+            HAL_SuspendTick();
+            HAL_GPIO_WritePin(POWER_EN_GPIO_Port, POWER_EN_Pin, GPIO_PIN_RESET);
+            for (;;)
+            {
+                HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+            }
+        }
+    }
+    else
+    {
+        s_low_samples = 0;
     }
     if (sample.result == HAL_OK)
     {

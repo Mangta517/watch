@@ -35,7 +35,8 @@ extern "C"
         APP_COMPASS_FIELD_RANGE,
         APP_COMPASS_ACCEL_INVALID,
         APP_COMPASS_HORIZONTAL_WEAK,
-        APP_COMPASS_READY
+        APP_COMPASS_READY,
+        APP_COMPASS_INTERFERENCE
     } app_compass_state;
 
     typedef enum
@@ -55,16 +56,19 @@ extern "C"
         uint32_t wrist_raise_sequence; /* 仅在放下后抬起时递增，供UI消费。 */
         uint32_t wrist_raise_ms;       /* 最近抬腕事件的HAL时间，避免陈旧事件亮屏。 */
         Accel_Gyro_struct raw;     /* MPU加速度±4g；Gyro字段固定为0。 */
-        float compass_deg;         /* OV-Watch直接磁方位角[0,360)°，LSM303加速度倾斜补偿。 */
+        float compass_deg;         /* LSM303倾斜补偿航向[0,360)°，已校准时应用磁偏角。 */
+        float mag_declination_deg; /* 当前航向使用的磁偏角，东正西负。 */
         app_compass_state compass_state;
         uint8_t compass_valid;     /* 当前加速度与磁场可用于直接指南针。 */
         lsm303dlhc_mag_struct mag; /* 芯片坐标下磁场，未做安装校准 */
         float mag_body_uT[3];      /* 安装校准后的表盘坐标磁场。 */
         uint8_t mag_online;        /* 有当前档位新鲜度窗口内的有效磁场帧。 */
         uint8_t mag_calibrated;    /* 已校准，或已从EEPROM恢复有效校准 */
+        uint8_t mag_cal_is_ellipsoid; /* 1为MAG2椭球校准，0包括旧MAG1。 */
         app_mag_cal_state mag_cal_state;
         uint16_t mag_cal_samples;                /* 校准采集帧数；点击完成不等于校准成功 */
-        float mag_cal_span_uT[3];                /* 当前校准窗口各轴max-min，验收要求均≥20μT */
+        uint8_t mag_cal_coverage_pct;            /* 采样池命中的三维方向桶百分比。 */
+        float mag_cal_span_uT[3];                /* 当前校准窗口各轴max-min。 */
         app_mag_persist_state mag_persist_state; /* RAM校准与掉电保存分别报告 */
     } app_imu_struct;
 
@@ -89,8 +93,24 @@ extern "C"
  *        指南针由独立服务调度；read_mag参数保留旧调用签名。
  */
     uint8_t App_IMU_Service(uint8_t read_mag);
-    /* 每轮sensor独立调用，active=指南针页或磁校准；返回1表示电源/恢复尚未完成。 */
-    uint8_t app_imu_compass_service(uint8_t active, uint8_t read_sensors);
+    typedef enum
+    {
+        APP_COMPASS_SERVICE_IDLE,
+        APP_COMPASS_SERVICE_RETRY, /* 离线退避，继续随当前任务节拍重试。 */
+        APP_COMPASS_SERVICE_BUSY   /* 电源切换或分步配置，进MOT前继续推进。 */
+    } app_compass_service_state;
+
+    /* 每轮sensor独立调用，active=指南针页或磁校准。 */
+    app_compass_service_state app_imu_compass_service(uint8_t active, uint8_t read_sensors);
+    void app_imu_cancel_mag_calibration(void);
+    uint8_t app_imu_mag_cal_active(void);
+    uint8_t app_imu_can_enter_mot(uint32_t now_ms);
+    uint8_t app_imu_enter_mot(void);
+    void app_imu_exit_mot(uint8_t accel_reference);
+    uint8_t app_imu_mot_poll(void);
+    uint8_t app_imu_mot_health_check(void);
+    /* 运行时磁偏角(东正西负)，限幅±45°，0表示磁北；重启恢复默认西偏2°。 */
+    void app_imu_set_declination(float deg);
     /* LVGL发布RTC日历，sensor执行跨天清零及Flash保存。day=0表示未校时。 */
     void app_imu_set_day(uint16_t day, uint8_t calendar_restored);
     void app_imu_activity_service(void);
@@ -115,8 +135,7 @@ extern "C"
     uint8_t App_IMU_GetSnapshot(app_imu_struct *imu);
 
     /* UI/任务发出请求即可；采集与系数更新由 sensor 任务执行，不在 UI 中读 I2C。
- * start=1 开始，start=0 完成；旋转各轴30~60s，失败保留上次系数。
- * shortcut: 只做硬铁偏置和对角比例校准，存在轴间软铁耦合时需椭球标定。 */
+ * start=1 开始，start=0 完成；旋转各轴30~60s，失败保留上次系数。 */
     void App_IMU_MagCalibrate(uint8_t start);
 
 #ifdef __cplusplus

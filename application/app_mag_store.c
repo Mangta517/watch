@@ -1,21 +1,23 @@
 /**
  * @file app_mag_store.c
  * @brief 两份磁校准记录轮换写入，保留旧副本；CRC32和读回校验确认保存结果。
- *        记录36字节：MAG1(格式版本) + 序号 + 6个float32 + CRC32，按小端编码。
+ *        MAG2: 格式字、16位序号、磁倾角(0.1°)、9个float32、CRC32，按小端编码。
+ *        兼容36字节MAG1的32位序号、三轴偏置和三轴比例。
  *        槽位0x00/0x30，各保留48字节；0x60..0xFF不用于本模块。
  */
 #include "app_mag_store.h"
 #include "bl24c02.h"
 #include "FreeRTOS.h"
 #include "task.h"
-#include "main.h"
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
 
-#define MAG_STORE_MAGIC        0x3147414D /* 小端字符MAG1 */
-#define MAG_STORE_RECORD_BYTES 36
-#define MAG_STORE_CRC_OFFSET   32
+#define MAG_STORE_MAGIC_V1     0x3147414D /* 小端字符MAG1 */
+#define MAG_STORE_MAGIC_V2     0x3247414D /* 小端字符MAG2 */
+#define MAG_STORE_CRC_V1       32
+#define MAG_STORE_CRC_V2       44
+#define MAG_STORE_RECORD_BYTES 48
 #define MAG_STORE_SLOT_BYTES   48
 
 typedef char mag_store_float_must_be_32_bits[(sizeof(float) == 4) ? 1 : -1];
@@ -35,6 +37,21 @@ static void mag_store_put_u32(uint8_t *data, uint32_t value)
 static uint32_t mag_store_get_u32(const uint8_t *data)
 {
     return (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+}
+
+static void mag_store_put_float(uint8_t *data, float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits)); /* 按位保持float32的EEPROM格式。 */
+    mag_store_put_u32(data, bits);
+}
+
+static float mag_store_get_float(const uint8_t *data)
+{
+    uint32_t bits = mag_store_get_u32(data);
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 /* 对length字节计算CRC32，初值与最终异或均为0xFFFFFFFF。 */
@@ -64,14 +81,25 @@ static uint32_t mag_store_crc(const uint8_t *data, uint16_t length)
     return crc ^ 0xFFFFFFFFU;
 }
 
-/* 逐轴检查偏置和比例：偏置/比例都必须是有限值，比例还须大于0；全通过返回1，否则0。 */
 static uint8_t mag_store_values_valid(const app_mag_calibration_struct *calibration)
 {
+    const common_mag_cal_params_struct *params = &calibration->params;
+    const float *w = params->soft_sym;
     uint8_t i;
-    /* 遍历三轴，任一轴不满足即提前返回0。 */
     for (i = 0; i < 3; ++i)
     {
-        if (!isfinite(calibration->offset_uT[i]) || !isfinite(calibration->scale[i]) || calibration->scale[i] <= 0.0f)
+        if (!isfinite(params->offset_uT[i]) || !isfinite(w[i]) || w[i] <= 0.0f)
+        {
+            return 0;
+        }
+    }
+    if (calibration->is_ellipsoid != 0)
+    {
+        double xx = w[0], yy = w[1], zz = w[2], xy = w[3], xz = w[4], yz = w[5];
+        double minor = xx * yy - xy * xy;
+        double det = minor * zz + 2.0 * xy * xz * yz - xx * yz * yz - yy * xz * xz;
+        if (!isfinite(xy) || !isfinite(xz) || !isfinite(yz) || !(minor > 0.0 && det > 0.0) ||
+            (params->dip_valid != 0 && !(fabsf(params->dip_ref_deg) <= 90.0f)))
         {
             return 0;
         }
@@ -79,45 +107,67 @@ static uint8_t mag_store_values_valid(const app_mag_calibration_struct *calibrat
     return 1;
 }
 
-/* 把序号和三轴偏置/比例编码成36字节记录，最后对前32字节算CRC32写到偏移32。 */
 static void mag_store_encode(uint8_t *record, uint32_t sequence, const app_mag_calibration_struct *calibration)
 {
+    const common_mag_cal_params_struct *params = &calibration->params;
+    int16_t dip_x10 = INT16_MIN;
     uint8_t i;
-    uint32_t bits;
-    /* 偏移0写MAG1格式字，偏移4写本次序号。 */
-    mag_store_put_u32(record, MAG_STORE_MAGIC);
-    mag_store_put_u32(record + 4, sequence);
-    /* 逐轴把float按位复制成uint32再小端写出：偏置占8..19，比例占20..31。 */
+    if (params->dip_valid != 0)
+    {
+        dip_x10 = (int16_t)roundf(params->dip_ref_deg * 10.0f);
+    }
+    mag_store_put_u32(record, MAG_STORE_MAGIC_V2);
+    mag_store_put_u32(record + 4, (uint16_t)sequence | ((uint32_t)(uint16_t)dip_x10 << 16));
     for (i = 0; i < 3; ++i)
     {
-        memcpy(&bits, &calibration->offset_uT[i], 4);
-        mag_store_put_u32(record + 8 + i * 4, bits);
-        memcpy(&bits, &calibration->scale[i], 4);
-        mag_store_put_u32(record + 20 + i * 4, bits);
+        mag_store_put_float(record + 8 + i * 4, params->offset_uT[i]);
     }
-    /* 对偏移0..31计算CRC32，写到偏移32。 */
-    mag_store_put_u32(record + MAG_STORE_CRC_OFFSET, mag_store_crc(record, MAG_STORE_CRC_OFFSET));
+    for (i = 0; i < 6; ++i)
+    {
+        mag_store_put_float(record + 20 + i * 4, params->soft_sym[i]);
+    }
+    mag_store_put_u32(record + MAG_STORE_CRC_V2, mag_store_crc(record, MAG_STORE_CRC_V2));
 }
 
 /* 校验格式字和CRC，按位还原三轴float并检查数值；通过才写calibration，返回1表示失败、0表示成功。 */
 static uint8_t mag_store_decode(const uint8_t *record, app_mag_calibration_struct *calibration)
 {
-    uint8_t i;
-    uint32_t bits;
-    app_mag_calibration_struct candidate;
-    /* 格式字不等于MAG1或CRC不符时判记录无效。 */
-    if (mag_store_get_u32(record) != MAG_STORE_MAGIC ||
-        mag_store_get_u32(record + MAG_STORE_CRC_OFFSET) != mag_store_crc(record, MAG_STORE_CRC_OFFSET))
+    uint8_t i, crc_offset, count;
+    uint32_t magic = mag_store_get_u32(record);
+    int16_t dip_x10;
+    app_mag_calibration_struct candidate = {0};
+    if (magic == MAG_STORE_MAGIC_V2)
+    {
+        candidate.is_ellipsoid = 1;
+        crc_offset = MAG_STORE_CRC_V2;
+        count = 6;
+        dip_x10 = (int16_t)(mag_store_get_u32(record + 4) >> 16);
+        if (dip_x10 != INT16_MIN)
+        {
+            candidate.params.dip_ref_deg = dip_x10 * 0.1f;
+            candidate.params.dip_valid = 1;
+        }
+    }
+    else if (magic == MAG_STORE_MAGIC_V1)
+    {
+        crc_offset = MAG_STORE_CRC_V1;
+        count = 3;
+    }
+    else
     {
         return 1;
     }
-    /* 逐轴读出uint32位型，再按位复制回float：偏置来自8..19，比例来自20..31。 */
+    if (mag_store_get_u32(record + crc_offset) != mag_store_crc(record, crc_offset))
+    {
+        return 1;
+    }
     for (i = 0; i < 3; ++i)
     {
-        bits = mag_store_get_u32(record + 8 + i * 4);
-        memcpy(&candidate.offset_uT[i], &bits, 4);
-        bits = mag_store_get_u32(record + 20 + i * 4);
-        memcpy(&candidate.scale[i], &bits, 4);
+        candidate.params.offset_uT[i] = mag_store_get_float(record + 8 + i * 4);
+    }
+    for (i = 0; i < count; ++i)
+    {
+        candidate.params.soft_sym[i] = mag_store_get_float(record + 20 + i * 4);
     }
     /* 还原出的数值不满足有限值/正比例要求时仍判失败。 */
     if (!mag_store_values_valid(&candidate))
@@ -129,7 +179,7 @@ static uint8_t mag_store_decode(const uint8_t *record, app_mag_calibration_struc
     return 0;
 }
 
-/* 两份都有效时按无符号序号差选择较新记录，兼容32位序号回绕。 */
+/* 混合版本时有效MAG2为迁移后的记录；同版本按对应位宽比较循环序号。 */
 static uint8_t mag_store_latest(const uint8_t *first, const uint8_t *second, const uint8_t valid[2])
 {
     uint32_t difference;
@@ -142,8 +192,16 @@ static uint8_t mag_store_latest(const uint8_t *first, const uint8_t *second, con
     {
         return 0;
     }
-    /* 两槽都有效：槽1序号减槽0序号，差值非0且小于0x80000000表示槽1更新。 */
+    if (mag_store_get_u32(first) != mag_store_get_u32(second))
+    {
+        return mag_store_get_u32(second) == MAG_STORE_MAGIC_V2;
+    }
     difference = mag_store_get_u32(second + 4) - mag_store_get_u32(first + 4);
+    if (mag_store_get_u32(first) == MAG_STORE_MAGIC_V2)
+    {
+        uint16_t diff16 = (uint16_t)difference;
+        return diff16 != 0 && diff16 < 0x8000;
+    }
     return difference != 0 && difference < 0x80000000U;
 }
 
@@ -158,7 +216,7 @@ app_mag_store_result app_mag_store_load(app_mag_calibration_struct *calibration)
     {
         return APP_MAG_STORE_ERROR;
     }
-    /* 逐槽读取36字节：槽0在0x00，槽1在0x30。 */
+    /* 逐槽读取48字节：槽0在0x00，槽1在0x30。 */
     for (i = 0; i < 2; ++i)
     {
         if (bl24c02_read(i * MAG_STORE_SLOT_BYTES, record[i], MAG_STORE_RECORD_BYTES) == 0)
@@ -195,7 +253,6 @@ static struct
     bl24c02_transfer_struct io;
     app_mag_calibration_struct value;
     uint8_t record[2][MAG_STORE_RECORD_BYTES], verify[MAG_STORE_RECORD_BYTES], valid[2];
-    uint32_t started_ms;
     uint16_t address;
     uint8_t phase, target;
     app_mag_store_result result;
@@ -210,19 +267,17 @@ app_mag_store_result app_mag_store_save_begin(const app_mag_calibration_struct *
         return APP_MAG_STORE_BUSY;
     }
     /* 空指针或数值不合法(非有限值/比例非正)时直接报错，不启动写事务。 */
-    if (calibration == NULL || !mag_store_values_valid(calibration))
+    if (calibration == NULL || calibration->is_ellipsoid == 0 || !mag_store_values_valid(calibration))
     {
         return APP_MAG_STORE_ERROR;
     }
     /* 复制系数到模块内，避免事务期间外部数据变化。 */
     s_save.value = *calibration;
-    /* 记录本次保存起始tick，供后续阶段使用。 */
-    s_save.started_ms = HAL_GetTick();
     /* 从阶段0开始：先读槽0。 */
     s_save.phase = 0;
     /* 先置BUSY，表示事务在途。 */
     s_save.result = APP_MAG_STORE_BUSY;
-    /* 排入读槽0的36字节事务，读结果存入record[0]。 */
+    /* 排入读槽0事务，读结果存入record[0]。 */
     bl24c02_transfer_begin(&s_save.io, 0, s_save.record[0], MAG_STORE_RECORD_BYTES, 0);
     return s_save.result;
 }

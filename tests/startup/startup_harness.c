@@ -79,6 +79,24 @@ static uint8_t touch_sleep_test;
 static unsigned int touch_notifications, touch_blocks;
 static uint8_t lvgl_wait_test, wake_key_active;
 static unsigned lvgl_notifications, lvgl_waits, wake_polls, irq_notifications, irq_yields;
+enum
+{
+    MOT_TEST_IRQ = 1,
+    MOT_TEST_SCREEN,
+    MOT_TEST_SPORT,
+    MOT_TEST_HEART,
+    MOT_TEST_HEART_FAST,
+    MOT_TEST_HEALTH,
+    MOT_TEST_BARO,
+    MOT_TEST_POLL,
+    MOT_TEST_COMPASS_OFFLINE
+};
+static uint8_t mot_test, mot_armed, mot_woken, mot_exit_reference;
+static unsigned mot_waits, mot_notifications, mot_samples, mot_samples_at_entry, mot_health_checks;
+static unsigned mot_polls, mot_compass_calls;
+static uint32_t mot_enter_ms, mot_exit_ms, mot_heart_cycle_ms;
+static uint32_t sleep_heart_interval_ms = 600000;
+static void (*mot_irq_callback)(void);
 static uint8_t background_test, background_sleeping;
 static uint32_t mock_imu_period = 10;
 static unsigned background_samples, motion_samples, background_wakes, background_sleeps;
@@ -274,7 +292,47 @@ void my_mpu6050_get_offset(mpu6050_offset_struct *offset)
 }
 static uint32_t milestones[APP_BOOT_FIELD_COUNT];
 static TickType_t tick;
-static TickType_t rtc_begin_tick, ble_begin_tick;
+static TickType_t rtc_begin_tick, ble_begin_tick, ble_power_tick, ble_at_tick;
+static uint8_t ble_powered, ble_at_started;
+static unsigned planned_reset_step;
+GPIO_TypeDef host_gpio_b;
+
+void platform_delay_min_ms(uint32_t ms)
+{
+    assert(!displayed && task_count == 1 && ms == KT6368A_DISCHARGE_MS);
+    tick += ms + 1;
+}
+
+void lv_port_disp_set_brightness(uint8_t brightness)
+{
+    assert(planned_reset_step++ == 0 && brightness == 0);
+}
+
+void kt6368a_set_enabled(uint8_t enabled)
+{
+    assert(planned_reset_step++ == 1 && enabled == 0);
+}
+
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
+{
+    assert(planned_reset_step++ == 2 && port == HEART_LED_GPIO_Port && pin == HEART_LED_Pin && state == GPIO_PIN_RESET);
+}
+
+void HAL_Delay(uint32_t ms)
+{
+    assert(planned_reset_step++ == 3 && ms == 20);
+}
+
+static void assert_ble_boot_time(void)
+{
+    uint32_t at_ready_ms = milestones[APP_BOOT_BT_BEGIN_MS] + KT6368A_DISCHARGE_MS + 1 + KT6368A_BOOT_DELAY_MS;
+    if (at_ready_ms < milestones[APP_BOOT_FIRST_FRAME_MS])
+    {
+        at_ready_ms = milestones[APP_BOOT_FIRST_FRAME_MS];
+    }
+    assert(milestones[APP_BOOT_BT_END_MS] >= at_ready_ms + 500);
+    assert(milestones[APP_BOOT_BT_END_MS] < at_ready_ms + 510);
+}
 static jmp_buf stop, sensor_stop;
 static unsigned int watchdog_inits, watchdog_enables, watchdog_feeds;
 static uint32_t watchdog_enable_delay;
@@ -437,7 +495,7 @@ BaseType_t xTaskCreate(TaskFunction_t entry, const char *name, uint16_t stack, v
     }
     else if (task_count == 1)
     {
-        assert(handle == NULL);
+        assert(handle == &s_sensor_task_handle);
     }
     else
     {
@@ -469,6 +527,10 @@ BaseType_t xTaskCreate(TaskFunction_t entry, const char *name, uint16_t stack, v
         {
             *handle = &lvgl_notifications;
         }
+        else if (task_count == 2)
+        {
+            *handle = &mot_notifications;
+        }
         else
         {
             *handle = &touch_inits;
@@ -479,6 +541,11 @@ BaseType_t xTaskCreate(TaskFunction_t entry, const char *name, uint16_t stack, v
 
 BaseType_t xTaskNotifyGive(TaskHandle_t task)
 {
+    if (task == &mot_notifications)
+    {
+        ++mot_notifications;
+        return pdPASS;
+    }
     if (task == &lvgl_notifications)
     {
         assert(app_task_is_screen_off() != 0);
@@ -497,6 +564,11 @@ BaseType_t xTaskNotifyGive(TaskHandle_t task)
             activity_last_notify = tick;
         }
         ++lvgl_notifications;
+        if (mot_test != 0 && s_sensor_mot_sleeping != 0)
+        {
+            assert((uint32_t)(tick - watchdog_last_falling_ms) < 900);
+            app_watchdog_service();
+        }
         return pdPASS;
     }
     assert(task == &touch_inits);
@@ -506,7 +578,14 @@ BaseType_t xTaskNotifyGive(TaskHandle_t task)
 
 void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken)
 {
-    assert(task == &lvgl_notifications && woken != NULL && *woken == pdFALSE);
+    assert(woken != NULL && *woken == pdFALSE);
+    if (task == &mot_notifications)
+    {
+        ++mot_notifications;
+        *woken = pdTRUE;
+        return;
+    }
+    assert(task == &lvgl_notifications);
     ++irq_notifications;
     ++lvgl_notifications;
     *woken = pdTRUE;
@@ -525,6 +604,50 @@ uint8_t App_UI_IsWakeKeyActive(void)
 
 uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
 {
+    if (mot_test != 0)
+    {
+        uint32_t run_ms = wait;
+        assert(clear == pdTRUE && wait > 0 && wait <= 400 && app_task_sleep_poll_ms() == 400);
+        assert(mot_armed && mot_samples == mot_samples_at_entry && sleep_heart_starts == 0 && sleep_cycle_ms == mot_heart_cycle_ms);
+        ++mot_waits;
+        assert(lvgl_notifications >= mot_waits);
+        if (mot_waits <= 3 || mot_test == MOT_TEST_COMPASS_OFFLINE)
+        {
+            assert(wait == 400);
+        }
+        if (mot_test == MOT_TEST_BARO && sensor_elapsed_ms >= 300000 && sensor_elapsed_ms < 301600)
+        {
+            assert(wait <= 100 && baro_calls == 1);
+        }
+        if ((mot_waits == 3 && mot_test <= MOT_TEST_SPORT) || (mot_test == MOT_TEST_BARO && baro_calls == 2))
+        {
+            run_ms = 37;
+            if (mot_test == MOT_TEST_IRQ || mot_test == MOT_TEST_BARO)
+            {
+                mot_armed = 0;
+                mot_woken = 1;
+                mot_irq_callback();
+                assert(irq_yields == 1);
+            }
+            else if (mot_test == MOT_TEST_SCREEN)
+            {
+                app_task_set_power_state(0, 0, 0, 0);
+            }
+            else
+            {
+                app_task_set_power_state(1, 0, 1, 1);
+            }
+            assert(mot_notifications == 1);
+        }
+        tick += run_ms;
+        sensor_elapsed_ms += run_ms;
+        if (mot_notifications != 0)
+        {
+            mot_notifications = 0;
+            return 1;
+        }
+        return 0;
+    }
     if (sleep_stationary_test != 0)
     {
         assert(clear == pdTRUE && wait == 200 && app_task_sleep_poll_ms() == 200);
@@ -709,6 +832,40 @@ void vTaskDelay(TickType_t ticks)
 }
 void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
 {
+    if (mot_test != 0)
+    {
+        assert(!s_sensor_mot_sleeping && (uint32_t)(tick - watchdog_last_falling_ms) < 900);
+        app_watchdog_service();
+        if (mot_waits != 0 && mot_samples > mot_samples_at_entry)
+        {
+            if (mot_test == MOT_TEST_HEART || mot_test == MOT_TEST_HEART_FAST)
+            {
+                assert(sleep_heart_starts == 1 && sleep_cycle_ms == mot_heart_cycle_ms + sleep_heart_interval_ms);
+                if (heart_enabled == 0 && mock_imu_period == 25)
+                {
+                    longjmp(sensor_stop, 1);
+                }
+            }
+            else
+            {
+                if (mot_test == MOT_TEST_SPORT)
+                {
+                    assert(mock_imu_period == 10);
+                }
+                else
+                {
+                    assert(mock_imu_period == 25);
+                }
+                assert(sleep_heart_starts == 0);
+                longjmp(sensor_stop, 1);
+            }
+        }
+        assert(sensor_elapsed_ms < 310000);
+        *last += ticks;
+        tick += ticks;
+        sensor_elapsed_ms += ticks;
+        return;
+    }
     if (mpu_cooldown_test != 0)
     {
         assert(++sensor_rounds == app_sensor_watchdog_progress);
@@ -1151,7 +1308,9 @@ void vTaskDelayUntil(TickType_t *last, TickType_t ticks)
 void App_Display_Init(void)
 {
     assert(task_count == 1 && hardware_count == 0);
-    tick = 650;
+    assert(ble_powered && !ble_at_started && watchdog_enables == 0);
+    assert(ble_power_tick - ble_begin_tick >= KT6368A_DISCHARGE_MS);
+    tick += 650;
     displayed = 1;
 }
 void lv_refr_now(void *display)
@@ -1281,8 +1440,10 @@ HAL_StatusTypeDef watch_rtc_init_service(void)
 }
 void kt6368a_init_begin(void)
 {
-    assert(frame && task_count == 3);
+    assert((!displayed && !frame && task_count == 1) || (frame && task_count == 3));
     ble_begin_tick = tick;
+    ble_powered = 0;
+    ble_at_started = 0;
 }
 void kt6368a_set_rx_callback(void (*callback)(void))
 {
@@ -1302,7 +1463,25 @@ uint8_t kt6368a_init_is_pending(void)
 }
 HAL_StatusTypeDef kt6368a_init_service(void)
 {
-    if ((uint32_t)(tick - ble_begin_tick) < 1700U)
+    if (ble_powered == 0)
+    {
+        if ((uint32_t)(tick - ble_begin_tick) >= KT6368A_DISCHARGE_MS)
+        {
+            ble_powered = 1;
+            ble_power_tick = tick;
+        }
+        return HAL_BUSY;
+    }
+    if ((uint32_t)(tick - ble_power_tick) < KT6368A_BOOT_DELAY_MS)
+    {
+        return HAL_BUSY;
+    }
+    if (ble_at_started == 0)
+    {
+        ble_at_started = 1;
+        ble_at_tick = tick;
+    }
+    if ((uint32_t)(tick - ble_at_tick) < 500)
     {
         return HAL_BUSY;
     }
@@ -1328,8 +1507,9 @@ uint8_t spl006_init(void)
     assert(hardware_count++ == 2);
     return fail_devices;
 }
-uint8_t lsm303dlhc_mag_init(void)
+uint8_t lsm303dlhc_mag_init_mode(uint8_t sleeping)
 {
+    assert(sleeping == 1);
     assert(hardware_count++ == 3);
     return fail_devices;
 }
@@ -1370,10 +1550,97 @@ void app_imu_activity_service(void)
 void lsm303dlhc_accel_recover_begin(void)
 {
 }
-uint8_t app_imu_compass_service(uint8_t active, uint8_t read_sensors)
+app_compass_service_state app_imu_compass_service(uint8_t active, uint8_t read_sensors)
 {
     assert(active <= 1 && read_sensors <= 1);
+    if (mot_test != 0)
+    {
+        assert(!active);
+    }
+    if (mot_test == MOT_TEST_COMPASS_OFFLINE)
+    {
+        ++mot_compass_calls;
+        if (mot_waits == 1)
+        {
+            return APP_COMPASS_SERVICE_BUSY;
+        }
+        return APP_COMPASS_SERVICE_RETRY;
+    }
+    return APP_COMPASS_SERVICE_IDLE;
+}
+
+void app_imu_cancel_mag_calibration(void)
+{
+    assert(app_task_is_screen_off());
+}
+
+uint8_t app_imu_mag_cal_active(void)
+{
+    return app_imu_is_calibrating();
+}
+
+uint8_t app_imu_can_enter_mot(uint32_t now_ms)
+{
+    assert(now_ms == tick);
+    return mot_test != 0 && mot_waits == 0 && sensor_elapsed_ms >= 6000;
+}
+
+uint8_t app_imu_enter_mot(void)
+{
+    assert(mot_test != 0 && !mot_armed && mock_imu_period == 25 && !heart_enabled);
+    mot_armed = 1;
+    mot_enter_ms = tick;
+    mot_samples_at_entry = mot_samples;
+    mot_heart_cycle_ms = sleep_cycle_ms;
     return 0;
+}
+
+void app_imu_exit_mot(uint8_t accel_reference)
+{
+    assert(mot_waits >= 3 && mot_test != 0 && !s_sensor_mot_sleeping);
+    mot_exit_reference = accel_reference;
+    mot_exit_ms = tick;
+    mot_armed = mot_woken = 0;
+    if (mot_test == MOT_TEST_HEART || mot_test == MOT_TEST_HEART_FAST || mot_test == MOT_TEST_SPORT)
+    {
+        assert(accel_reference == 1);
+    }
+    else
+    {
+        assert(accel_reference == 0);
+    }
+}
+
+uint8_t app_imu_mot_health_check(void)
+{
+    assert(mot_test == MOT_TEST_HEALTH || mot_test == MOT_TEST_BARO);
+    ++mot_health_checks;
+    assert((uint32_t)(tick - mot_enter_ms) == 60000 * mot_health_checks);
+    return mot_test == MOT_TEST_HEALTH;
+}
+
+uint8_t app_imu_mot_poll(void)
+{
+    assert(mot_test != 0 && mot_armed && !mot_woken);
+    ++mot_polls;
+    assert((uint32_t)(tick - mot_enter_ms) == 400 * mot_polls);
+    return (mot_test == MOT_TEST_POLL && mot_polls == 3) ||
+           (mot_test == MOT_TEST_COMPASS_OFFLINE && mot_polls == 16);
+}
+
+uint8_t my_mpu6050_mot_armed(void)
+{
+    return mot_armed;
+}
+
+uint8_t my_mpu6050_mot_woken(void)
+{
+    return mot_woken;
+}
+
+void my_mpu6050_set_mot_callback(void (*callback)(void))
+{
+    mot_irq_callback = callback;
 }
 void App_IMU_Init(void)
 {
@@ -1448,9 +1715,18 @@ uint8_t app_heart_sleep_pending(void)
 {
     if (sleep_test != 0 && sleep_heart_mode != 0)
     {
-        return heart_enabled != 0 || (uint32_t)(tick - sleep_cycle_ms) >= 600000U;
+        return heart_enabled != 0 || (uint32_t)(tick - sleep_cycle_ms) >= sleep_heart_interval_ms;
     }
     return 0;
+}
+uint32_t app_heart_sleep_wait_ms(void)
+{
+    uint32_t elapsed_ms = tick - sleep_cycle_ms;
+    if (app_heart_sleep_pending() != 0)
+    {
+        return 0;
+    }
+    return sleep_heart_interval_ms - elapsed_ms;
 }
 uint8_t app_imu_is_calibrating(void)
 {
@@ -1597,6 +1873,17 @@ uint8_t App_IMU_Service(uint8_t read_mag)
 {
     assert(hardware_count == 5 && !rtc_done && !ble_done);
     (void)read_mag;
+    if (mot_test != 0)
+    {
+        assert(!s_sensor_mot_sleeping);
+        ++mot_samples;
+        sleep_imu_sample_ms = tick;
+        if (mot_samples == mot_samples_at_entry + 1 && mot_waits != 0)
+        {
+            assert((uint32_t)(tick - mot_exit_ms) >= (mot_exit_reference != 0 ? 10U : 25U));
+        }
+        return 0;
+    }
     if (mpu_cooldown_test != 0)
     {
         assert(mpu_cooldown_result == 0 && mock_imu_period == 25);
@@ -1922,6 +2209,10 @@ uint8_t app_heart_service(void)
         }
     }
     assert(hardware_count == 5 && !rtc_done && !ble_done);
+    if (mot_test != 0)
+    {
+        assert(!s_sensor_mot_sleeping);
+    }
     if (sensor_timing.mode != 0 && (uint32_t)(tick - sensor_timing.ppg_ms) >= 30)
     {
         sensor_timing.ppg_ms = tick;
@@ -1936,7 +2227,7 @@ uint8_t app_heart_service(void)
             /* 100ms预热边界先读PPG，紧接着产生首个MPU参考；后续各拍保持新鲜。 */
             assert(sleep_imu == 0 && (uint32_t)(tick - sleep_imu_sample_ms) <= 50U);
         }
-        if (sleep_heart_mode != 0 && heart_enabled == 0 && (uint32_t)(tick - sleep_cycle_ms) >= 600000U)
+        if (sleep_heart_mode != 0 && heart_enabled == 0 && (uint32_t)(tick - sleep_cycle_ms) >= sleep_heart_interval_ms)
         {
             sleep_cycle_ms = sleep_window_ms = tick;
             heart_enabled = 1;
@@ -2029,6 +2320,63 @@ uint32_t app_touch_sleep_retry_ms(void)
 }
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strncmp(argv[1], "mot_", 4) == 0)
+    {
+        const char *const modes[] = {
+            "mot_irq", "mot_screen", "mot_sport", "mot_heart", "mot_heart_fast", "mot_health", "mot_baro", "mot_poll",
+            "mot_compass_offline"
+        };
+        unsigned i;
+        for (i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
+        {
+            if (strcmp(argv[1], modes[i]) == 0)
+            {
+                mot_test = i + 1;
+                break;
+            }
+        }
+        assert(mot_test != 0);
+        sleep_test = displayed = 1;
+        s_sensor_task_handle = &mot_notifications;
+        s_lvgl_task_handle = &lvgl_notifications;
+        tick = UINT32_MAX - 3000;
+        if (mot_test == MOT_TEST_HEART_FAST)
+        {
+            sleep_heart_interval_ms = 60000;
+        }
+        if (mot_test == MOT_TEST_HEART || mot_test == MOT_TEST_HEART_FAST)
+        {
+            sleep_heart_advance_ms = sleep_heart_interval_ms - 8223; /* 到期落在两次400ms心跳之间。 */
+            sleep_heart_duration_ms = 600;
+        }
+        app_watchdog_begin();
+        frame = 1;
+        app_task_set_power_state(1, 0, 1, 0);
+        if (setjmp(sensor_stop) == 0)
+        {
+            app_sensor_task(NULL);
+        }
+        assert(!mot_armed && app_task_sleep_poll_ms() == 200 && mot_waits >= 3);
+        if (mot_test == MOT_TEST_BARO)
+        {
+            assert(baro_calls == 2 && mot_health_checks == 4);
+        }
+        else
+        {
+            assert(mot_health_checks == (unsigned)(mot_test == MOT_TEST_HEALTH));
+        }
+        if (mot_test == MOT_TEST_POLL)
+        {
+            assert(mot_polls == 3 && (uint32_t)(mot_exit_ms - mot_enter_ms) == 1200 && irq_yields == 0);
+        }
+        if (mot_test == MOT_TEST_COMPASS_OFFLINE)
+        {
+            assert(mot_polls == 16 && (uint32_t)(mot_exit_ms - mot_enter_ms) == 6400 && mot_compass_calls > mot_polls);
+        }
+        assert(watchdog_feeds > 2);
+        printf("PASS: %s preserves MPU/PPG/compass isolation and watchdog progress, then resumes with fresh samples.\n", argv[1]);
+        return 0;
+    }
     int result;
     if (argc > 1 && strncmp(argv[1], "mpu_cooldown", 12) == 0)
     {
@@ -2356,6 +2704,13 @@ int main(int argc, char **argv)
         }
         return 0;
     }
+    if (argc > 1 && strcmp(argv[1], "planned_reset") == 0)
+    {
+        app_task_prepare_reset();
+        assert(planned_reset_step == 4);
+        puts("PASS: planned reset unloads LCD backlight, BLE and heart LED before the settling delay.");
+        return 0;
+    }
     if (argc > 1 && (strcmp(argv[1], "watchdog_progress") == 0 || strcmp(argv[1], "watchdog_wrap") == 0))
     {
         test_watchdog_progress((uint8_t)(strcmp(argv[1], "watchdog_wrap") == 0));
@@ -2463,8 +2818,7 @@ int main(int argc, char **argv)
     if (bluetooth_resume_test != 0)
     {
         assert(result == 1 && bluetooth_resume_phase == 1 && ble_done != 0);
-        assert(milestones[APP_BOOT_BT_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);
-    assert(milestones[APP_BOOT_BT_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 1710U);
+        assert_ble_boot_time();
         puts("PASS: LVGL continues a second Bluetooth startup after the initial boot completed, without rewriting boot milestones.");
         return 0;
     }
@@ -2516,7 +2870,7 @@ int main(int argc, char **argv)
     if (first_frame_slow != 0)
     {
         assert(watchdog_feeds == first_frame_chunks + 1U);
-        assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650U + first_frame_chunks * first_frame_chunk_ms);
+        assert(milestones[APP_BOOT_FIRST_FRAME_MS] == KT6368A_DISCHARGE_MS + 1 + 650 + first_frame_chunks * first_frame_chunk_ms);
         assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 10);
         assert(app_watchdog.started_ms == milestones[APP_BOOT_FIRST_FRAME_MS] && display_progress_callback != NULL);
         puts("Startup: 1.5s/3s first frames maintain falling-edge intervals below 900ms; startup phases have separate deadlines: PASS");
@@ -2524,8 +2878,8 @@ int main(int argc, char **argv)
     else
     {
         assert(watchdog_feeds == 1);
-        assert(milestones[APP_BOOT_FIRST_FRAME_MS] == 650);
-        assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == 660);
+        assert(milestones[APP_BOOT_FIRST_FRAME_MS] == KT6368A_DISCHARGE_MS + 1 + 650);
+        assert(milestones[APP_BOOT_SAMPLING_BEGIN_MS] == milestones[APP_BOOT_FIRST_FRAME_MS] + 10);
     }
     if (late_lse != 0)
     {
@@ -2539,8 +2893,7 @@ int main(int argc, char **argv)
         assert(milestones[APP_BOOT_RTC_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 5000U);
         assert(milestones[APP_BOOT_RTC_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 5010U);
     }
-    assert(milestones[APP_BOOT_BT_END_MS] >= milestones[APP_BOOT_FIRST_FRAME_MS] + 1700U);
-    assert(milestones[APP_BOOT_BT_END_MS] < milestones[APP_BOOT_FIRST_FRAME_MS] + 1710U);
+    assert_ble_boot_time();
     assert(milestones[APP_BOOT_CAL_STATE] == MPU6050_CAL_IDLE && restores == 0 && cal_begins == 0 && saves == 0);
     if (fail_devices)
     {

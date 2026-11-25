@@ -2,9 +2,9 @@
 
 在旧波形App上增加“一键升级”：日常仍用BLE连接手表，OTA时APK自动经BLE请求进入保底，再关闭BLE、改用同一模块的SPP地址发送APP BIN。保留原波形、诊断、导出、时间与天气功能。
 
-海拔校准版 `1.95-wave.22-altitude`（版本号 27）增加「用手机定位校准手表海拔」。测试 APK 位于 `work/altitude-20261120/Bluetooth-Wave-Altitude-Test.apk`，使用独立包名 `xnj.lazydog.btcontroller.wave.ota.altitude`，可与上一版并存。
+海拔校准版 `1.95-wave.23-altitude`（版本号 28）提供「用手机定位校准手表海拔」。测试 APK 位于 `work/altitude-20261120/Bluetooth-Wave-Altitude-Test-v28.apk`，使用独立包名 `xnj.lazydog.btcontroller.wave.ota.altitude`，可与正式版并存。
 
-在 Android 8 或更新版本上，允许精确位置、连接手表 BLE、保持手表亮屏并在室外站定，再点校准按钮。手机最多搜寻定位 20 秒，要求水平精度估计不超过 15 m、垂直精度估计不超过 12 m、定位速度不超过 1 m/s。Android 8–13 需要设备输出与定位配对的 NMEA GGA 正高，Android 14 及以上使用系统 MSL 海拔。定位数据通过现有 BLE 通道发送，手表气压页显示 `CALIBRATED / PHONE GPS` 后生效。
+在 Android 8 或更新版本上，允许精确位置、连接手表 BLE、保持手表亮屏并在室外站定，再点校准按钮。手机最多搜寻定位 30 秒：水平精度不超过 15 m 且垂直精度不超过 12 m 时立即发送；若进入中等精度候选区（水平不超过 20 m 且垂直不超过 25 m，或无垂直精度字段时水平不超过 15 m），会继续观察 6 秒尝试收敛，之后择优发送新鲜定位（`age <= 8 s`）。静止时缺少速度字段不再拒绝，仅在存在速度字段且大于 2 m/s 时拦截。Android 8–13 通过单调接收时间优先（并兼容时间戳）配对 NMEA GGA 正高；Android 14 及以上使用系统 MSL 海拔（允许 MSL 精度不超过 28 m，系统无离线大地水准面表时回退已配对的 GGA 正高）。按钮实时显示当前水平/垂直精度，超时后按实际瓶颈提示具体原因。定位数据通过现有 BLE 通道发送，手表气压页显示 `CALIBRATED / PHONE GPS` 后生效。
 
 2026-11-11增加海拔气压参考同步。App沿用手机定位与Open-Meteo天气请求，读取`current.pressure_msl`（hPa），换算为整数Pa后发送独立`BARO,REF,102125\n`帧。连接后自动同步、原按钮手动重发，App同步监视器运行且BLE保持连接时每15分钟刷新。气压字段缺失或无效时仍发送原天气帧；断连会话的异步结果沿用原令牌校验。手表需升级配套`F411-OTA-Baro-Sync.bin`，收到参考后立即重算最近海拔，并继续用于后续采样。气压参考仅在本次开机RAM中保留，重启后连接App重新同步。已知110m作为核对值，网络参考误差与传感器残余误差仍需实板对照。
 

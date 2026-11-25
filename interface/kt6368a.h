@@ -19,6 +19,7 @@ extern "C"
 #define KT6368A_BLE_NAME       "F411-Watch"
 #define KT6368A_RX_BUFFER_SIZE 1024 /* 环形缓冲有效容量1023字节 */
 #define KT6368A_TX_MAX_SIZE    512
+#define KT6368A_DISCHARGE_MS   20   /* 蓝牙重新上电前的放电时间 */
 #define KT6368A_BOOT_DELAY_MS  1200 /* 蓝牙模块上电等待时间 */
 #define KT6368A_AT_TIMEOUT_MS  500
 #define KT6368A_RX_IDLE_MS     200

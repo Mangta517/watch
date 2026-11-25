@@ -64,6 +64,7 @@ uint8_t app_heart_store_service(uint8_t allow_start);
 /* sensor任务：运动模式强制连续测量，停止运动后恢复原手动请求，不发送原始蓝牙波形。 */
 void app_heart_set_sport_mode(uint8_t enabled);
 uint8_t app_heart_sleep_pending(void);
+uint32_t app_heart_sleep_wait_ms(void);
 /* 仅sensor任务在取得新MPU帧后调用；加速度单位为当前MPU配置的LSB。
  * 不读I2C、不跨任务访问；超过50ms未更新时退回原PPG处理。 */
 void app_heart_motion_update(int16_t accel_x, int16_t accel_y, int16_t accel_z, uint32_t sample_ms);

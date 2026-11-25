@@ -230,7 +230,7 @@ void app_reset_capture_stop(uint32_t kind, uint32_t pc, uint32_t task_tag)
     if (s_stopped == 0)
     {
         reset_capture_registers(kind); /* 置停机标记并抓取故障状态寄存器。 */
-        s_current.pc = pc; /* 记录调用方给出的停机地址。 */
+        s_current.pc = pc; /* 记录调用方给出的返回地址或诊断值。 */
         s_current.task_tag = task_tag; /* 记录任务名字节等辅助标记。 */
         reset_store(); /* 提交到备份域，之后由调用方主动复位。 */
     }

@@ -30,9 +30,7 @@ void UsageFault_Handler(void)
  * 以及把 CPU 完整交接到目标镜像复位入口的跳转流程。跳转前先清理本程序启用
  * 的中断与 SysTick，避免切到目标向量后仍跑在旧调度上。 */
 
-/* PA3 供电使能置高保持自锁；WDG_EN 置高屏蔽 TPS3823 复位线，WDI 保持高阻不喂狗
- * （升级期间不跑手表任务，无需喂狗）；BLE_EN 拉低关闭蓝牙；KEY_1 上拉输入用于
- * 长按进保底的判定。 */
+/* SystemInit已保持PA3供电并屏蔽TPS3823复位线，这里配置WDI高阻、BLE_EN关断及KEY_1输入。 */
 void boot_platform_gpio_init(void)
 {
     /* GPIO 配置模板，先整体清零，避免结构体里残留未显式赋值的字段。 */
@@ -40,29 +38,6 @@ void boot_platform_gpio_init(void)
     /* 打开 GPIOA 与 GPIOB 时钟，下面两组端口的寄存器才能写入。 */
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
-    /* 先把 PA3 输出锁存置高，再切成推挽输出，使能后立即保持供电。 */
-    HAL_GPIO_WritePin(POWER_EN_GPIO_Port, POWER_EN_Pin, GPIO_PIN_SET);
-    /* 本轮只配置 PA3 一个引脚。 */
-    gpio.Pin = POWER_EN_Pin;
-    /* PA3 设为推挽输出，用来驱动电源使能。 */
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    /* 推挽驱动高电平维持自锁，关闭内部下拉以免持续分流。 */
-    gpio.Pull = GPIO_NOPULL;
-    /* 电源使能是静态电平，低速档即可。 */
-    gpio.Speed = GPIO_SPEED_FREQ_LOW;
-    /* 按以上字段初始化 PA3。 */
-    HAL_GPIO_Init(POWER_EN_GPIO_Port, &gpio);
-
-    /* 升级不运行手表任务，屏蔽外部看门狗RST，WDI保持高阻。 */
-    /* 先把 WDG_EN 置高，屏蔽 TPS3823 的复位输出。 */
-    HAL_GPIO_WritePin(WDG_EN_GPIO_Port, WDG_EN_Pin, GPIO_PIN_SET);
-    /* 复用模板，改配 WDG_EN 引脚。 */
-    gpio.Pin = WDG_EN_Pin;
-    /* WDG_EN 不需要内部上下拉。 */
-    gpio.Pull = GPIO_NOPULL;
-    /* 保持推挽输出模式，把 WDG_EN 初始化为输出。 */
-    HAL_GPIO_Init(WDG_EN_GPIO_Port, &gpio);
-    /* 同一模板切到 WDI 引脚。 */
     gpio.Pin = WDI_Pin;
     /* WDI 改成输入，呈高阻，不主动喂狗。 */
     gpio.Mode = GPIO_MODE_INPUT;

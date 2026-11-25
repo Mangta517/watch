@@ -7,7 +7,7 @@
   *          1ms 节拍。DWT 只用于补这段区间外的运行开销，不承担睡眠计时。
   *          两段深度不同：Sleep 保留外设时钟、能继续响应串口/EXTI，单次最长约 199ms
   *          （SysTick LOAD 只有 24 位），更长的等待由内核多次进入；STOP 由 RTC 唤醒
-  *          定时器(WUT)唤醒（MPU 的 PB12 临时屏蔽，PA4 等其余 EXTI 保留），醒来后必须
+  *          定时器(WUT)、PA4或已武装的MPU MOT/PB12唤醒，醒来后必须
   *          先恢复 84MHz PLL 再走后面的补时计算。若 RTC 参考不可用，Sleep 改用本次
   *          加长的 SysTick 回退测量经过时间。并非每个 IDLE 轮次都会睡满一个长周期，
   *          实际时长受最近任务截止时间、400ms 上限和 STOP 资格共同收紧；
@@ -18,6 +18,7 @@
 ***/
 #include "app_tickless.h"
 #include "app_task.h"
+#include "app_reset.h"
 #include "watch_rtc.h"
 #include "lcd.h"
 #include "kt6368a.h"
@@ -32,8 +33,21 @@
 /* 保持TPS3823连续计时；400ms上限给最短900ms超时留出运行裕量，普通熄屏还受25ms传感器期限限制。 */
 #define APP_TICKLESS_MAX_TICKS 400
 #define APP_TICKLESS_STOP_MIN_TICKS 5
-/* MPU DATA_RDY接PB12；sensor按任务期限读数据，STOP临时屏蔽PB12无效唤醒。 */
+/* PB12只在MOT已武装时作为STOP唤醒源。 */
 #define APP_TICKLESS_MPU_EXTI_LINE 12
+
+/* STOP故障用TASK记录分支码，PC记录寄存器快照或未截断的RTC差值。 */
+typedef enum
+{
+    APP_TICKLESS_STOP_OK = 0,
+    APP_TICKLESS_STOP_PVDO = 1,
+    APP_TICKLESS_STOP_RTC_SYNC = 3,
+    APP_TICKLESS_STOP_PLL_TIMEOUT = 21,
+    APP_TICKLESS_STOP_VOS_TIMEOUT = 22,
+    APP_TICKLESS_STOP_SWS_TIMEOUT = 23,
+    APP_TICKLESS_STOP_RTC_READ = 41,
+    APP_TICKLESS_STOP_RTC_DELTA = 42
+} app_tickless_stop_tag;
 
 static uint32_t s_rtc_fraction;
 extern __IO uint32_t uwTick;
@@ -50,7 +64,7 @@ static uint8_t app_tickless_stop_allowed(void)
 
 /* STOP醒来后把系统时钟切回84MHz PLL：STOP唤醒后硬件先以HSI运行，RCC配置保留。
  * 全程在关中断上下文执行，用寄存器轮询而不是HAL延时；PLL或切换超时进Error_Handler。 */
-static uint8_t app_tickless_restore_clock(void)
+static app_tickless_stop_tag app_tickless_restore_clock(void)
 {
     /* 轮询计数：按 HSI_VALUE/100 设定重试上限，超时则进入错误处理。 */
     uint32_t retries = HSI_VALUE / 100;
@@ -63,7 +77,7 @@ static uint8_t app_tickless_restore_clock(void)
     {
         if (--retries == 0)
         {
-            return 1;
+            return APP_TICKLESS_STOP_PLL_TIMEOUT;
         }
     }
     /* PLL锁定后还需等待电压调节器达到84MHz所需档位。 */
@@ -72,7 +86,7 @@ static uint8_t app_tickless_restore_clock(void)
     {
         if (--retries == 0)
         {
-            return 1;
+            return APP_TICKLESS_STOP_VOS_TIMEOUT;
         }
     }
     /* 把系统时钟切换源设为 PLL。 */
@@ -84,14 +98,14 @@ static uint8_t app_tickless_restore_clock(void)
     {
         if (--retries == 0)
         {
-            return 1;
+            return APP_TICKLESS_STOP_SWS_TIMEOUT;
         }
     }
     /* 数据同步屏障，确保时钟切换在后续指令前生效。 */
     __DSB();
     /* 指令同步屏障，清空流水线，避免取到切换前的旧状态。 */
     __ISB();
-    return 0;
+    return APP_TICKLESS_STOP_OK;
 }
 
 /* 关中断合并空闲，按RTC实测时间补回HAL/RTOS；最近任务期限与400ms上限共同限制等待。
@@ -200,15 +214,16 @@ void app_tickless_sleep(uint32_t expected_ticks)
 
     /* 记录进入等待前的 DWT 周期戳（仅回退路径会用到）。 */
     resumed_cycle = DWT->CYCCNT;
-    /* STOP 路径：屏蔽 MPU 数据就绪中断后深睡，醒来先恢复 PLL。 */
+    /* STOP期间保留已武装的MOT中断，醒来先恢复PLL再开放中断。 */
     if (use_stop != 0)
     {
-        /* 所有真实STOP都临时屏蔽PB12，PA4/RTC及其它线保留，NVIC使能不动。
-         * 屏蔽前已置位的pending不清，WFI仍可能立即返回。 */
-        /* 保存 EXTI 中断屏蔽寄存器原值，便于醒来精确恢复。 */
+        uint8_t mpu_exti_masked;
         exti_imr_saved = EXTI->IMR;
-        /* 只清 PB12 对应的屏蔽位，其余中断线保持原状。 */
-        EXTI->IMR = exti_imr_saved & ~(1U << APP_TICKLESS_MPU_EXTI_LINE);
+        mpu_exti_masked = (exti_imr_saved & (1U << APP_TICKLESS_MPU_EXTI_LINE)) != 0 && app_task_mpu_mot_armed() == 0;
+        if (mpu_exti_masked != 0)
+        {
+            EXTI->IMR = exti_imr_saved & ~(1U << APP_TICKLESS_MPU_EXTI_LINE);
+        }
         uint8_t debug_enabled = (CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0;
         if (debug_enabled == 0)
         {
@@ -226,27 +241,51 @@ void app_tickless_sleep(uint32_t expected_ticks)
             DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
         }
         /* 仍处于HSI时查询供电；欠压不再切回84MHz，走已有故障记录/复位路径。 */
-        if ((PWR->CSR & PWR_CSR_PVDO) != 0)
+        uint32_t pwr_csr = PWR->CSR;
+        if ((pwr_csr & PWR_CSR_PVDO) != 0)
         {
-            EXTI->IMR = exti_imr_saved;
+            if (mpu_exti_masked != 0)
+            {
+                EXTI->IMR = exti_imr_saved;
+            }
             watch_rtc_stop_wakeup();
+            app_reset_capture_stop(APP_RESET_ERROR_HANDLER, pwr_csr, APP_TICKLESS_STOP_PVDO);
             Error_Handler();
             return;
         }
         /* 醒来后把系统时钟从 HSI 切回 84MHz PLL。 */
-        if (app_tickless_restore_clock() != 0)
+        app_tickless_stop_tag clock_fault = app_tickless_restore_clock();
+        if (clock_fault != APP_TICKLESS_STOP_OK)
         {
-            EXTI->IMR = exti_imr_saved;
+            uint32_t detail = RCC->CR & 0xFFFF0000U;
+            if (clock_fault == APP_TICKLESS_STOP_VOS_TIMEOUT)
+            {
+                detail |= PWR->CSR & 0xFFFF;
+            }
+            else
+            {
+                detail |= RCC->CFGR & 0xFFFF;
+            }
+            if (mpu_exti_masked != 0)
+            {
+                EXTI->IMR = exti_imr_saved;
+            }
             watch_rtc_stop_wakeup();
+            app_reset_capture_stop(APP_RESET_ERROR_HANDLER, detail, clock_fault);
             Error_Handler();
             return;
         }
-        /* 精确恢复原IMR；保留的pending请求在开中断后处理。 */
-        EXTI->IMR = exti_imr_saved;
+        if (mpu_exti_masked != 0)
+        {
+            EXTI->IMR = exti_imr_saved;
+        }
         /* STOP没有独立的运行时钟可补偿；同步失败时记录并复位，不能把未知时长当作0继续运行。 */
         if (watch_rtc_sync_after_stop() != 0)
         {
+            /* 在关闭WUT清除WUTF前保存现场。 */
+            uint32_t detail = ((RCC->BDCR & 0xFFFF) << 16) | (RTC->ISR & 0xFFFF);
             watch_rtc_stop_wakeup();
+            app_reset_capture_stop(APP_RESET_ERROR_HANDLER, detail, APP_TICKLESS_STOP_RTC_SYNC);
             Error_Handler();
             return;
         }
@@ -291,16 +330,28 @@ void app_tickless_sleep(uint32_t expected_ticks)
     if (rtc_start != UINT32_MAX && rtc_end != UINT32_MAX)
     {
         rtc_delta = (rtc_end + WATCH_RTC_COUNTER_MOD - rtc_start) % WATCH_RTC_COUNTER_MOD;
-        /* 允许时钟恢复及调度余量，拒绝影子错读形成的整秒或整分钟跳变。 */
-        if (rtc_delta > (APP_TICKLESS_MAX_TICKS + 10) * WATCH_RTC_SUBSECOND_HZ / configTICK_RATE_HZ)
-        {
-            rtc_delta = UINT32_MAX;
-        }
     }
-    if (use_stop != 0 && rtc_delta == UINT32_MAX)
+    /* 给时钟恢复留余量，同时拒绝无效读数和整秒或整分钟跳变。 */
+    if (rtc_delta > (APP_TICKLESS_MAX_TICKS + 10) * WATCH_RTC_SUBSECOND_HZ / configTICK_RATE_HZ)
     {
-        Error_Handler();
-        return;
+        if (use_stop != 0)
+        {
+            if (rtc_delta == UINT32_MAX)
+            {
+                uint32_t ssr = RTC->SSR;
+                uint32_t tr = RTC->TR;
+                (void)RTC->DR; /* 读日期释放日历影子寄存器锁存。 */
+                uint32_t detail = ((tr & 0xFFFF) << 16) | (ssr & 0xFFFF);
+                app_reset_capture_stop(APP_RESET_ERROR_HANDLER, detail, APP_TICKLESS_STOP_RTC_READ);
+            }
+            else
+            {
+                app_reset_capture_stop(APP_RESET_ERROR_HANDLER, rtc_delta, APP_TICKLESS_STOP_RTC_DELTA);
+            }
+            Error_Handler();
+            return;
+        }
+        rtc_delta = UINT32_MAX;
     }
 
     /* RTC可用时以一分钟内计数为准：两次读数之差按 84MHz / 32768Hz 折算成CPU周期，
@@ -332,12 +383,19 @@ void app_tickless_sleep(uint32_t expected_ticks)
         elapsed_counts = 0;
         if (use_stop == 0)
         {
-            /* 长 SysTick 走过的周期数 = 重装值 - 当前值。 */
-            elapsed_counts = SysTick->LOAD - SysTick->VAL;
-            /* 若期间已产生到期 pending，说明还跨过了一个完整重装周期，补加一整周期。 */
+            remaining = SysTick->VAL;
+            elapsed_counts = SysTick->LOAD - remaining;
             if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
             {
-                elapsed_counts += SysTick->LOAD + 1;
+                /* VAL仍为0时刚到期，下一周期还未装载。 */
+                if (remaining == 0)
+                {
+                    elapsed_counts = SysTick->LOAD + 1;
+                }
+                else
+                {
+                    elapsed_counts += SysTick->LOAD + 1;
+                }
             }
         }
         /* 回退路径没有有效RTC起始采样，使用进入等待前的周期戳作为CPU开销区间分界。 */
@@ -356,8 +414,8 @@ void app_tickless_sleep(uint32_t expected_ticks)
     complete_ticks = elapsed_counts / counts_per_tick;
     /* 余数换算成下一个 tick 还差的周期数，用于收尾装载。 */
     remaining = counts_per_tick - elapsed_counts % counts_per_tick;
-    /* 极短尾段直接进位，避免LOAD=0或新到期tick与软件pending合并。 */
-    if (remaining <= 32)
+    /* 不足约3us的尾段直接进位，给下面装载当前拍和恢复常规LOAD留出时间。 */
+    if (remaining <= 256)
     {
         ++complete_ticks;
         remaining = counts_per_tick;
@@ -377,12 +435,15 @@ void app_tickless_sleep(uint32_t expected_ticks)
     SysTick->VAL = 0;
     /* 按原配置重新使能 SysTick。 */
     SysTick->CTRL = control;
-    __DSB(); /* 确保当前周期先装载短尾段，再恢复标准重装值。 */
+    __DSB();
+    /* 确认当前拍已从LOAD取值，在调用内核前恢复下一拍的1ms重装值。 */
+    while (SysTick->VAL == 0)
+    {
+    }
+    SysTick->LOAD = counts_per_tick - 1;
     /* HAL 毫秒计数一次性补上折算出的完整 tick 数。 */
     uwTick += complete_ticks;
     vTaskStepTick((TickType_t)step_ticks);
-    /* 恢复 1ms 的标准重装值，回到正常节拍。 */
-    SysTick->LOAD = counts_per_tick - 1;
     /* IDLE此时已挂起调度器。到期及超期的节拍记入内核，恢复调度时逐拍处理任务期限。 */
     for (; step_ticks < complete_ticks; ++step_ticks)
     {

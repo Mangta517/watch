@@ -189,8 +189,9 @@ int main(int argc, char **argv)
     }
     else if (stuck_scl != 0)
     {
+        nops = 0;
         assert(my_i2c_read_bytes(selected_bus, 0x68, 0x3A, &value, 1) == 1);
-        assert(value == 0x5A && starts == 0 && scl_reads <= 44 && nops < 10000);
+        assert(value == 0x5A && starts == 0 && scl_reads <= 2 * 28 && nops < 4700);
     }
     else
     {

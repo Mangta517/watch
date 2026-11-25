@@ -195,7 +195,7 @@ int main(int argc, char **argv)
 #if defined(F411_BOOTLOADER)
     assert(nop_count == 3 * 160);
 #else
-    assert(nop_count == 3 * 100);
+    assert(nop_count == 3 * 80);
 #endif
     if (argc > 1 && strcmp(argv[1], "suspend") == 0)
     {

@@ -22,8 +22,9 @@
 #define MY_I2C_SENSOR_SCL_POLLS    16
 #else
 #define MY_I2C_DELAY_LOOPS        67
-#define MY_I2C_SENSOR_DELAY_LOOPS 100
-#define MY_I2C_SENSOR_SCL_POLLS    22
+/* 84MHz ARMCC5忙等，保留标准模式的低相及数据建立时间。 */
+#define MY_I2C_SENSOR_DELAY_LOOPS  80
+#define MY_I2C_SENSOR_SCL_POLLS    28
 #endif
 
 /* ================================================================ 总线表 */

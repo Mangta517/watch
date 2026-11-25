@@ -1,6 +1,6 @@
 /**
  * @file lsm303dlhc.c
- * @brief 独立指南针：磁场±1.3gauss，加速度25Hz/±4g/HR/BDU，页外休眠。
+ * @brief 独立指南针：磁场±2.5gauss，加速度25Hz/±4g/HR/BDU，页外休眠。
  *        SENSOR 总线运行时由 sensor 任务串行访问，ISR 不操作总线。
  *        手册：https://www.st.com/resource/en/datasheet/lsm303dlhc.pdf
  */
@@ -79,14 +79,19 @@ static void mag_read_fault(void)
 
 uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
 {
+    return lsm303dlhc_mag_recover_step_mode(now_ms, 0);
+}
+
+uint8_t lsm303dlhc_mag_recover_step_mode(uint32_t now_ms, uint8_t sleeping)
+{
     /* 依次写入 CRA、CRB、MR_REG：75Hz、增益配置、连续转换模式。 */
-    static const uint8_t config[] = {0x18, 0x20, 0x00};
+    static const uint8_t config[] = {0x18, 0x60, 0x00}; /* GN=011，±2.5gauss。 */
     /* 与 config 一一对应的寄存器号，按 phase 顺序取用。 */
     static const uint8_t regs[] = {MAG_CRA, MAG_CRB, MAG_MODE};
     /* ID_A/ID_B/ID_C 三个识别字节。 */
     uint8_t id[3];
     /* 由阶段号换算出的配置数组下标。 */
-    uint8_t index;
+    uint8_t index, value;
     /* 已就绪时只做健康检查，不再重复配置。 */
     if (s_ready != 0)
     {
@@ -125,8 +130,13 @@ uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
     }
     /* 阶段号减 1 正好映射到 config/regs 的下标。 */
     index = mag_recovery.phase - 1;
+    value = config[index];
+    if (mag_recovery.phase == MAG_RECOVER_MODE && sleeping != 0)
+    {
+        value = 0x03; /* 熄屏重连直接进休眠，避免短暂启动磁场转换。 */
+    }
     /* 写当前阶段的配置字节，失败则进入失败阶段。 */
-    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_MAG_ADDR, regs[index], &config[index], 1) != 0)
+    if (my_i2c_write_bytes(MY_I2C_BUS_SENSOR, LSM303DLHC_MAG_ADDR, regs[index], &value, 1) != 0)
     {
         return mag_recover_failed();
     }
@@ -137,6 +147,11 @@ uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
         mag_recovery.phase = MAG_RECOVER_DONE;
         s_ready = 1;
         mag_recovery.sample_ms = HAL_GetTick();
+        if (value == 0x03)
+        {
+            mag_recovery.sleep_ms = mag_recovery.sample_ms;
+            mag_recovery.sleeping = 1;
+        }
         return 0;
     }
     return 2;
@@ -144,12 +159,17 @@ uint8_t lsm303dlhc_mag_recover_step(uint32_t now_ms)
 
 uint8_t lsm303dlhc_mag_init(void)
 {
+    return lsm303dlhc_mag_init_mode(0);
+}
+
+uint8_t lsm303dlhc_mag_init_mode(uint8_t sleeping)
+{
     /* 每次 step 的返回值：0 成功、1 失败、2 继续。 */
     uint8_t result;
     /* 清状态并从 ID 阶段开始。 */
     lsm303dlhc_mag_recover_begin();
     /* 循环调用 step，直到返回值不再是 2（继续）。 */
-    while ((result = lsm303dlhc_mag_recover_step(HAL_GetTick())) == 2)
+    while ((result = lsm303dlhc_mag_recover_step_mode(HAL_GetTick(), sleeping)) == 2)
     {
     }
     return result;
@@ -289,6 +309,15 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
         /* LOCK表示上次只读了部分输出；排空解锁，不将残留帧重新计为新样本。 */
         return LSM303DLHC_MAG_NOT_READY;
     }
+    if (mag_recovery.discard != 0)
+    {
+        mag_recovery.discard = 0;
+        return LSM303DLHC_MAG_NOT_READY;
+    }
+    /* 饱和仍说明芯片在输出新帧；总线健康计时不把磁场过强当断采。 */
+    mag_recovery.faults = 0;
+    mag_recovery.no_data = 0;
+    mag_recovery.sample_ms = HAL_GetTick();
 
     /* 寄存器为X高/低、Z高/低、Y高/低；快照统一存成X/Y/Z。 */
     sample.raw[0] = (int16_t)(((uint16_t)buf[0] << 8) | buf[1]);
@@ -302,29 +331,21 @@ lsm303dlhc_mag_result lsm303dlhc_mag_read(lsm303dlhc_mag_struct *mag)
         /* 正常输出 -2048..2047；包含 -4096 溢出码在内的异常值不能融合。 */
         if (sample.raw[i] < -2048 || sample.raw[i] > 2047)
         {
-            return LSM303DLHC_MAG_ERROR;
+            return LSM303DLHC_MAG_OVERFLOW;
         }
         /* Z 轴灵敏度与 X/Y 不同，按轴选择换算系数。 */
         if (i == 2)
         {
-            sensitivity = 980.0f;
+            sensitivity = 600.0f;
         }
         else
         {
-            sensitivity = 1100.0f;
+            sensitivity = 670.0f;
         }
         /* 原始值乘 100 再除灵敏度，得到以 uT 为单位的磁场值。 */
         sample.field_uT[i] = sample.raw[i] * 100.0f / sensitivity;
     }
-    if (mag_recovery.discard != 0)
-    {
-        mag_recovery.discard = 0;
-        return LSM303DLHC_MAG_NOT_READY;
-    }
     /* 只有整帧读取和转换成功才发布，失败时保留调用方的上一帧。 */
-    mag_recovery.faults = 0;
-    mag_recovery.no_data = 0;
-    mag_recovery.sample_ms = HAL_GetTick();
     *mag = sample;
     return LSM303DLHC_MAG_OK;
 }

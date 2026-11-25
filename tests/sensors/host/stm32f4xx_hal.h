@@ -156,6 +156,7 @@ uint32_t __get_PRIMASK(void);
 void __disable_irq(void);
 void __set_PRIMASK(uint32_t mask);
 void HAL_Delay(uint32_t ms);
+void HAL_SuspendTick(void);
 uint32_t HAL_GetTick(void);
 void NVIC_SystemReset(void);
 void __DMB(void);

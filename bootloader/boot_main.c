@@ -42,7 +42,7 @@ int main(void)
     /* 保存 app_boot_select_target 选出的镜像起址，0 表示没有可跳转的镜像。 */
     uint32_t target;
 
-    /* 先配置 PA3 供电使能、看门狗屏蔽线、BLE_EN 输出和 KEY_1 输入。 */
+    /* 配置WDI、BLE_EN和保底入口按键。 */
     boot_platform_gpio_init();
     /* 初始化 HAL 与 1ms SysTick，供 HAL_Delay/HAL_GetTick 使用。 */
     HAL_Init();

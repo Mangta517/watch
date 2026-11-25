@@ -248,8 +248,8 @@
               </IRAM>
               <IROM>
                 <Type>1</Type>
-                <StartAddress>0x08010000</StartAddress>
-                <Size>0x00050000</Size>
+                <StartAddress>0x8010000</StartAddress>
+                <Size>0x50000</Size>
               </IROM>
               <XRAM>
                 <Type>0</Type>
@@ -2309,6 +2309,11 @@
               <FileName>common_imu.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\common\common_imu.c</FilePath>
+            </File>
+            <File>
+              <FileName>common_mag_cal.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\common\common_mag_cal.c</FilePath>
             </File>
             <File>
               <FileName>common_activity.c</FileName>

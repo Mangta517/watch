@@ -28,7 +28,7 @@ static uint8_t mutex_locked, allocation_failed, flash_locked = 1, irq_mask;
 static uint8_t tps_enabled, erase_failed, unlock_failed, corrupt_write;
 static int program_remaining = -1;
 static unsigned programs, erases, cache_resets;
-static unsigned watchdog_feeds;
+static unsigned watchdog_feeds, reset_prepares;
 static app_battery_struct battery = {3900, 0, HAL_OK, 1, 70};
 static jmp_buf reset_target;
 static uint8_t reset_expected;
@@ -118,6 +118,11 @@ void host_cache_reset(void)
 {
     assert((FLASH->ACR & FLASH_ACR_DCEN) == 0);
     ++cache_resets;
+}
+void app_task_prepare_reset(void)
+{
+    assert(mutex_locked && !irq_mask && erases == 0);
+    ++reset_prepares;
 }
 void tps3823_enable(void)
 {
@@ -465,7 +470,7 @@ static void clear_tests(void)
     app_battery_log_service(60);
     command("BATLOG,CLEAR\n");
     pump(1);
-    assert(tx_active && erases == 0 && !tps_enabled);
+    assert(tx_active && erases == 0 && !tps_enabled && reset_prepares == 0);
     tx_done = 1;
     tick += 100;
     app_battery_log_ble_service(1, tick);
@@ -482,7 +487,7 @@ static void clear_tests(void)
         pump(1);
         assert(0);
     }
-    assert(erases == 1);
+    assert(erases == 1 && reset_prepares == 1);
     assert(erase_reported == (erase_failed == 1));
     for (uint32_t address = 0x08000000; address < BATTERY_LOG_START_ADDR; ++address)
     {

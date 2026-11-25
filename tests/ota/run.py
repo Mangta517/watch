@@ -34,7 +34,7 @@ harness = r'''
 #include <string.h>
 #include "app_ota.c"
 static uint8_t eeprom[256], error, tx_busy, tx_done;
-static unsigned writes, reads, sends, resets, critical;
+static unsigned writes, reads, sends, resets, critical, reset_prepares;
 static const uint8_t *pending_data;
 static char message[128];
 void host_enter(void)
@@ -102,9 +102,14 @@ HAL_StatusTypeDef kt6368a_write_async(const uint8_t *data, uint16_t size, uint32
     ++sends;
     return HAL_OK;
 }
+void app_task_prepare_reset(void)
+{
+    assert(critical == 0 && reset_prepares == 0);
+    ++reset_prepares;
+}
 void NVIC_SystemReset(void)
 {
-    assert(critical == 0);
+    assert(critical == 0 && reset_prepares == 1);
     ++resets;
 }
 static void init(void)
@@ -112,7 +117,7 @@ static void init(void)
     memset(&s_ota, 0, sizeof(s_ota));
     memset(eeprom, 0x3C, sizeof(eeprom));
     s_store_state = OTA_STORE_IDLE;
-    writes = reads = sends = resets = 0;
+    writes = reads = sends = resets = reset_prepares = 0;
     error = tx_busy = tx_done = 0;
 }
 static void feed(const char *text, uint32_t now)
@@ -154,7 +159,7 @@ int main(void)
     app_ota_service(0, 40);
     assert(app_ota_storage_service(1) == 1 && writes == 1);
     app_ota_service(0, 539);
-    assert(resets == 0);
+    assert(resets == 0 && reset_prepares == 0);
     app_ota_service(0, 540);
     assert(resets == 1);
     for (unsigned failure = 1; failure <= 3; ++failure)
@@ -171,7 +176,7 @@ int main(void)
     assert(app_ota_storage_service(1) == 1);
     app_ota_service(0, UINT32_MAX - 10);
     app_ota_service(0, 1988);
-    assert(resets == 0);
+    assert(resets == 0 && reset_prepares == 0);
     app_ota_service(0, 1989);
     assert(resets == 1 && sends == 0);
     puts("PASS: fragmented commands, loss reset, EEPROM ownership/readback/errors, stable async reply, disconnect and tick wrap");

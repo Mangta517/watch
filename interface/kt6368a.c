@@ -363,7 +363,7 @@ HAL_StatusTypeDef kt6368a_power_on(void)
         return HAL_OK;
     }
     /* 先保持断电20ms，让模块电源充分放电后再上电。 */
-    HAL_Delay(20);
+    HAL_Delay(KT6368A_DISCHARGE_MS);
     /* 执行实际的上电与接收启动。 */
     status = kt6368a_power_enable();
     if (status == HAL_OK)
@@ -863,7 +863,7 @@ HAL_StatusTypeDef kt6368a_init_service(void)
     }
     if (s_start.phase == KT_START_DISCHARGE)
     {
-        if ((uint32_t)(now - s_start.phase_ms) >= 20)
+        if ((uint32_t)(now - s_start.phase_ms) >= KT6368A_DISCHARGE_MS)
         {
             /* 断电放电已满20ms：执行上电与接收启动。 */
             status = kt6368a_power_enable();

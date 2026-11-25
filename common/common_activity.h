@@ -17,13 +17,20 @@ typedef struct
     uint32_t peak_ms;
     uint32_t last_step_ms;
     float mag_prev1, mag_prev2, fast_mag, peak_g, trough_g;
+    float baseline_g, recent_swing_g;
     float motion_min[3], motion_max[3], direction[3];
     uint32_t quiet_since_ms, direction_ms, turn_ms, step_interval_ms;
+    uint32_t previous_interval_ms;
     uint32_t down_since_ms, view_since_ms;
+    uint32_t mot_resume_ms;
     uint8_t have_sample, peak_pending, walking_run;
     uint8_t still, turn_active, walking_confirmed, confirmation_steps;
     uint8_t down_active, view_active, wrist_armed;
+    uint8_t wrist_mot_window;
 } common_activity_struct;
+
+uint8_t common_activity_is_mot_ready(const common_activity_struct *state, uint32_t now_ms, uint32_t hold_ms);
+void common_activity_resume_from_mot(common_activity_struct *state, uint32_t now_ms);
 
 /* 状态从零初始化；加速度单位g。仅消费新帧，100Hz来源须先低通并按平均25ms送入。 */
 void common_activity_update(common_activity_struct *state, float ax, float ay, float az, uint32_t sample_ms);

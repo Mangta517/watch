@@ -3,6 +3,7 @@
 #include "task.h"
 #include "watch_rtc.h"
 #include "app_tickless.h"
+#include "app_reset.h"
 #include "tps3823.h"
 #include "platform_delay.h"
 #include <assert.h>
@@ -11,6 +12,7 @@
 
 static jmp_buf fault_target;
 static uint8_t fault_expected;
+static uint32_t reset_tag, reset_pc;
 
 SysTick_Type host_systick;
 SCB_Type host_scb;
@@ -18,7 +20,9 @@ Host_Cycle_Type host_cycles;
 Host_Debug_Type host_debug;
 Host_Peripheral_Type host_tim2, host_tim3, host_rcc, host_spi, host_dma, host_adc, host_gpio, host_exti;
 Host_Peripheral_Type host_pwr;
-static uint8_t stop_low_voltage;
+Host_Rtc_Type host_rtc;
+static uint8_t stop_low_voltage, sleep_expiry_before_reload;
+static uint8_t pll_lock_failed, sysclk_switch_failed;
 #define HOST_COUNTS_PER_TICK (configCPU_CLOCK_HZ / configTICK_RATE_HZ)
 static uint32_t rtc_read_cycles;
 static uint64_t rtc_cpu_fraction;
@@ -26,7 +30,7 @@ volatile uint32_t uwTick;
 static uint32_t kernel_tick, pending_ticks, rtc_count, sleep_rtc_counts, step_limit;
 static uint32_t requested_load, sleeps, read_calls;
 static uint8_t irq_masked, abort_sleep, rtc_ready, rtc_fail_read, normal_tick, deadline_tick, pending_on_read;
-static uint8_t screen_off, wakeup_armed, wakeup_failed, sync_failed;
+static uint8_t screen_off, wakeup_armed, wakeup_failed, sync_failed, mot_armed;
 static uint32_t stops, wakeup_counts, restore_counts;
 static uint32_t stop_exti_imr; /* 记录进入STOP瞬间的EXTI->IMR，验证只屏蔽PB12。 */
 static uint8_t stop_exti_seen;
@@ -49,6 +53,11 @@ static volatile uint8_t s_lcd_flush_active;
 uint8_t app_task_is_screen_off(void)
 {
     return screen_off;
+}
+
+uint8_t app_task_mpu_mot_armed(void)
+{
+    return mot_armed;
 }
 
 uint32_t host_get_primask(void)
@@ -124,6 +133,7 @@ void watch_rtc_stop_wakeup(void)
 {
     assert(irq_masked && wakeup_armed);
     wakeup_armed = 0;
+    RTC->ISR &= ~RTC_ISR_WUTF;
 }
 
 uint8_t watch_rtc_sync_after_stop(void)
@@ -142,14 +152,26 @@ void host_modify_reg(uint32_t *reg, uint32_t mask, uint32_t value)
 {
     assert(irq_masked && reg == &RCC->CFGR && (RCC->CR & RCC_CR_PLLON) != 0);
     assert((PWR->CSR & PWR_CSR_VOSRDY) != 0);
-    *reg = (*reg & ~mask) | value | RCC_CFGR_SWS_PLL;
+    *reg = (*reg & ~mask) | value;
+    if (sysclk_switch_failed == 0)
+    {
+        *reg |= RCC_CFGR_SWS_PLL;
+    }
+}
+
+void app_reset_capture_stop(uint32_t kind, uint32_t pc, uint32_t task_tag)
+{
+    assert(fault_expected && irq_masked && !wakeup_armed);
+    assert(kind == APP_RESET_ERROR_HANDLER && reset_tag == 0 && task_tag != 0);
+    reset_tag = task_tag;
+    reset_pc = pc;
 }
 
 void Error_Handler(void)
 {
     if (fault_expected != 0)
     {
-        assert(irq_masked && !wakeup_armed);
+        assert(irq_masked && !wakeup_armed && reset_tag != 0);
         watchdog_advance(0);
         longjmp(fault_target, 1);
     }
@@ -199,7 +221,11 @@ void HAL_PWR_EnterSTOPMode(uint32_t regulator, uint8_t entry)
     }
     rtc_count += sleep_rtc_counts;
     RCC->CFGR = 0; /* STOP唤醒先使用HSI，硬件随后允许PLL重新锁定。 */
-    RCC->CR = RCC_CR_PLLRDY;
+    RCC->CR = 0;
+    if (pll_lock_failed == 0)
+    {
+        RCC->CR = RCC_CR_PLLRDY;
+    }
 }
 
 void host_disable_irq(void)
@@ -214,6 +240,12 @@ void host_enable_irq(void)
     assert(!wakeup_armed && (RCC->CFGR & RCC_CFGR_SWS) == RCC_CFGR_SWS_PLL);
     watchdog_advance(0);
     irq_masked = 0;
+    if (mot_armed != 0 && (EXTI->PR & EXTI->IMR & (1U << 12)) != 0)
+    {
+        EXTI->PR &= ~(1U << 12);
+        EXTI->IMR &= ~(1U << 12); /* 模拟PB12的one-shot ISR。 */
+        mot_armed = 0;
+    }
     /* 模拟pending的普通tick；UART/DMA回调只能在补时完成后观察时间。 */
     if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0)
     {
@@ -277,7 +309,7 @@ eSleepModeStatus eTaskConfirmSleepModeStatus(void)
 void vTaskStepTick(TickType_t ticks)
 {
     assert(irq_masked && ticks < step_limit);
-    host_barrier(); /* 硬件在函数执行期间已装载补齐当前tick的短LOAD。 */
+    assert(SysTick->VAL != 0 && SysTick->LOAD == HOST_COUNTS_PER_TICK - 1);
     kernel_tick += ticks;
 }
 
@@ -306,7 +338,14 @@ void host_sleep(void)
     elapsed_cycles = (uint32_t)((uint64_t)sleep_rtc_counts * configCPU_CLOCK_HZ / WATCH_RTC_SUBSECOND_HZ);
     if (elapsed_cycles >= requested_load + 1U)
     {
-        SysTick->VAL = 2U * (requested_load + 1U) - elapsed_cycles - 1U;
+        if (sleep_expiry_before_reload != 0)
+        {
+            SysTick->VAL = 0;
+        }
+        else
+        {
+            SysTick->VAL = 2U * (requested_load + 1U) - elapsed_cycles - 1U;
+        }
         SCB->ICSR = SCB_ICSR_PENDSTSET_Msk;
     }
     else
@@ -336,9 +375,12 @@ static void reset(uint32_t phase_cycles)
     rtc_ready = 1;
     rtc_read_cycles = 0;
     rtc_cpu_fraction = 0;
-    screen_off = wakeup_armed = wakeup_failed = sync_failed = 0;
-    stop_low_voltage = 0;
+    screen_off = wakeup_armed = wakeup_failed = sync_failed = mot_armed = 0;
+    stop_low_voltage = sleep_expiry_before_reload = 0;
+    pll_lock_failed = sysclk_switch_failed = 0;
+    reset_tag = reset_pc = 0;
     PWR->CSR = PWR_CSR_VOSRDY;
+    host_rtc = (Host_Rtc_Type){0};
     s_lcd_bus_suspended = 1;
     s_lcd_flush_active = 0;
     stops = wakeup_counts = restore_counts = 0;
@@ -360,6 +402,19 @@ static void reset(uint32_t phase_cycles)
     assert(wd_falling_edges == 1 && wd_gate == GPIO_PIN_RESET && wd_mode == GPIO_MODE_OUTPUT_PP);
 }
 
+static void expect_stop_fault(uint32_t expected_ticks, uint32_t task_tag, uint32_t pc)
+{
+    fault_expected = 1;
+    if (setjmp(fault_target) == 0)
+    {
+        app_tickless_sleep(expected_ticks);
+        assert(0 && "STOP fault must reset");
+    }
+    fault_expected = 0;
+    assert(reset_tag == task_tag && reset_pc == pc);
+    irq_masked = 0; /* 模拟复位重新初始化CPU状态。 */
+}
+
 int main(void)
 {
     uint32_t i, previous_tick, elapsed_total;
@@ -368,6 +423,11 @@ int main(void)
     app_tickless_sleep(20U);
     assert(sleeps == 1U && kernel_tick == 10U && SysTick->LOAD == (HOST_COUNTS_PER_TICK - 1U) && !irq_masked);
     assert(requested_load == 20U * HOST_COUNTS_PER_TICK - 1U);
+
+    reset(HOST_COUNTS_PER_TICK - 100);
+    sleep_rtc_counts = 0;
+    app_tickless_sleep(20);
+    assert(kernel_tick == 1 && uwTick == 1 && SysTick->VAL == HOST_COUNTS_PER_TICK - 1);
 
     reset((HOST_COUNTS_PER_TICK / 2U));
     sleep_rtc_counts = 16U; /* 0.5ms原tick相位 + 0.488ms睡眠，不凭空补整tick。 */
@@ -423,6 +483,13 @@ int main(void)
     sleep_rtc_counts = 656U;
     app_tickless_sleep(20U);
     assert(kernel_tick == 20U);
+
+    reset(0);
+    rtc_fail_read = 3;
+    sleep_rtc_counts = 656;
+    sleep_expiry_before_reload = 1;
+    app_tickless_sleep(20);
+    assert(kernel_tick == 20 && uwTick == 20);
 
     reset(0);
     sleep_rtc_counts = 6000;
@@ -552,29 +619,25 @@ int main(void)
     screen_off = 1;
     stop_low_voltage = 1;
     sleep_rtc_counts = 328;
-    fault_expected = 1;
-    if (setjmp(fault_target) == 0)
-    {
-        app_tickless_sleep(1000);
-        assert(0 && "low supply must reject PLL restoration");
-    }
-    fault_expected = 0;
+    expect_stop_fault(1000, 1, PWR_CSR_PVDO);
     assert(stops == 1 && wd_falling_edges == 1);
     assert((RCC->CR & RCC_CR_PLLON) == 0 && (RCC->CFGR & RCC_CFGR_SWS) == 0);
-    irq_masked = 0;
     puts("PASS: STOP undervoltage retains watchdog monitoring, cancels wakeup and enters the fault path before restarting PLL.");
 
     reset(0);
     screen_off = 1;
-    PWR->CSR = 0;
-    fault_expected = 1;
-    if (setjmp(fault_target) == 0)
-    {
-        app_tickless_sleep(20);
-        assert(0 && "VOSRDY must be set before switching to PLL");
-    }
-    fault_expected = 0;
-    irq_masked = 0;
+    pll_lock_failed = 1;
+    expect_stop_fault(20, 21, RCC_CR_PLLON);
+
+    reset(0);
+    screen_off = 1;
+    PWR->CSR = 1; /* WUF置位，VOSRDY仍为0。 */
+    expect_stop_fault(20, 22, RCC_CR_PLLON | RCC_CR_PLLRDY | 1);
+
+    reset(0);
+    screen_off = 1;
+    sysclk_switch_failed = 1;
+    expect_stop_fault(20, 23, RCC_CR_PLLON | RCC_CR_PLLRDY | RCC_CFGR_SW_PLL);
 
     reset(0);
     screen_off = 1;
@@ -633,15 +696,8 @@ int main(void)
     reset(0);
     screen_off = 1;
     sleep_rtc_counts = WATCH_RTC_COUNTER_MOD - 10;
-    fault_expected = 1;
-    if (setjmp(fault_target) == 0)
-    {
-        app_tickless_sleep(20);
-        assert(0 && "corrupt RTC delta must not become elapsed time");
-    }
-    fault_expected = 0;
+    expect_stop_fault(20, 42, WATCH_RTC_COUNTER_MOD - 10);
     assert(kernel_tick == 0 && TIM2->CNT == 0);
-    irq_masked = 0;
 
     for (i = 0; i < 7U; ++i)
     {
@@ -722,32 +778,23 @@ int main(void)
     reset(0);
     screen_off = 1;
     sync_failed = 1;
+    RCC->BDCR = 0x8103;
+    RTC->ISR = RTC_ISR_WUTF | 0x10; /* WUTF和INITS置位，RSF仍为0。 */
     host_exti.IMR = (1U << 4) | (1U << 12);
     stop_mpu_event = 1;
     sleep_rtc_counts = 328U;
-    fault_expected = 1;
-    if (setjmp(fault_target) == 0)
-    {
-        app_tickless_sleep(20U);
-        assert(0 && "STOP synchronization failure must reset instead of losing elapsed time");
-    }
-    fault_expected = 0;
+    expect_stop_fault(20, 3, 0x81030410U);
     assert(stops == 1 && !wakeup_armed && !rtc_ready);
     assert(host_exti.IMR == ((1U << 4) | (1U << 12)) && host_exti.PR == (1U << 12));
-    irq_masked = 0; /* 模拟复位重新初始化CPU状态。 */
 
     reset(0);
     screen_off = 1;
     rtc_fail_read = 3;
+    RTC->TR = 0x00124523;
+    RTC->SSR = 0x1234;
     sleep_rtc_counts = 328;
-    fault_expected = 1;
-    if (setjmp(fault_target) == 0)
-    {
-        app_tickless_sleep(20);
-        assert(0 && "STOP counter loss after successful synchronization must reset");
-    }
-    fault_expected = 0;
-    irq_masked = 0;
+    expect_stop_fault(20, 41, 0x45231234);
+    puts("PASS: all seven STOP fault tags and snapshots are recorded before software reset.");
 
     /* 400ms上限STOP：进入STOP时屏蔽PB12、保留PA4及其他线，退出后精确恢复原mask。 */
     reset(0);
@@ -762,7 +809,7 @@ int main(void)
     assert((stop_exti_imr & (1U << 0)) != 0 && (stop_exti_imr & 0x80000000U) != 0); /* 其他线不受影响。 */
     assert(host_exti.IMR == ((1U << 4) | (1U << 12) | (1U << 0) | 0x80000000U)); /* 退出后精确恢复。 */
 
-    /* 所有真实STOP都屏蔽PB12：5/10/100/200/400ms下STOP期间新到一次DATA_RDY事件，
+    /* 普通轮询时屏蔽PB12：5/10/100/200/400ms下STOP期间新到一次DATA_RDY事件，
      * STOP仍须等到RTC期限，不会被该事件立即唤醒。 */
     {
         const uint32_t periods[] = {5, 10, 100, 200, 400};
@@ -788,6 +835,16 @@ int main(void)
             assert(host_exti.PR == (1U << 12)); /* 恢复mask不清掉STOP期间锁存的EXTI请求。 */
         }
     }
+
+    reset(0);
+    screen_off = mot_armed = stop_mpu_event = 1;
+    host_exti.IMR = (1U << 4) | (1U << 12);
+    sleep_rtc_counts = 13074;
+    step_limit = 401;
+    app_tickless_sleep(400);
+    assert(stops == 1 && stop_exti_early != 0 && kernel_tick < 5);
+    assert(stop_exti_imr == ((1U << 4) | (1U << 12)) && host_exti.IMR == (1U << 4));
+    assert(!mot_armed && host_exti.PR == 0);
 
     /* 屏蔽期间PA4等外部中断仍可提前唤醒，且提前退出同样精确恢复原mask。 */
     reset(0);
@@ -878,7 +935,7 @@ int main(void)
     irq_masked = 0;
     puts("PASS: all long requests cap at 400ms across RTC wrap; external watchdog model resets at 900ms with stalled tasks or a dead LSE and no wake interrupt.");
     puts("PASS: STOP wake/clock-before-ISR, RTC and diagnostic time, catch-up past deadlines, BLE/PWM/SPI/DMA/ADC veto, WUT and shadow-sync fallback.");
-    puts("PASS: every real STOP masks the MPU PB12 EXTI (keeps PA4 and other lines) and restores the exact original IMR on normal and early wake.");
+    puts("PASS: STOP masks PB12 only for polling; MOT wakes early, then one-shot masking takes effect after clock recovery.");
     puts("PASS: 5/10/100/200/400ms STOP blocks a new DATA_RDY event during STOP, keeps its EXTI PR pending, and still ends at the RTC deadline; preexisting NVIC pending is not blocked.");
     return 0;
 }

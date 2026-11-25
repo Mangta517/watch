@@ -49,6 +49,49 @@ HAL_StatusTypeDef battery_adc_read_raw(uint32_t timeout_ms, uint16_t *raw, uint3
     abort();
 }
 
+/* 电池源文件也包含硬件保护。UI测试只调用标定函数，进入关机路径即失败。 */
+typedef struct
+{
+    uint32_t unused;
+} GPIO_TypeDef;
+GPIO_TypeDef host_gpio_a;
+
+void HAL_Delay(uint32_t ms)
+{
+    (void)ms;
+    abort();
+}
+
+void __disable_irq(void)
+{
+    abort();
+}
+
+void tps3823_disable(void)
+{
+    abort();
+}
+
+void HAL_SuspendTick(void)
+{
+    abort();
+}
+
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
+{
+    (void)port;
+    (void)pin;
+    (void)state;
+    abort();
+}
+
+void HAL_PWR_EnterSLEEPMode(uint32_t regulator, uint8_t entry)
+{
+    (void)regulator;
+    (void)entry;
+    abort();
+}
+
 static app_ble_snapshot_struct host_ble_snapshot(void)
 {
     app_ble_snapshot_struct snapshot;
@@ -164,6 +207,7 @@ static uint8_t host_mag_online = 1;
 static uint8_t host_mag_calibrated;
 static float host_yaw = 725.2f;
 static float host_compass_deg = 354.8f;
+static float host_mag_declination_deg;
 static float host_altitude = -0.5f;
 static app_mag_cal_state host_mag_cal_state;
 static app_compass_state host_compass_state = APP_COMPASS_READY;
@@ -576,6 +620,7 @@ uint8_t App_IMU_GetSnapshot(app_imu_struct *imu)
     imu->wrist_raise_sequence = host_wrist_sequence;
     imu->wrist_raise_ms = host_wrist_ms;
     imu->compass_deg = host_compass_deg;
+    imu->mag_declination_deg = host_mag_declination_deg;
     imu->compass_valid = host_mag_online && host_mag_cal_state != APP_MAG_CAL_RUNNING && host_compass_state == APP_COMPASS_READY;
     imu->mag_online = host_mag_online;
     imu->mag_calibrated = host_mag_calibrated;
@@ -594,6 +639,7 @@ uint8_t App_IMU_GetSnapshot(app_imu_struct *imu)
         imu->compass_state = host_compass_state;
     }
     imu->mag_cal_samples = 120;
+    imu->mag_cal_coverage_pct = 77;
     imu->mag_cal_span_uT[0] = 80;
     imu->mag_cal_span_uT[1] = 100;
     imu->mag_cal_span_uT[2] = 120;
@@ -2614,7 +2660,7 @@ int main(int argc, char **argv)
     }
     assert(host_mag_cal_state == APP_MAG_CAL_RUNNING);
     assert(strcmp(lv_label_get_text(s_view.motion.cal_label), "FINISH CALIBRATION") == 0);
-    assert(strstr(lv_label_get_text(s_view.motion.cal_status), "COLLECTING: 120") != NULL);
+    assert(strstr(lv_label_get_text(s_view.motion.cal_status), "COLLECTING: 120 (COV 77%)") != NULL);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "CALIBRATING") == 0);
     screenshot("motion_calibrating");
     {
@@ -2721,6 +2767,10 @@ int main(int argc, char **argv)
     host_compass_state = APP_COMPASS_FIELD_RANGE;
     advance(120);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "FIELD RANGE") == 0);
+    host_compass_state = APP_COMPASS_INTERFERENCE;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "MAG INTERFERENCE") == 0);
+    assert(s_view.motion.compass_heading == -1);
     host_compass_state = APP_COMPASS_HORIZONTAL_WEAK;
     advance(120);
     assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "HORIZ <5uT") == 0);
@@ -2729,6 +2779,10 @@ int main(int argc, char **argv)
     assert(strstr(lv_label_get_text(s_view.motion.cal_status), "CAL FAILED: 120") != NULL);
     host_mag_cal_state = APP_MAG_CAL_DONE;
     host_compass_state = APP_COMPASS_READY;
+    host_mag_declination_deg = -2.0f;
+    advance(120);
+    assert(strcmp(lv_label_get_text(s_view.motion.compass_status), "TRUE NORTH") == 0);
+    host_mag_declination_deg = 0.0f;
     advance(120);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
     advance(30);

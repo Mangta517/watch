@@ -24,7 +24,7 @@ static GPIO_TypeDef host_gpio_c, host_gpio_h;
 #include "../../Core/Src/gpio.c"
 #define __HAL_RCC_SYSCFG_CLK_ENABLE() ((void)0)
 #define __HAL_RCC_PWR_CLK_ENABLE() ((void)0)
-#define PWR_PVDLEVEL_7 7
+#define PWR_PVDLEVEL_6 6
 #define PWR_PVD_MODE_NORMAL 0
 typedef struct
 {
@@ -33,7 +33,7 @@ typedef struct
 static unsigned pvd_configured, pvd_enabled;
 static void HAL_PWR_ConfigPVD(PWR_PVDTypeDef *pvd)
 {
-    assert(pvd->PVDLevel == PWR_PVDLEVEL_7 && pvd->Mode == PWR_PVD_MODE_NORMAL);
+    assert(pvd->PVDLevel == PWR_PVDLEVEL_6 && pvd->Mode == PWR_PVD_MODE_NORMAL);
     ++pvd_configured;
 }
 static void HAL_PWR_EnablePVD(void)

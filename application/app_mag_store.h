@@ -1,16 +1,16 @@
 /**
  * @file app_mag_store.h
- * @brief 磁力计校准记录：三轴偏置(μT)和比例系数；EEPROM 0x00/0x30两槽各48字节。
+ * @brief 磁力计校准记录；EEPROM 0x00/0x30两槽各48字节。
  */
 #ifndef __APP_MAG_STORE_H
 #define __APP_MAG_STORE_H
 
-#include <stdint.h>
+#include "common_mag_cal.h"
 
 typedef struct
 {
-    float offset_uT[3];
-    float scale[3];
+    common_mag_cal_params_struct params;
+    uint8_t is_ellipsoid; /* MAG1的校正模长未归一到50μT。 */
 } app_mag_calibration_struct;
 
 typedef enum

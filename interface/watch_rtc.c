@@ -3,6 +3,9 @@
 
 #define WATCH_RTC_INITIALIZED 0x52544330
 #define WATCH_RTC_SYNCED      0x52544331
+#define WATCH_RTC_MIDNIGHT_WINDOW_MIN 5
+
+static const uint16_t rtc_days_before_month[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365};
 
 static RTC_HandleTypeDef watch_rtc;
 static uint8_t rtc_ready;
@@ -185,6 +188,80 @@ static HAL_StatusTypeDef watch_rtc_read_calendar(RTC_TimeTypeDef *time, RTC_Date
     return HAL_ERROR;
 }
 
+static uint8_t watch_rtc_month_length(uint8_t year, uint8_t month)
+{
+    /* RTC覆盖2000..2099，2000年为闰年。 */
+    return rtc_days_before_month[month] - rtc_days_before_month[month - 1] + (month == 2 && year % 4 == 0);
+}
+
+static uint8_t watch_rtc_valid_date(const RTC_DateTypeDef *date)
+{
+    return date->Year <= 99 && date->Month >= 1 && date->Month <= 12 &&
+           date->Date >= 1 && date->Date <= watch_rtc_month_length(date->Year, date->Month);
+}
+
+/* 旧手机只发时分秒。只在午夜两侧的短窗口内推断一天的偏移。 */
+static void watch_rtc_correct_midnight(uint8_t hours, uint8_t minutes)
+{
+    RTC_TimeTypeDef previous;
+    RTC_DateTypeDef date;
+    uint32_t control;
+    uint8_t new_day = hours == 0 && minutes < WATCH_RTC_MIDNIGHT_WINDOW_MIN;
+    uint8_t old_day = hours == 23 && minutes >= 60 - WATCH_RTC_MIDNIGHT_WINDOW_MIN;
+
+    if ((!new_day && !old_day) || HAL_RTCEx_BKUPRead(&watch_rtc, RTC_BKP_DR0) != WATCH_RTC_SYNCED)
+    {
+        return;
+    }
+    /* INITF已停止日历计数，直读当前值，避免使用午夜前的影子快照。 */
+    control = RTC->CR;
+    RTC->CR = control | RTC_CR_BYPSHAD;
+    HAL_StatusTypeDef status = HAL_RTC_GetTime(&watch_rtc, &previous, RTC_FORMAT_BIN);
+    HAL_StatusTypeDef date_status = HAL_RTC_GetDate(&watch_rtc, &date, RTC_FORMAT_BIN);
+    RTC->CR = control;
+    if (status != HAL_OK || date_status != HAL_OK || !watch_rtc_valid_date(&date) || date.WeekDay < 1 || date.WeekDay > 7)
+    {
+        return;
+    }
+    if (new_day && previous.Hours == 23 && previous.Minutes >= 60 - WATCH_RTC_MIDNIGHT_WINDOW_MIN)
+    {
+        if (++date.Date > watch_rtc_month_length(date.Year, date.Month))
+        {
+            date.Date = 1;
+            if (++date.Month > 12)
+            {
+                date.Month = 1;
+                date.Year = (date.Year + 1) % 100;
+            }
+        }
+        date.WeekDay = date.WeekDay % 7 + 1;
+    }
+    else if (old_day && previous.Hours == 0 && previous.Minutes < WATCH_RTC_MIDNIGHT_WINDOW_MIN)
+    {
+        if (date.Year == 0 && date.Month == 1 && date.Date == 1)
+        {
+            return; /* 冷启动日历没有前一天。 */
+        }
+        if (--date.Date == 0)
+        {
+            if (--date.Month == 0)
+            {
+                date.Month = 12;
+                --date.Year;
+            }
+            date.Date = watch_rtc_month_length(date.Year, date.Month);
+        }
+        date.WeekDay = (date.WeekDay + 5) % 7 + 1;
+    }
+    else
+    {
+        return;
+    }
+    RTC->DR = ((uint32_t)(date.Year / 10) << 20) | ((uint32_t)(date.Year % 10) << 16) |
+              ((uint32_t)date.WeekDay << RTC_DR_WDU_Pos) | ((uint32_t)(date.Month / 10) << 12) |
+              ((uint32_t)(date.Month % 10) << RTC_DR_MU_Pos) | ((uint32_t)(date.Date / 10) << 4) | (date.Date % 10);
+}
+
 uint8_t watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t seconds)
 {
     /* time_bcd 按 RTC_TR 的 BCD 字段排布拼出的 32bit 时间寄存器值 */
@@ -213,6 +290,7 @@ uint8_t watch_rtc_set_time(uint8_t hours, uint8_t minutes, uint8_t seconds)
     /* 进入初始化模式成功才写入新的时间值 */
     if (result == 0)
     {
+        watch_rtc_correct_midnight(hours, minutes);
         /* 直接写 TR 寄存器，time_bcd 已按 BCD 字段排好 */
         RTC->TR = time_bcd;
         /* 清 BKP 位，与 HAL 的 StoreOperation=RESET 语义一致 */
@@ -287,11 +365,9 @@ uint8_t watch_rtc_is_synced(void)
 
 uint8_t watch_rtc_get_day_key(uint16_t *day_key)
 {
-    static const uint16_t month_days[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365};
     RTC_TimeTypeDef time = {0};
     RTC_DateTypeDef date = {0};
-    uint16_t days, month_length;
-    uint8_t leap;
+    uint16_t days;
     if (day_key == NULL || watch_rtc_is_synced() == 0 || __HAL_RCC_GET_FLAG(RCC_FLAG_LSERDY) == 0)
     {
         return 1;
@@ -300,24 +376,14 @@ uint8_t watch_rtc_get_day_key(uint16_t *day_key)
     {
         return 1;
     }
-    if (date.Year > 99 || date.Month < 1 || date.Month > 12 || time.Hours > 23 || time.Minutes > 59 || time.Seconds > 59)
+    if (!watch_rtc_valid_date(&date) || time.Hours > 23 || time.Minutes > 59 || time.Seconds > 59)
     {
         return 1;
     }
-    leap = date.Year % 4 == 0; /* RTC覆盖2000..2099，2000年为闰年。 */
-    month_length = month_days[date.Month] - month_days[date.Month - 1];
-    if (date.Month == 2)
+    days = date.Year * 365 + (date.Year + 3) / 4 + rtc_days_before_month[date.Month - 1] + date.Date;
+    if (date.Month > 2 && date.Year % 4 == 0)
     {
-        month_length += leap;
-    }
-    if (date.Date < 1 || date.Date > month_length)
-    {
-        return 1;
-    }
-    days = date.Year * 365 + (date.Year + 3) / 4 + month_days[date.Month - 1] + date.Date;
-    if (date.Month > 2)
-    {
-        days += leap;
+        ++days;
     }
     *day_key = days;
     return 0;

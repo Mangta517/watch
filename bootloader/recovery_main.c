@@ -80,7 +80,7 @@ void int_bootloader_jump_to_app(void)
 
 int main(void)
 {
-    /* 先配置 PA3 供电、看门狗屏蔽、BLE_EN 和 KEY_1 输入。 */
+    /* 配置WDI、BLE_EN和KEY_1。 */
     boot_platform_gpio_init();
     /* 进入保底后再次将 VTOR 设为自身起址，在 HAL 初始化启动 SysTick 前
      * 确认后续异常使用保底向量表。 */
